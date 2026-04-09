@@ -149,6 +149,14 @@ export const importExcelModelStream = (
   })
 }
 
+// Sheet data Excel export/import
+export const exportSheetExcelUrl = (sheetId: string) => `${BASE}/excel/sheets/${sheetId}/export`
+export const importSheetExcel = (sheetId: string, file: File) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return fetch(`${BASE}/excel/sheets/${sheetId}/import`, { method: 'PUT', body: fd }).then(r => json<any>(r))
+}
+
 // Excel
 export const exportExcelUrl = (analyticId: string) => `${BASE}/excel/analytics/${analyticId}/export`
 export const importExcel = (analyticId: string, file: File) => {

@@ -5,6 +5,8 @@ import {
   Select, MenuItem,
 } from '@mui/material'
 import FormatListNumberedOutlined from '@mui/icons-material/FormatListNumberedOutlined'
+import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
+import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import DragIndicatorOutlined from '@mui/icons-material/DragIndicatorOutlined'
 import PushPinOutlined from '@mui/icons-material/PushPinOutlined'
 import * as Icons from '@mui/icons-material'
@@ -793,6 +795,25 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         <Tooltip title="Порядок аналитик">
           <IconButton size="small" onClick={() => setSettingsOpen(true)}>
             <FormatListNumberedOutlined fontSize="small" />
+          </IconButton>
+        </Tooltip>
+
+        <Tooltip title="Выгрузить в Excel">
+          <IconButton size="small" onClick={() => window.open(api.exportSheetExcelUrl(sheetId), '_blank')}>
+            <FileDownloadOutlined fontSize="small" />
+          </IconButton>
+        </Tooltip>
+
+        <Tooltip title="Загрузить из Excel">
+          <IconButton size="small" component="label">
+            <FileUploadOutlined fontSize="small" />
+            <input type="file" hidden accept=".xlsx" onChange={async e => {
+              const f = e.target.files?.[0]
+              if (!f) return
+              await api.importSheetExcel(sheetId, f)
+              e.target.value = ''
+              load()
+            }} />
           </IconButton>
         </Tooltip>
 

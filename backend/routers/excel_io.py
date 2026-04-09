@@ -4,6 +4,7 @@ import io
 from fastapi import APIRouter, UploadFile, File
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
 from backend.db import get_db
 
 router = APIRouter(prefix="/api/excel", tags=["excel"])
@@ -130,3 +131,221 @@ async def import_analytic_records(analytic_id: str, file: UploadFile = File(...)
         (analytic_id,),
     )
     return [dict(r) for r in records]
+
+
+# ── Sheet data export/import ───────────────────────────────────────────────
+
+def _build_record_tree(records):
+    """Build ordered list with hierarchy info: [(record, data, level, has_children)]"""
+    by_parent = {}
+    for r in records:
+        pid = r["parent_id"] or "__root__"
+        by_parent.setdefault(pid, []).append(r)
+    child_ids = set()
+    for kids in by_parent.values():
+        for k in kids:
+            child_ids.add(k["id"])
+
+    result = []
+    def walk(pid, level):
+        for r in by_parent.get(pid, []):
+            data = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
+            has_children = r["id"] in by_parent
+            result.append((r, data, level, has_children))
+            walk(r["id"], level + 1)
+    walk("__root__", 0)
+    return result
+
+
+@router.get("/sheets/{sheet_id}/export")
+async def export_sheet_data(sheet_id: str):
+    """Export sheet data as Excel: rows = indicators, cols = periods."""
+    db = get_db()
+
+    sheet = await db.execute_fetchall("SELECT * FROM sheets WHERE id = ?", (sheet_id,))
+    if not sheet:
+        return {"error": "sheet not found"}
+    sheet_name = sheet[0]["name"]
+
+    # Get bound analytics in order
+    bindings = await db.execute_fetchall(
+        """SELECT sa.analytic_id, a.name, a.is_periods
+           FROM sheet_analytics sa JOIN analytics a ON a.id = sa.analytic_id
+           WHERE sa.sheet_id = ? ORDER BY sa.sort_order""",
+        (sheet_id,),
+    )
+    if len(bindings) < 2:
+        return {"error": "sheet needs at least 2 analytics"}
+
+    # First analytic = columns (periods), rest = rows
+    col_analytic_id = bindings[0]["analytic_id"]
+    row_analytic_ids = [b["analytic_id"] for b in bindings[1:]]
+
+    # Load period records (columns) — leaf nodes only
+    col_records = await db.execute_fetchall(
+        "SELECT * FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+        (col_analytic_id,),
+    )
+    col_tree = _build_record_tree([dict(r) for r in col_records])
+    # Only leaf periods (months)
+    col_leaves = [(r, d) for r, d, lvl, has_ch in col_tree if not has_ch]
+
+    # Load row records
+    all_row_records = []
+    for ra_id in row_analytic_ids:
+        recs = await db.execute_fetchall(
+            "SELECT * FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+            (ra_id,),
+        )
+        all_row_records.extend([dict(r) for r in recs])
+    row_tree = _build_record_tree(all_row_records)
+
+    # Load cells
+    cells_raw = await db.execute_fetchall(
+        "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (sheet_id,),
+    )
+    cells = {c["coord_key"]: c["value"] for c in cells_raw}
+
+    # Build Excel
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name[:31]
+
+    # Header row: empty + period names
+    header = ["Показатель"]
+    for _, d in col_leaves:
+        header.append(d.get("name", ""))
+    ws.append(header)
+    # Bold header
+    for c in range(1, len(header) + 1):
+        ws.cell(1, c).font = Font(bold=True)
+
+    # Data rows
+    col_rids = [r["id"] for r, _ in col_leaves]
+    for rec, data, level, has_children in row_tree:
+        name = data.get("name", "")
+        if level > 0:
+            name = "  " * level + name
+        row = [name]
+        for col_rid in col_rids:
+            coord_key = f"{col_rid}|{rec['id']}"
+            val = cells.get(coord_key, "")
+            # Try to convert to number
+            try:
+                row.append(float(val))
+            except (ValueError, TypeError):
+                row.append(val)
+        ws.append(row)
+        # Bold groups
+        if has_children:
+            ws.cell(ws.max_row, 1).font = Font(bold=True)
+
+    # Auto-width for first column
+    ws.column_dimensions['A'].width = 40
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{sheet_name}.xlsx"'},
+    )
+
+
+@router.put("/sheets/{sheet_id}/import")
+async def import_sheet_data(sheet_id: str, file: UploadFile = File(...)):
+    """Import cell values from Excel back into the sheet. Matches by row name and column period."""
+    db = get_db()
+
+    # Get bound analytics
+    bindings = await db.execute_fetchall(
+        "SELECT sa.analytic_id FROM sheet_analytics sa WHERE sa.sheet_id = ? ORDER BY sa.sort_order",
+        (sheet_id,),
+    )
+    if len(bindings) < 2:
+        return {"error": "sheet needs at least 2 analytics"}
+
+    col_analytic_id = bindings[0]["analytic_id"]
+    row_analytic_ids = [b["analytic_id"] for b in bindings[1:]]
+
+    # Build period name -> record_id map (leaf nodes)
+    col_records = await db.execute_fetchall(
+        "SELECT * FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+        (col_analytic_id,),
+    )
+    col_tree = _build_record_tree([dict(r) for r in col_records])
+    col_leaves = [(r, d) for r, d, lvl, has_ch in col_tree if not has_ch]
+
+    # Build row name -> record_id map
+    all_row_records = []
+    for ra_id in row_analytic_ids:
+        recs = await db.execute_fetchall(
+            "SELECT * FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+            (ra_id,),
+        )
+        all_row_records.extend([dict(r) for r in recs])
+
+    row_name_to_id = {}
+    for r in all_row_records:
+        data = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
+        name = data.get("name", "").strip()
+        if name:
+            row_name_to_id[name] = r["id"]
+
+    # Read Excel
+    content = await file.read()
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb.active
+
+    # Header = period names
+    header = [ws.cell(1, c).value for c in range(2, ws.max_column + 1)]
+    # Map header names to period record IDs
+    col_name_to_rid = {}
+    for rec, data in col_leaves:
+        col_name_to_rid[data.get("name", "")] = rec["id"]
+
+    col_rids = []
+    for h in header:
+        col_rids.append(col_name_to_rid.get(str(h).strip(), None) if h else None)
+
+    # Read data rows
+    updated = 0
+    for row_idx in range(2, ws.max_row + 1):
+        row_name = ws.cell(row_idx, 1).value
+        if row_name is None:
+            continue
+        row_name = str(row_name).strip()
+        row_rid = row_name_to_id.get(row_name)
+        if not row_rid:
+            continue
+
+        for col_idx, col_rid in enumerate(col_rids):
+            if col_rid is None:
+                continue
+            val = ws.cell(row_idx, col_idx + 2).value
+            if val is None:
+                continue
+            coord_key = f"{col_rid}|{row_rid}"
+            value_str = str(val)
+
+            existing = await db.execute_fetchall(
+                "SELECT id FROM cell_data WHERE sheet_id = ? AND coord_key = ?",
+                (sheet_id, coord_key),
+            )
+            if existing:
+                await db.execute(
+                    "UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?",
+                    (value_str, sheet_id, coord_key),
+                )
+            else:
+                cid = str(uuid.uuid4())
+                await db.execute(
+                    "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
+                    (cid, sheet_id, coord_key, value_str, "sum", "manual", ""),
+                )
+            updated += 1
+
+    await db.commit()
+    return {"updated": updated}
