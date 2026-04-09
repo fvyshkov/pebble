@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import {
   IconButton, Tooltip, Badge, Select, MenuItem, FormControl,
   Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, CircularProgress,
-  ToggleButton, ToggleButtonGroup,
+  ToggleButton, ToggleButtonGroup, Typography, Box,
 } from '@mui/material'
 import SaveOutlined from '@mui/icons-material/SaveOutlined'
 import SettingsOutlined from '@mui/icons-material/SettingsOutlined'
@@ -48,66 +48,101 @@ function ImportDialog({ open, onClose, onImported }: {
   const [file, setFile] = useState<File | null>(null)
   const [modelName, setModelName] = useState('')
   const [loading, setLoading] = useState(false)
+  const [log, setLog] = useState<string[]>([])
+  const [done, setDone] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const logRef = useRef<HTMLDivElement>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
     if (f) {
       setFile(f)
-      if (!modelName) {
-        setModelName(f.name.replace(/\.xlsx?$/i, ''))
-      }
+      if (!modelName) setModelName(f.name.replace(/\.xlsx?$/i, ''))
     }
   }
 
   const handleImport = async () => {
     if (!file || !modelName) return
     setLoading(true)
+    setLog([])
+    setDone(false)
     try {
-      const result = await api.importExcelModel(file, modelName)
-      onImported(result.model_id)
-      onClose()
-      setFile(null)
-      setModelName('')
+      const result = await api.importExcelModelStream(file, modelName, (msg, data) => {
+        setLog(prev => [...prev, msg])
+        setTimeout(() => logRef.current?.scrollTo(0, logRef.current.scrollHeight), 50)
+        if (data?.done) {
+          setDone(true)
+          onImported(data.model_id)
+        }
+      })
     } catch (err) {
-      alert('Ошибка импорта: ' + (err as Error).message)
+      setLog(prev => [...prev, `❌ Ошибка: ${(err as Error).message}`])
     } finally {
       setLoading(false)
     }
   }
 
+  const handleClose = () => {
+    if (loading) return
+    onClose()
+    setFile(null)
+    setModelName('')
+    setLog([])
+    setDone(false)
+  }
+
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
       <DialogTitle>Импорт модели из Excel</DialogTitle>
       <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
         <input
-          ref={fileRef}
-          type="file"
-          accept=".xlsx,.xls"
-          style={{ display: 'none' }}
-          onChange={handleFileChange}
+          ref={fileRef} type="file" accept=".xlsx,.xls"
+          style={{ display: 'none' }} onChange={handleFileChange}
         />
-        <Button variant="outlined" onClick={() => fileRef.current?.click()}>
+        <Button variant="outlined" onClick={() => fileRef.current?.click()} disabled={loading}>
           {file ? file.name : 'Выбрать файл (.xlsx)'}
         </Button>
         <TextField
-          label="Название модели"
-          value={modelName}
+          label="Название модели" value={modelName}
           onChange={e => setModelName(e.target.value)}
-          fullWidth
-          size="small"
+          fullWidth size="small" disabled={loading}
         />
+        {log.length > 0 && (
+          <Box
+            ref={logRef}
+            sx={{
+              maxHeight: 260, overflow: 'auto', bgcolor: '#f8f9fa', borderRadius: 1,
+              p: 1.5, fontFamily: 'monospace', fontSize: 12, lineHeight: 1.6,
+              border: '1px solid #e0e0e0',
+            }}
+          >
+            {log.map((line, i) => (
+              <div key={i} style={{ color: line.startsWith('❌') ? '#c62828' : line.startsWith('✅') ? '#2e7d32' : '#333' }}>
+                {line}
+              </div>
+            ))}
+            {loading && !done && (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, color: '#1976d2' }}>
+                <CircularProgress size={12} /> <span>работаю...</span>
+              </Box>
+            )}
+          </Box>
+        )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>Отмена</Button>
-        <Button
-          variant="contained"
-          disabled={!file || !modelName || loading}
-          onClick={handleImport}
-          startIcon={loading ? <CircularProgress size={16} /> : undefined}
-        >
-          {loading ? 'Импорт...' : 'Импортировать'}
+        <Button onClick={handleClose} disabled={loading}>
+          {done ? 'Закрыть' : 'Отмена'}
         </Button>
+        {!done && (
+          <Button
+            variant="contained"
+            disabled={!file || !modelName || loading}
+            onClick={handleImport}
+            startIcon={loading ? <CircularProgress size={16} /> : undefined}
+          >
+            {loading ? 'Импорт...' : 'Импортировать'}
+          </Button>
+        )}
       </DialogActions>
     </Dialog>
   )

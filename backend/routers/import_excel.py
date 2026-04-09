@@ -18,6 +18,7 @@ from datetime import datetime, date
 from calendar import monthrange
 
 from fastapi import APIRouter, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from backend.db import get_db
@@ -586,6 +587,220 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         "periods": len(month_record_ids),
         "period_hierarchy": period_types,
     }
+
+
+# ── Streaming import endpoint (SSE) ───────────────────────────────────────
+
+@router.post("/excel-stream")
+async def import_excel_stream(file: UploadFile = File(...), model_name: str = Form("Imported Model")):
+    content = await file.read()
+
+    async def generate():
+        def event(msg: str, data: dict | None = None):
+            payload = json.dumps({"message": msg, **(data or {})}, ensure_ascii=False)
+            return f"data: {payload}\n\n"
+
+        db = get_db()
+
+        # Unique name
+        existing = await db.execute_fetchall("SELECT id FROM models WHERE name = ?", (model_name,))
+        if existing:
+            model_name_final = f"{model_name} ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
+        else:
+            model_name_final = model_name
+
+        yield event(f"Загрузка файла Excel...")
+
+        wb_formulas = load_workbook(io.BytesIO(content))
+        wb_data = load_workbook(io.BytesIO(content), data_only=True)
+        sheet_names = wb_formulas.sheetnames
+
+        yield event(f"Найдено {len(sheet_names)} листов: {', '.join(sheet_names)}")
+
+        # Extract text and dates
+        sheet_texts = {}
+        all_dates = []
+        for sn in sheet_names:
+            ws = wb_formulas[sn]
+            sheet_texts[sn] = _extract_sheet_text(ws, sn)
+            for r in range(1, 7):
+                for c in range(1, min((ws.max_column or 1) + 1, 200)):
+                    v = ws.cell(r, c).value
+                    if isinstance(v, datetime):
+                        all_dates.append(datetime(v.year, v.month, 1))
+
+        yield event("Анализ структуры с помощью Claude AI...")
+
+        # Analyze with Claude (per-sheet with progress)
+        try:
+            client = _get_claude_client()
+            if all_dates:
+                min_d = min(all_dates)
+                max_d = max(all_dates)
+                p_start = f"{min_d.year}-{min_d.month:02d}-01"
+                end_m = max_d.month
+                end_y = max_d.year
+                end_day = monthrange(end_y, end_m)[1]
+                p_end = f"{end_y}-{end_m:02d}-{end_day:02d}"
+            else:
+                p_start, p_end = "2026-01-01", "2028-12-31"
+
+            period_config = {"period_types": ["year", "quarter", "month"], "start": p_start, "end": p_end}
+            sheets_config = []
+
+            for i, sn in enumerate(sheet_names):
+                yield event(f"🔍 Анализ листа «{sn}» ({i+1}/{len(sheet_names)})...")
+                try:
+                    sheet_cfg = await _analyze_sheet_with_claude(client, sheet_texts[sn])
+                    sheet_cfg["excel_name"] = sn
+                    ind_count = len(sheet_cfg.get("indicators", []))
+                    ch_count = sum(len(x.get("children", [])) for x in sheet_cfg.get("indicators", []))
+                    yield event(f"   ✓ «{sn}»: {ind_count} групп, {ch_count} показателей")
+                    sheets_config.append(sheet_cfg)
+                except Exception as e:
+                    yield event(f"   ⚠ «{sn}»: ошибка анализа — {e}")
+
+            analysis = {"period_config": period_config, "sheets": sheets_config}
+        except Exception as e:
+            yield event(f"⚠ Claude API недоступен, используем эвристики: {e}")
+            analysis = _fallback_heuristic_analysis(wb_formulas)
+
+        period_config = analysis["period_config"]
+        sheets_config = analysis["sheets"]
+
+        # Create model
+        model_id = str(uuid.uuid4())
+        await db.execute(
+            "INSERT INTO models (id, name, description) VALUES (?, ?, ?)",
+            (model_id, model_name_final, "Импортировано из Excel"),
+        )
+        yield event(f"Создана модель «{model_name_final}»")
+
+        # Period analytic
+        period_types = period_config.get("period_types", ["year", "quarter", "month"])
+        period_start = period_config.get("start", "2026-01-01")
+        period_end = period_config.get("end", "2028-12-31")
+
+        period_analytic_id = str(uuid.uuid4())
+        await db.execute(
+            """INSERT INTO analytics (id, model_id, name, code, icon, is_periods, data_type,
+               period_types, period_start, period_end, sort_order)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (period_analytic_id, model_id, "Периоды", "periods", "CalendarMonthOutlined",
+             1, "sum", json.dumps(period_types), period_start, period_end, 0),
+        )
+        for sort_i, (fname, fcode, ftype) in enumerate([
+            ("Наименование", "name", "string"),
+            ("Начало", "start", "date"),
+            ("Окончание", "end", "date"),
+        ]):
+            await db.execute(
+                "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
+                (str(uuid.uuid4()), period_analytic_id, fname, fcode, ftype, sort_i),
+            )
+
+        start_d = date.fromisoformat(period_start)
+        end_d = date.fromisoformat(period_end)
+        month_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
+        yield event(f"Создана иерархия периодов: {period_start} — {period_end} ({len(month_record_ids)} месяцев)")
+
+        # Process sheets
+        created_sheets = []
+        analytic_sort = 1
+        total_cells = 0
+
+        for sheet_cfg in sheets_config:
+            excel_name = sheet_cfg["excel_name"]
+            display_name = sheet_cfg.get("display_name", excel_name)
+            indicators = sheet_cfg.get("indicators", [])
+
+            if excel_name not in wb_formulas.sheetnames or not indicators:
+                continue
+
+            ws_f = wb_formulas[excel_name]
+            ws_d = wb_data[excel_name]
+
+            yield event(f"📋 Создаю лист «{display_name}»...")
+
+            indicator_analytic_id = str(uuid.uuid4())
+            await db.execute(
+                """INSERT INTO analytics (id, model_id, name, code, icon, data_type, sort_order)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (indicator_analytic_id, model_id, f"Показатели ({excel_name})",
+                 f"indicators_{excel_name.lower().replace('.', '_').replace('+', '_')}",
+                 "ListAltOutlined", "sum", analytic_sort),
+            )
+            analytic_sort += 1
+
+            for sort_i, (fname, fcode, ftype) in enumerate([
+                ("Наименование", "name", "string"),
+                ("Единица измерения", "unit", "string"),
+            ]):
+                await db.execute(
+                    "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), indicator_analytic_id, fname, fcode, ftype, sort_i),
+                )
+
+            row_to_rid = await _create_indicator_records(db, indicator_analytic_id, indicators)
+
+            pebble_sheet_id = str(uuid.uuid4())
+            await db.execute("INSERT INTO sheets (id, model_id, name) VALUES (?,?,?)",
+                             (pebble_sheet_id, model_id, display_name))
+
+            for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
+                await db.execute(
+                    "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order) VALUES (?,?,?,?)",
+                    (str(uuid.uuid4()), pebble_sheet_id, aid, bind_idx),
+                )
+
+            users = await db.execute_fetchall("SELECT id FROM users")
+            for u in users:
+                try:
+                    await db.execute(
+                        "INSERT INTO sheet_permissions (id, sheet_id, user_id, can_view, can_edit) VALUES (?,?,?,1,1)",
+                        (str(uuid.uuid4()), pebble_sheet_id, u["id"]),
+                    )
+                except Exception:
+                    pass
+
+            # Import cells
+            sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200))
+            col_to_period_rid = {}
+            for sp in sheet_periods:
+                d = sp["date"]
+                if isinstance(d, datetime):
+                    key = f"{d.year}-{d.month:02d}"
+                    if key in month_record_ids:
+                        col_to_period_rid[sp["col"]] = month_record_ids[key]
+
+            cell_count = 0
+            for row_num, indicator_rid in row_to_rid.items():
+                for col_num, period_rid in col_to_period_rid.items():
+                    val = ws_d.cell(row_num, col_num).value
+                    if val is None:
+                        continue
+                    cell_fmt = ws_f.cell(row_num, col_num)
+                    is_input = _is_input_cell(cell_fmt)
+                    is_formula = str(cell_fmt.value).startswith("=") if cell_fmt.value else False
+                    rule = "manual" if is_input else "formula" if is_formula else "manual"
+                    try:
+                        await db.execute(
+                            "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
+                            (str(uuid.uuid4()), pebble_sheet_id, f"{period_rid}|{indicator_rid}", str(val), "sum", rule, ""),
+                        )
+                        cell_count += 1
+                    except Exception:
+                        pass
+
+            total_cells += cell_count
+            created_sheets.append({"name": display_name, "id": pebble_sheet_id, "cells": cell_count})
+            yield event(f"   ✓ «{display_name}»: {len(row_to_rid)} показателей, {cell_count} ячеек")
+
+        await db.commit()
+        yield event(f"✅ Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
+                     {"done": True, "model_id": model_id, "model_name": model_name_final})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ── Fallback heuristic analysis (when Claude API unavailable) ──────────────

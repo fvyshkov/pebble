@@ -111,6 +111,44 @@ export const importExcelModel = (file: File, modelName: string) => {
   return fetch(`${BASE}/import/excel`, { method: 'POST', body: fd }).then(r => json<any>(r))
 }
 
+// Import model from Excel with streaming progress
+export const importExcelModelStream = (
+  file: File, modelName: string,
+  onMessage: (msg: string, data?: any) => void,
+): Promise<any> => {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('model_name', modelName)
+  return new Promise((resolve, reject) => {
+    fetch(`${BASE}/import/excel-stream`, { method: 'POST', body: fd })
+      .then(async res => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+        const reader = res.body!.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let lastData: any = null
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const parsed = JSON.parse(line.slice(6))
+                onMessage(parsed.message, parsed)
+                if (parsed.done) lastData = parsed
+              } catch {}
+            }
+          }
+        }
+        resolve(lastData)
+      })
+      .catch(reject)
+  })
+}
+
 // Excel
 export const exportExcelUrl = (analyticId: string) => `${BASE}/excel/analytics/${analyticId}/export`
 export const importExcel = (analyticId: string, file: File) => {
