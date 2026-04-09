@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import {
   Box, Typography, IconButton, TextField, Table, TableHead, TableBody,
-  TableRow, TableCell, Button, Tooltip,
+  TableRow, TableCell, Button, Tooltip, Checkbox,
 } from '@mui/material'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
@@ -43,6 +43,11 @@ export default function UsersDialog({ open, onClose }: Props) {
     alert('Пароль изменён')
   }
 
+  const handleToggleAdmin = async (id: string, current: boolean) => {
+    await api.setAdmin(id, !current)
+    load()
+  }
+
   return (
     <Box sx={{
       position: 'fixed', inset: 0, zIndex: 1300, bgcolor: '#fff',
@@ -52,7 +57,7 @@ export default function UsersDialog({ open, onClose }: Props) {
         <Typography variant="h6" sx={{ flex: 1 }}>Пользователи</Typography>
         <IconButton size="small" onClick={onClose}><CloseOutlined fontSize="small" /></IconButton>
       </Box>
-      <Box sx={{ flex: 1, overflow: 'auto', p: 2, maxWidth: 600 }}>
+      <Box sx={{ flex: 1, overflow: 'auto', p: 2, maxWidth: 700 }}>
         <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
           <TextField
             size="small" placeholder="Имя пользователя" value={newName}
@@ -69,6 +74,7 @@ export default function UsersDialog({ open, onClose }: Props) {
           <TableHead>
             <TableRow>
               <TableCell>Имя</TableCell>
+              <TableCell align="center">Админ</TableCell>
               <TableCell>Создан</TableCell>
               <TableCell width={100}></TableCell>
             </TableRow>
@@ -77,6 +83,12 @@ export default function UsersDialog({ open, onClose }: Props) {
             {users.map(u => (
               <TableRow key={u.id} hover>
                 <TableCell>{u.username}</TableCell>
+                <TableCell align="center">
+                  <Checkbox
+                    size="small" checked={!!u.can_admin}
+                    onChange={() => handleToggleAdmin(u.id, !!u.can_admin)}
+                  />
+                </TableCell>
                 <TableCell>{u.created_at?.slice(0, 10)}</TableCell>
                 <TableCell>
                   <Box sx={{ display: 'flex', gap: 0.5 }}>
@@ -95,7 +107,7 @@ export default function UsersDialog({ open, onClose }: Props) {
               </TableRow>
             ))}
             {users.length === 0 && (
-              <TableRow><TableCell colSpan={3}><Typography variant="body2" color="textSecondary">Нет пользователей</Typography></TableCell></TableRow>
+              <TableRow><TableCell colSpan={4}><Typography variant="body2" color="textSecondary">Нет пользователей</Typography></TableCell></TableRow>
             )}
           </TableBody>
         </Table>

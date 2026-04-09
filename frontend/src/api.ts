@@ -94,6 +94,8 @@ export const deleteUser = (id: string) =>
   fetch(`${BASE}/users/${id}`, { method: 'DELETE' }).then(r => json<any>(r))
 export const resetPassword = (id: string, password: string) =>
   fetch(`${BASE}/users/${id}/reset-password`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) }).then(r => json<any>(r))
+export const setAdmin = (id: string, canAdmin: boolean) =>
+  fetch(`${BASE}/users/${id}/admin`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ can_admin: canAdmin }) }).then(r => json<any>(r))
 export const getSheetPermissions = (sheetId: string) =>
   fetch(`${BASE}/users/permissions/by-sheet/${sheetId}`).then(r => json<any[]>(r))
 export const setSheetPermission = (sheetId: string, data: { user_id: string; can_view: boolean; can_edit: boolean }) =>

@@ -46,6 +46,18 @@ async def delete_user(user_id: str):
     return {"ok": True}
 
 
+class AdminIn(BaseModel):
+    can_admin: bool
+
+
+@router.put("/{user_id}/admin")
+async def set_admin(user_id: str, body: AdminIn):
+    db = get_db()
+    await db.execute("UPDATE users SET can_admin = ? WHERE id = ?", (int(body.can_admin), user_id))
+    await db.commit()
+    return {"ok": True}
+
+
 class PasswordIn(BaseModel):
     password: str
 
