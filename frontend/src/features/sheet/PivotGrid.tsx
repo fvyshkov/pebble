@@ -88,7 +88,7 @@ function PivotCell({ value, onChange, dataType, editable, forceEdit, onStopEdit 
     return (
       <div style={{
         padding: '4px 6px', fontSize: 13, textAlign: dataType === 'string' ? 'left' : 'right',
-        background: '#fdf8e8', color: '#666', minHeight: 24, userSelect: 'none',
+        background: '#fff', color: '#666', minHeight: 24, userSelect: 'none',
       }}>
         {fmtDisplay(value, dataType)}
       </div>
@@ -103,7 +103,7 @@ function PivotCell({ value, onChange, dataType, editable, forceEdit, onStopEdit 
         onDoubleClick={() => setEditing(true)}
         style={{
           padding: '4px 6px', fontSize: 13, textAlign: dataType === 'string' ? 'left' : 'right',
-          cursor: 'text', minHeight: 24, background: '#fff',
+          cursor: 'text', minHeight: 24, background: '#fdf8e8',
         }}
       >
         {fmtDisplay(value, dataType) || '\u00A0'}
@@ -857,7 +857,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                 {displayCols.map((dc, ci) => (
                   <th key={`${dc.node.record.id}-${dc.isSum ? 's' : 'l'}`} style={{
                     border: '1px solid #e0e0e0', padding: '4px 8px',
-                    background: dc.isSum ? '#fdf8e8' : '#f5f5f5',
+                    background: dc.isSum ? '#f5f5f5' : '#f5f5f5',
                     textAlign: 'center', whiteSpace: 'nowrap', minWidth: 90,
                     fontWeight: dc.isSum ? 700 : 400,
                   }}>
@@ -939,7 +939,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     return (
                       <td key={`${col.node.record.id}-s`} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
-                        textAlign: 'right', color: '#555', background: selBg || '#fdf8e8', fontSize: 13,
+                        textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
                         fontWeight: 600,
                       }}>
                         {has ? fmtDisplay(String(sum), dataType) : ''}
@@ -986,7 +986,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
-                        textAlign: 'right', color: '#555', background: selBg || '#fdf8e8', fontSize: 13,
+                        textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
                       }} title={fText ? `ƒ ${fText}` : 'Формула не задана'}>
                         {result !== null ? fmtDisplay(String(result), dataType) : ''}
                       </td>
@@ -999,7 +999,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
-                        textAlign: 'right', color: '#666', background: selBg || '#fdf8e8', fontSize: 13,
+                        textAlign: 'right', color: '#666', background: selBg || '#fff', fontSize: 13,
                       }}>
                         {agg !== null ? fmtDisplay(String(agg), dataType) : ''}
                       </td>
@@ -1010,7 +1010,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
-                        background: selBg || '#fdf8e8', color: '#666', fontSize: 13,
+                        background: selBg || '#fff', color: '#666', fontSize: 13,
                       }}>{cells[coordKey] ?? ''}</td>
                     )
                   }

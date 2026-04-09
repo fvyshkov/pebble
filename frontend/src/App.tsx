@@ -6,7 +6,6 @@ import PeopleOutlined from '@mui/icons-material/PeopleOutlined'
 import type { TreeSelection } from './types'
 import LeftPanel from './panels/LeftPanel'
 import CenterPanel from './panels/CenterPanel'
-import RightPanel from './panels/RightPanel'
 import Splitter from './components/Splitter'
 import UsersDialog from './components/UsersDialog'
 import PivotGrid from './features/sheet/PivotGrid'
@@ -41,7 +40,6 @@ function AppInner() {
   const [showPivot, setShowPivot] = useState(false)
   const [showUsers, setShowUsers] = useState(false)
   const [expandAfterCreate, setExpandAfterCreate] = useState<any>(null)
-  const [rightWidth, setRightWidth] = useState(240)
   const [users, setUsers] = useState<any[]>([])
   const [currentUserId, setCurrentUserId] = useState('')
 
@@ -61,7 +59,6 @@ function AppInner() {
   }, [])
 
   const isSheetSelected = selection?.type === 'sheet'
-  const showRight = isSheetSelected
 
   return (
     <PendingProvider onFlushed={onRefresh}>
@@ -107,14 +104,6 @@ function AppInner() {
           </div>
           <Splitter onResize={d => setLeftWidth(w => Math.max(180, w + d))} />
           <CenterPanel selection={selection} onRefresh={onRefresh} />
-          {showRight && (
-            <>
-              <Splitter onResize={d => setRightWidth(w => Math.max(180, w - d))} />
-              <div style={{ width: rightWidth, minWidth: 180, flexShrink: 0, borderLeft: '1px solid #e0e0e0', overflow: 'auto', background: '#fff' }}>
-                <RightPanel selection={selection} />
-              </div>
-            </>
-          )}
         </div>
         {showPivot && isSheetSelected && (
           <PivotGrid sheetId={selection.id} modelId={selection.modelId} currentUserId={currentUserId} onClose={() => setShowPivot(false)} />
