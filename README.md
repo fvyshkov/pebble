@@ -1,25 +1,25 @@
 # Pebble
 
-Мини-Anaplan: многомерное планирование с pivot-таблицами.
+Mini-Anaplan: multidimensional planning with pivot tables.
 
-## Возможности
+## Features
 
-- **Модели** — контейнеры для листов и аналитик
-- **Аналитики** — иерархические справочники (продукты, регионы, периоды и т.д.) с произвольными полями
-- **Периоды** — автогенерация год/квартал/месяц с иерархией
-- **Листы** — привязка любых аналитик, настройка порядка
-- **Pivot-таблица** — многомерный ввод данных на пересечении аналитик, суммирование по иерархии, формулы (если/то/иначе), фиксация аналитик
-- **Копирование/вставка** — Ctrl+C/V, совместимо с Excel, выделение диапазонов Shift+стрелки
-- **Excel импорт/экспорт** — выгрузка/загрузка записей аналитик с иерархией
-- **Пользователи и права** — управление доступом к листам (просмотр/редактирование)
-- **История изменений** — аудит ячеек с логом кто/когда/что менял
+- **Models** — containers for sheets and analytics
+- **Analytics** — hierarchical dimensions (products, regions, periods, etc.) with custom fields
+- **Periods** — auto-generation of year/quarter/month hierarchies
+- **Sheets** — bind any analytics, configure order
+- **Pivot table** — multidimensional data entry at analytic intersections, hierarchy aggregation, formulas (if/then/else), analytic pinning
+- **Copy/paste** — Ctrl+C/V, Excel-compatible, Shift+arrows range selection
+- **Excel import/export** — upload/download analytic records with hierarchy
+- **Users & permissions** — per-sheet access control (view/edit)
+- **Change history** — cell audit log (who/when/what)
 
-## Стек
+## Stack
 
 - **Backend**: Python, FastAPI, SQLite (aiosqlite), openpyxl
 - **Frontend**: React 18, TypeScript, Vite, Material UI 5
 
-## Запуск
+## Running
 
 ```bash
 # Backend
@@ -33,13 +33,14 @@ npm install
 npm run dev
 ```
 
-Приложение: http://localhost:5173, API: http://localhost:8000/docs
+App: http://localhost:5173, API docs: http://localhost:8000/docs
 
-## Тесты
+## Testing
 
 ```bash
 # Backend (pytest + httpx, in-memory SQLite)
-source .venv/bin/activate  # или создать: python3 -m venv .venv && pip install -r backend/requirements.txt pytest pytest-asyncio httpx
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt pytest pytest-asyncio httpx
 pytest backend/ -v
 
 # Frontend (vitest)
