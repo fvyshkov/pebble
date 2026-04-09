@@ -58,6 +58,14 @@ function findNodeById(nodes: RecordNode[], id: string): RecordNode | null {
 }
 
 // ─── Formatting ───
+function unitToDataType(unit: string | undefined, fallback: string): string {
+  if (!unit) return fallback
+  const u = unit.toLowerCase().trim()
+  if (u === 'шт' || u === 'шт.' || u === 'мес' || u === 'мес.') return 'quantity'
+  if (u === '%') return 'percent'
+  return fallback
+}
+
 function fmtDisplay(val: string | undefined, dt: string): string {
   if (!val || val === '') return ''
   if (dt === 'string') return val
@@ -426,7 +434,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
   // ─── Build rows ───
   interface RowEntry {
     recordIds: Record<string, string>; label: string; indent: number
-    isGroup: boolean; analyticId: string; dragInfo?: { analyticId: string; recordId: string }
+    isGroup: boolean; analyticId: string; unit?: string; dragInfo?: { analyticId: string; recordId: string }
   }
   const rows = useMemo(() => {
     const result: RowEntry[] = []
@@ -445,7 +453,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
 
         result.push({
           recordIds: ids, label: node.data.name || '', indent,
-          isGroup, analyticId: aId,
+          isGroup, analyticId: aId, unit: node.data.unit,
           dragInfo: { analyticId: aId, recordId: node.record.id },
         })
 
@@ -894,8 +902,9 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
             )}
           </thead>
           <tbody>
-            {rows.map((row, ri) => (
-              <tr key={ri}>
+            {rows.map((row, ri) => {
+              const rowDt = unitToDataType(row.unit, dataType)
+              return (<tr key={ri}>
                 <td
                   draggable={!!row.dragInfo}
                   onDragStart={e => {
@@ -948,7 +957,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                         textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
                         fontWeight: 600,
                       }}>
-                        {has ? fmtDisplay(String(sum), dataType) : ''}
+                        {has ? fmtDisplay(String(sum), rowDt) : ''}
                       </td>
                     )
                   }
@@ -998,7 +1007,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                         border: focusBorder, padding: '4px 6px',
                         textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
                       }} title={fText ? `ƒ ${fText}` : 'Формула не задана'}>
-                        {result !== null ? fmtDisplay(String(result), dataType) : ''}
+                        {result !== null ? fmtDisplay(String(result), rowDt) : ''}
                       </td>
                     )
                   }
@@ -1011,7 +1020,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                         border: focusBorder, padding: '4px 6px',
                         textAlign: 'right', color: '#666', background: selBg || '#fff', fontSize: 13,
                       }}>
-                        {agg !== null ? fmtDisplay(String(agg), dataType) : ''}
+                        {agg !== null ? fmtDisplay(String(agg), rowDt) : ''}
                       </td>
                     )
                   }
@@ -1033,7 +1042,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                       <PivotCell
                         value={cells[coordKey] ?? ''}
                         onChange={val => handleCellSave(coordKey, val)}
-                        dataType={dataType}
+                        dataType={rowDt}
                         editable={true}
                         forceEdit={shouldEdit}
                         onStopEdit={() => setEditingCell(false)}
@@ -1041,8 +1050,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     </td>
                   )
                 })}
-              </tr>
-            ))}
+              </tr>)
+            })}
           </tbody>
         </table>
       </Box>
