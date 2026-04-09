@@ -62,6 +62,8 @@ export interface CellData {
   coord_key: string
   value: string | null
   data_type: string
+  rule: string
+  formula: string
 }
 
 export interface TreeSelection {

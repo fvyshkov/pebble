@@ -284,8 +284,14 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
 
     const cellData = await api.getCells(sheetId)
     const cellMap: Record<string, string> = {}
-    for (const c of cellData) cellMap[c.coord_key] = c.value ?? ''
-    setCells(cellMap); setLoading(false)
+    const ruleMap: Record<string, CellRule> = {}
+    const formulaMap: Record<string, string> = {}
+    for (const c of cellData) {
+      cellMap[c.coord_key] = c.value ?? ''
+      if (c.rule && c.rule !== 'manual') ruleMap[c.coord_key] = c.rule as CellRule
+      if (c.formula) formulaMap[c.coord_key] = c.formula
+    }
+    setCells(cellMap); setCellRules(ruleMap); setFormulas(formulaMap); setLoading(false)
   }, [sheetId])
 
   useEffect(() => { load() }, [load])
@@ -960,7 +966,11 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                             value={rule}
                             variant="standard"
                             disableUnderline
-                            onChange={e => setCellRules(prev => ({ ...prev, [coordKey]: e.target.value as CellRule }))}
+                            onChange={e => {
+                              const newRule = e.target.value as CellRule
+                              setCellRules(prev => ({ ...prev, [coordKey]: newRule }))
+                              api.saveCells(sheetId, [{ coord_key: coordKey, rule: newRule }])
+                            }}
                             sx={{ fontSize: 11, px: 0.5, flex: 1, '& .MuiSelect-select': { py: 0.25 } }}
                           >
                             <MenuItem value="manual" sx={{ fontSize: 12 }}>✎ Ввод</MenuItem>
@@ -1049,7 +1059,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
       <FormulaEditor
         open={formulaEditorOpen}
         formula={formulas[formulaEditorKey] || ''}
-        onSave={text => setFormulas(prev => ({ ...prev, [formulaEditorKey]: text }))}
+        onSave={text => {
+          setFormulas(prev => ({ ...prev, [formulaEditorKey]: text }))
+          api.saveCells(sheetId, [{ coord_key: formulaEditorKey, formula: text, rule: 'formula' }])
+        }}
         onClose={() => setFormulaEditorOpen(false)}
         modelId={modelId}
       />

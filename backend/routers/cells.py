@@ -11,6 +11,8 @@ class CellIn(BaseModel):
     value: str | None = None
     data_type: str = "number"
     user_id: str | None = None
+    rule: str | None = None
+    formula: str | None = None
 
 
 class BulkCellsIn(BaseModel):
@@ -34,15 +36,26 @@ async def _save_cell(db, sheet_id: str, cell: CellIn):
     old_value = existing[0]["value"] if existing else None
 
     if existing:
+        # Build dynamic update
+        fields = ["value=?", "data_type=?"]
+        params: list = [cell.value, cell.data_type]
+        if cell.rule is not None:
+            fields.append("rule=?")
+            params.append(cell.rule)
+        if cell.formula is not None:
+            fields.append("formula=?")
+            params.append(cell.formula)
+        params.extend([sheet_id, cell.coord_key])
         await db.execute(
-            "UPDATE cell_data SET value=?, data_type=? WHERE sheet_id=? AND coord_key=?",
-            (cell.value, cell.data_type, sheet_id, cell.coord_key),
+            f"UPDATE cell_data SET {', '.join(fields)} WHERE sheet_id=? AND coord_key=?",
+            params,
         )
     else:
         cid = str(uuid.uuid4())
         await db.execute(
-            "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type) VALUES (?,?,?,?,?)",
-            (cid, sheet_id, cell.coord_key, cell.value, cell.data_type),
+            "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
+            (cid, sheet_id, cell.coord_key, cell.value, cell.data_type,
+             cell.rule or "manual", cell.formula or ""),
         )
 
     # Record history

@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS cell_data (
     coord_key    TEXT NOT NULL,
     value        TEXT,
     data_type    TEXT NOT NULL DEFAULT 'number',
+    rule         TEXT NOT NULL DEFAULT 'manual',
+    formula      TEXT NOT NULL DEFAULT '',
     UNIQUE(sheet_id, coord_key)
 );
 CREATE INDEX IF NOT EXISTS idx_cells_sheet ON cell_data(sheet_id);
@@ -119,6 +121,8 @@ CREATE TABLE IF NOT EXISTS sheet_view_settings (
 
 MIGRATIONS = [
     "ALTER TABLE analytics ADD COLUMN data_type TEXT NOT NULL DEFAULT 'sum'",
+    "ALTER TABLE cell_data ADD COLUMN rule TEXT NOT NULL DEFAULT 'manual'",
+    "ALTER TABLE cell_data ADD COLUMN formula TEXT NOT NULL DEFAULT ''",
 ]
 
 
