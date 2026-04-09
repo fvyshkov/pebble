@@ -241,10 +241,13 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
   const [formulaEditorOpen, setFormulaEditorOpen] = useState(false)
   const [formulaEditorKey, setFormulaEditorKey] = useState('')
   const [colLevelToggles, setColLevelToggles] = useState<Record<number, boolean>>({})
-  // Focus state: [rowIndex, colIndex] in the data grid
-  const [focusCell, setFocusCell] = useState<[number, number] | null>(null)
+  // Focus state: [rowIndex, colIndex] in the data grid — always has a focused cell
+  const [focusCell, setFocusCell] = useState<[number, number]>([0, 0])
   const [editingCell, setEditingCell] = useState(false)
   const gridRef = useRef<HTMLTableElement>(null)
+  const gridBoxRef = useRef<HTMLDivElement>(null)
+  // Auto-focus grid on mount
+  useEffect(() => { if (!loading) gridBoxRef.current?.focus() }, [loading])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -692,18 +695,12 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
       </Box>
 
       {/* ─── Grid ─── */}
-      <Box sx={{ flex: 1, overflow: 'auto' }}
+      <Box ref={gridBoxRef} sx={{ flex: 1, overflow: 'auto', outline: 'none' }}
         tabIndex={0}
         onKeyDown={e => {
           if (editingCell || formulaEditorOpen || settingsOpen) return
           const totalRows = rows.length
           const totalCols = displayCols.length
-          if (!focusCell) {
-            if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Enter'].includes(e.key)) {
-              setFocusCell([0, 0]); e.preventDefault()
-            }
-            return
-          }
           const [fr, fc] = focusCell
           switch (e.key) {
             case 'ArrowDown': e.preventDefault(); setFocusCell([Math.min(fr + 1, totalRows - 1), fc]); break
@@ -712,7 +709,13 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
             case 'ArrowLeft': e.preventDefault(); setFocusCell([fr, Math.max(fc - 1, 0)]); break
             case 'Tab': e.preventDefault(); if (e.shiftKey) { if (fc > 0) setFocusCell([fr, fc - 1]); else if (fr > 0) setFocusCell([fr - 1, totalCols - 1]) } else { if (fc < totalCols - 1) setFocusCell([fr, fc + 1]); else if (fr < totalRows - 1) setFocusCell([fr + 1, 0]) } break
             case 'Enter': e.preventDefault(); setEditingCell(true); break
-            case 'Escape': setFocusCell(null); break
+            case 'Escape': e.preventDefault(); setEditingCell(false); break
+            default:
+              // Start typing immediately enters edit mode
+              if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                setEditingCell(true)
+              }
+              break
           }
         }}
       >
@@ -780,7 +783,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                   {row.label || '—'}
                 </td>
                 {displayCols.map((col, ci) => {
-                  const isFocused = focusCell?.[0] === ri && focusCell?.[1] === ci
+                  const isFocused = focusCell[0] === ri && focusCell[1] === ci
                   const focusBorder = isFocused ? '2px solid #555' : '1px solid #e0e0e0'
                   const cellClick = () => { setFocusCell([ri, ci]); setEditingCell(false) }
 
