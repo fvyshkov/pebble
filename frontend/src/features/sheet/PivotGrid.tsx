@@ -4,7 +4,7 @@ import {
   List, ListItem, ListItemIcon, ListItemText, Chip, Popover,
   Select, MenuItem,
 } from '@mui/material'
-import SettingsOutlined from '@mui/icons-material/SettingsOutlined'
+import FormatListNumberedOutlined from '@mui/icons-material/FormatListNumberedOutlined'
 import DragIndicatorOutlined from '@mui/icons-material/DragIndicatorOutlined'
 import PushPinOutlined from '@mui/icons-material/PushPinOutlined'
 import * as Icons from '@mui/icons-material'
@@ -792,7 +792,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       >
         <Tooltip title="Порядок аналитик">
           <IconButton size="small" onClick={() => setSettingsOpen(true)}>
-            <SettingsOutlined fontSize="small" />
+            <FormatListNumberedOutlined fontSize="small" />
           </IconButton>
         </Tooltip>
 
