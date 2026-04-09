@@ -230,9 +230,16 @@ function RecordPicker({ anchorEl, tree, onSelect, onClose }: {
 type CellRule = 'manual' | 'sum_children' | 'formula'
 
 // ─── Main PivotGrid ───
-interface Props { sheetId: string; modelId: string; currentUserId?: string; onClose: () => void }
+interface Props {
+  sheetId: string; modelId: string
+  currentUserId?: string; currentUserName?: string
+  users?: { id: string; username: string }[]
+  onUserChange?: (userId: string) => void
+  onSheetChange?: (sheetId: string, modelId: string) => void
+  onClose: () => void
+}
 
-export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: Props) {
+export default function PivotGrid({ sheetId, modelId, currentUserId, currentUserName, users, onUserChange, onSheetChange, onClose }: Props) {
   const [bindings, setBindings] = useState<SheetAnalytic[]>([])
   const [analyticsMap, setAnalyticsMap] = useState<Record<string, Analytic>>({})
   const [recordsByAnalytic, setRecordsByAnalytic] = useState<Record<string, RecordNode[]>>({})
@@ -242,6 +249,9 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
   const [modelName, setModelName] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [order, setOrder] = useState<string[]>([])
+  const [showNav, setShowNav] = useState(true)
+  const [navTree, setNavTree] = useState<{ id: string; name: string; sheets: { id: string; name: string; can_edit: boolean }[] }[]>([])
+  const [canEdit, setCanEdit] = useState(true)
   const [pinned, setPinned] = useState<Record<string, string>>({})
   const [pickerAnchor, setPickerAnchor] = useState<HTMLElement | null>(null)
   const [pickerAnalyticId, setPickerAnalyticId] = useState<string | null>(null)
@@ -309,6 +319,21 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
   }, [sheetId])
 
   useEffect(() => { load() }, [load])
+
+  // Load navigation tree (models + accessible sheets) and permissions
+  useEffect(() => {
+    if (!currentUserId) return
+    api.getAccessibleSheets(currentUserId).then(setNavTree)
+  }, [currentUserId])
+
+  // Check edit permission for current sheet
+  useEffect(() => {
+    if (!currentUserId) { setCanEdit(true); return }
+    api.getSheetPermissions(sheetId).then(perms => {
+      const myPerm = perms.find((p: any) => p.user_id === currentUserId)
+      setCanEdit(myPerm ? !!myPerm.can_edit : true)
+    })
+  }, [currentUserId, sheetId])
 
   // Auto-save view settings on changes
   const saveSettingsTimer = useRef<ReturnType<typeof setTimeout>>()
@@ -777,6 +802,12 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
           } catch {}
         }}
       >
+        <Tooltip title={showNav ? 'Скрыть навигацию' : 'Показать навигацию'}>
+          <IconButton size="small" onClick={() => setShowNav(v => !v)}>
+            {showNav ? <Icons.MenuOpenOutlined fontSize="small" /> : <Icons.MenuOutlined fontSize="small" />}
+          </IconButton>
+        </Tooltip>
+
         <Tooltip title="Порядок аналитик">
           <IconButton size="small" onClick={() => setSettingsOpen(true)}>
             <SettingsOutlined fontSize="small" />
@@ -820,8 +851,58 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
             {modelName}{modelName && sheetName ? ' → ' : ''}{sheetName}
           </Typography>
         </Box>
+
+        {/* User selector — right aligned next to close */}
+        {users && users.length > 0 && onUserChange && (
+          <Select
+            size="small" variant="standard" disableUnderline
+            value={currentUserId || ''}
+            onChange={e => onUserChange(e.target.value)}
+            sx={{ fontSize: 12, minWidth: 80 }}
+          >
+            {users.map(u => <MenuItem key={u.id} value={u.id} sx={{ fontSize: 12 }}>{u.username}</MenuItem>)}
+          </Select>
+        )}
+        {!users && currentUserName && (
+          <Typography sx={{ fontSize: 12, color: '#666', mr: 0.5 }}>{currentUserName}</Typography>
+        )}
+
         <IconButton size="small" onClick={onClose}><CloseOutlined fontSize="small" /></IconButton>
       </Box>
+
+      {/* ─── Body: Nav + Grid ─── */}
+      <Box sx={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {/* ─── Left Nav Panel ─── */}
+        {showNav && (
+          <Box sx={{ width: 220, minWidth: 180, borderRight: '1px solid #e0e0e0', overflow: 'auto', flexShrink: 0, py: 1 }}>
+            {navTree.map(m => (
+              <Box key={m.id} sx={{ mb: 1 }}>
+                <Typography sx={{ fontSize: 12, fontWeight: 600, color: '#555', px: 1.5, py: 0.5 }}>{m.name}</Typography>
+                {m.sheets.map(s => (
+                  <Box
+                    key={s.id}
+                    onClick={() => onSheetChange?.(s.id, m.id)}
+                    sx={{
+                      display: 'flex', alignItems: 'center', gap: 1,
+                      px: 2, py: 0.5, cursor: 'pointer', fontSize: 13,
+                      bgcolor: s.id === sheetId ? '#e3f2fd' : 'transparent',
+                      fontWeight: s.id === sheetId ? 600 : 400,
+                      '&:hover': { bgcolor: s.id === sheetId ? '#e3f2fd' : '#f5f5f5' },
+                      color: s.can_edit ? '#333' : '#999',
+                    }}
+                  >
+                    <Icons.DescriptionOutlined sx={{ fontSize: 15, opacity: 0.5 }} />
+                    {s.name || 'Без названия'}
+                    {!s.can_edit && <Icons.LockOutlined sx={{ fontSize: 12, color: '#ccc', ml: 'auto' }} />}
+                  </Box>
+                ))}
+              </Box>
+            ))}
+            {navTree.length === 0 && (
+              <Typography sx={{ fontSize: 12, color: '#999', textAlign: 'center', mt: 2 }}>Нет доступных листов</Typography>
+            )}
+          </Box>
+        )}
 
       {/* ─── Grid ─── */}
       <Box ref={gridBoxRef} sx={{ flex: 1, overflow: 'auto', outline: 'none' }}
@@ -1045,15 +1126,17 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                   }
 
                   // Manual input cell
-                  const shouldEdit = isFocused && editingCell
+                  const shouldEdit = isFocused && editingCell && canEdit
+                  const readOnlyBg = !canEdit ? '#fff5f5' : undefined
                   return (
-                    <td key={colRecId} onClick={cellClick} style={{ border: focusBorder, padding: 0 }}
+                    <td key={colRecId} onClick={cellClick}
+                      style={{ border: focusBorder, padding: 0, background: readOnlyBg }}
                       onContextMenu={e => handleContextMenu(e, coordKey, rule)}>
                       <PivotCell
                         value={cells[coordKey] ?? ''}
                         onChange={val => handleCellSave(coordKey, val)}
                         dataType={rowDt}
-                        editable={true}
+                        editable={canEdit}
                         forceEdit={shouldEdit}
                         onStopEdit={() => setEditingCell(false)}
                       />
@@ -1065,6 +1148,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
           </tbody>
         </table>
       </Box>
+
+      </Box>{/* end nav+grid flex */}
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)}
         order={order} onReorder={handleReorder} names={analyticNames} />

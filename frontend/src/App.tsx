@@ -142,6 +142,25 @@ function AppInner() {
 
   const isSheetSelected = selection?.type === 'sheet'
 
+  // Track which sheet is shown in PivotGrid (can navigate within it)
+  const [pivotSheetId, setPivotSheetId] = useState('')
+  const [pivotModelId, setPivotModelId] = useState('')
+
+  const openPivot = useCallback(() => {
+    if (isSheetSelected) {
+      setPivotSheetId(selection.id)
+      setPivotModelId(selection.modelId)
+      setShowPivot(true)
+    }
+  }, [isSheetSelected, selection])
+
+  const handlePivotSheetChange = useCallback((sid: string, mid: string) => {
+    setPivotSheetId(sid)
+    setPivotModelId(mid)
+  }, [])
+
+  const currentUserName = users.find(u => u.id === currentUserId)?.username || ''
+
   return (
     <PendingProvider onFlushed={onRefresh}>
       <div className="app-root">
@@ -149,7 +168,7 @@ function AppInner() {
           <SaveButton />
           <Tooltip title="Просмотр / ввод данных">
             <span>
-              <IconButton size="small" disabled={!isSheetSelected} onClick={() => setShowPivot(true)}>
+              <IconButton size="small" disabled={!isSheetSelected} onClick={openPivot}>
                 <GridOnOutlined fontSize="small" />
               </IconButton>
             </span>
@@ -161,7 +180,7 @@ function AppInner() {
           </Tooltip>
           <div style={{ flex: 1 }} />
 
-          {/* User selector */}
+          {/* User selector — right aligned */}
           {users.length > 0 && (
             <FormControl size="small" sx={{ minWidth: 120 }}>
               <Select
@@ -192,8 +211,14 @@ function AppInner() {
           <Splitter onResize={d => setLeftWidth(w => Math.max(180, w + d))} />
           <CenterPanel selection={selection} onRefresh={onRefresh} />
         </div>
-        {showPivot && isSheetSelected && (
-          <PivotGrid sheetId={selection.id} modelId={selection.modelId} currentUserId={currentUserId} onClose={() => setShowPivot(false)} />
+        {showPivot && pivotSheetId && (
+          <PivotGrid
+            sheetId={pivotSheetId} modelId={pivotModelId}
+            currentUserId={currentUserId} currentUserName={currentUserName}
+            users={users} onUserChange={setCurrentUserId}
+            onSheetChange={handlePivotSheetChange}
+            onClose={() => setShowPivot(false)}
+          />
         )}
         <UsersDialog open={showUsers} onClose={() => setShowUsers(false)} />
         <ImportDialog open={showImport} onClose={() => setShowImport(false)} onImported={handleImported} />

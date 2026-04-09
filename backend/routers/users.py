@@ -79,6 +79,34 @@ async def get_sheet_permissions(sheet_id: str):
     return result
 
 
+@router.get("/{user_id}/accessible-sheets")
+async def get_accessible_sheets(user_id: str):
+    """Return models and sheets the user can view, with edit flag."""
+    db = get_db()
+    rows = await db.execute_fetchall("""
+        SELECT m.id as model_id, m.name as model_name,
+               s.id as sheet_id, s.name as sheet_name,
+               COALESCE(sp.can_view, 1) as can_view,
+               COALESCE(sp.can_edit, 1) as can_edit
+        FROM sheets s
+        JOIN models m ON m.id = s.model_id
+        LEFT JOIN sheet_permissions sp ON sp.sheet_id = s.id AND sp.user_id = ?
+        WHERE COALESCE(sp.can_view, 1) = 1
+        ORDER BY m.name, s.name
+    """, (user_id,))
+    # Group by model
+    models: dict = {}
+    for r in rows:
+        mid = r["model_id"]
+        if mid not in models:
+            models[mid] = {"id": mid, "name": r["model_name"], "sheets": []}
+        models[mid]["sheets"].append({
+            "id": r["sheet_id"], "name": r["sheet_name"],
+            "can_edit": bool(r["can_edit"]),
+        })
+    return list(models.values())
+
+
 class PermissionIn(BaseModel):
     user_id: str
     can_view: bool = True

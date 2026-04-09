@@ -98,6 +98,8 @@ export const getSheetPermissions = (sheetId: string) =>
   fetch(`${BASE}/users/permissions/by-sheet/${sheetId}`).then(r => json<any[]>(r))
 export const setSheetPermission = (sheetId: string, data: { user_id: string; can_view: boolean; can_edit: boolean }) =>
   fetch(`${BASE}/users/permissions/by-sheet/${sheetId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => json<any>(r))
+export const getAccessibleSheets = (userId: string) =>
+  fetch(`${BASE}/users/${userId}/accessible-sheets`).then(r => json<any[]>(r))
 
 // Import model from Excel
 export const importExcelModel = (file: File, modelName: string) => {
