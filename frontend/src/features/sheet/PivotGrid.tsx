@@ -243,6 +243,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
   const [colLevelToggles, setColLevelToggles] = useState<Record<number, boolean>>({})
   // Focus state: [rowIndex, colIndex] in the data grid — always has a focused cell
   const [focusCell, setFocusCell] = useState<[number, number]>([0, 0])
+  const [selAnchor, setSelAnchor] = useState<[number, number] | null>(null) // selection anchor for shift+arrows
   const [editingCell, setEditingCell] = useState(false)
   const gridRef = useRef<HTMLTableElement>(null)
   const gridBoxRef = useRef<HTMLDivElement>(null)
@@ -594,6 +595,110 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
     return evaluateFormula(formulaText, ctx)
   }, [cells, analyticNameToId, recordNameToId, order])
 
+  // ─── Selection helpers ───
+  const selRange = useMemo(() => {
+    const [r, c] = focusCell
+    if (!selAnchor) return { r1: r, c1: c, r2: r, c2: c }
+    const [ar, ac] = selAnchor
+    return { r1: Math.min(r, ar), c1: Math.min(c, ac), r2: Math.max(r, ar), c2: Math.max(c, ac) }
+  }, [focusCell, selAnchor])
+  const isSelected = (ri: number, ci: number) => ri >= selRange.r1 && ri <= selRange.r2 && ci >= selRange.c1 && ci <= selRange.c2
+
+  // ─── Copy / Paste / Delete ───
+  const handleCopy = useCallback((e: React.ClipboardEvent | ClipboardEvent) => {
+    if (editingCell) return // let native input handle it
+    e.preventDefault()
+    const { r1, c1, r2, c2 } = selRange
+    const lines: string[] = []
+    for (let ri = r1; ri <= r2; ri++) {
+      const vals: string[] = []
+      for (let ci = c1; ci <= c2; ci++) {
+        const row = rows[ri]; const col = displayCols[ci]
+        if (!row || !col) { vals.push(''); continue }
+        if (col.isSum) {
+          // sum column — compute aggregated value
+          const rowCombos = getAllLeafRecordCombinations(row)
+          let sum = 0; let has = false
+          for (const combo of rowCombos)
+            for (const leafId of col.leafIds) {
+              const k = makeLeafCoordKey(combo, leafId)
+              const v = cells[k]; if (v !== undefined && v !== '') { const n = parseFloat(v); if (!isNaN(n)) { sum += n; has = true } }
+            }
+          vals.push(has ? String(sum) : '')
+        } else {
+          const coordKey = makeCoordKey(row.recordIds, col.node.record.id)
+          const rule = resolveRule(coordKey, row.isGroup)
+          if (rule === 'sum_children' && isNumeric) {
+            const agg = computeSum(row, col.node.record.id)
+            vals.push(agg !== null ? String(agg) : '')
+          } else if (rule === 'formula') {
+            const fText = formulas[coordKey] || ''
+            const result = fText ? evalFormula(fText, coordKey) : null
+            vals.push(result !== null ? String(result) : '')
+          } else {
+            vals.push(cells[coordKey] ?? '')
+          }
+        }
+      }
+      lines.push(vals.join('\t'))
+    }
+    const text = lines.join('\n')
+    const cb = 'clipboardData' in e ? (e as ClipboardEvent).clipboardData : (e as React.ClipboardEvent).clipboardData
+    cb?.setData('text/plain', text)
+  }, [editingCell, selRange, rows, displayCols, cells, formulas, isNumeric, computeSum, evalFormula, getAllLeafRecordCombinations, makeLeafCoordKey, makeCoordKey])
+
+  const handlePaste = useCallback(async (e: React.ClipboardEvent | ClipboardEvent) => {
+    if (editingCell) return // let native input handle it
+    e.preventDefault()
+    const cb = 'clipboardData' in e ? (e as ClipboardEvent).clipboardData : (e as React.ClipboardEvent).clipboardData
+    const text = cb?.getData('text/plain') || ''
+    if (!text) return
+    const pasteRows = text.split(/\r?\n/).filter(l => l.length > 0).map(l => l.split('\t'))
+    const [startR, startC] = focusCell
+    const toSave: { coord_key: string; value: string; data_type: string; user_id?: string }[] = []
+    const newCells = { ...cells }
+    for (let dr = 0; dr < pasteRows.length; dr++) {
+      for (let dc = 0; dc < pasteRows[dr].length; dc++) {
+        const ri = startR + dr; const ci = startC + dc
+        if (ri >= rows.length || ci >= displayCols.length) continue
+        const row = rows[ri]; const col = displayCols[ci]
+        if (col.isSum) continue
+        const coordKey = makeCoordKey(row.recordIds, col.node.record.id)
+        const rule = resolveRule(coordKey, row.isGroup)
+        if (rule !== 'manual') continue
+        const val = pasteRows[dr][dc]
+        newCells[coordKey] = val
+        toSave.push({ coord_key: coordKey, value: val, data_type: dataType, user_id: currentUserId })
+      }
+    }
+    setCells(newCells)
+    if (toSave.length > 0) await api.saveCells(sheetId, toSave)
+    // Expand selection to pasted area
+    const endR = Math.min(startR + pasteRows.length - 1, rows.length - 1)
+    const endC = Math.min(startC + (Math.max(...pasteRows.map(r => r.length)) || 1) - 1, displayCols.length - 1)
+    setSelAnchor([endR, endC])
+  }, [editingCell, focusCell, rows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId])
+
+  const handleDelete = useCallback(async () => {
+    if (editingCell) return
+    const { r1, c1, r2, c2 } = selRange
+    const toSave: { coord_key: string; value: string; data_type: string; user_id?: string }[] = []
+    const newCells = { ...cells }
+    for (let ri = r1; ri <= r2; ri++) {
+      for (let ci = c1; ci <= c2; ci++) {
+        const row = rows[ri]; const col = displayCols[ci]
+        if (!row || !col || col.isSum) continue
+        const coordKey = makeCoordKey(row.recordIds, col.node.record.id)
+        const rule = resolveRule(coordKey, row.isGroup)
+        if (rule !== 'manual') continue
+        newCells[coordKey] = ''
+        toSave.push({ coord_key: coordKey, value: '', data_type: dataType, user_id: currentUserId })
+      }
+    }
+    setCells(newCells)
+    if (toSave.length > 0) await api.saveCells(sheetId, toSave)
+  }, [editingCell, selRange, rows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId])
+
   // ─── Context menu + history ───
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; coordKey: string } | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -697,22 +802,42 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
       {/* ─── Grid ─── */}
       <Box ref={gridBoxRef} sx={{ flex: 1, overflow: 'auto', outline: 'none' }}
         tabIndex={0}
+        onCopy={handleCopy}
+        onPaste={handlePaste}
         onKeyDown={e => {
           if (editingCell || formulaEditorOpen || settingsOpen) return
           const totalRows = rows.length
           const totalCols = displayCols.length
           const [fr, fc] = focusCell
+          const shift = e.shiftKey
+          const moveWithSelection = (nr: number, nc: number) => {
+            if (shift) {
+              if (!selAnchor) setSelAnchor([fr, fc])
+            } else {
+              setSelAnchor(null)
+            }
+            setFocusCell([nr, nc])
+          }
           switch (e.key) {
-            case 'ArrowDown': e.preventDefault(); setFocusCell([Math.min(fr + 1, totalRows - 1), fc]); break
-            case 'ArrowUp': e.preventDefault(); setFocusCell([Math.max(fr - 1, 0), fc]); break
-            case 'ArrowRight': e.preventDefault(); setFocusCell([fr, Math.min(fc + 1, totalCols - 1)]); break
-            case 'ArrowLeft': e.preventDefault(); setFocusCell([fr, Math.max(fc - 1, 0)]); break
-            case 'Tab': e.preventDefault(); if (e.shiftKey) { if (fc > 0) setFocusCell([fr, fc - 1]); else if (fr > 0) setFocusCell([fr - 1, totalCols - 1]) } else { if (fc < totalCols - 1) setFocusCell([fr, fc + 1]); else if (fr < totalRows - 1) setFocusCell([fr + 1, 0]) } break
+            case 'ArrowDown': e.preventDefault(); moveWithSelection(Math.min(fr + 1, totalRows - 1), fc); break
+            case 'ArrowUp': e.preventDefault(); moveWithSelection(Math.max(fr - 1, 0), fc); break
+            case 'ArrowRight': e.preventDefault(); moveWithSelection(fr, Math.min(fc + 1, totalCols - 1)); break
+            case 'ArrowLeft': e.preventDefault(); moveWithSelection(fr, Math.max(fc - 1, 0)); break
+            case 'Tab': e.preventDefault(); setSelAnchor(null); if (shift) { if (fc > 0) setFocusCell([fr, fc - 1]); else if (fr > 0) setFocusCell([fr - 1, totalCols - 1]) } else { if (fc < totalCols - 1) setFocusCell([fr, fc + 1]); else if (fr < totalRows - 1) setFocusCell([fr + 1, 0]) } break
             case 'Enter': e.preventDefault(); setEditingCell(true); break
-            case 'Escape': e.preventDefault(); setEditingCell(false); break
+            case 'Escape': e.preventDefault(); setEditingCell(false); setSelAnchor(null); break
+            case 'Delete': case 'Backspace': e.preventDefault(); handleDelete(); break
+            case 'a':
+              if (e.ctrlKey || e.metaKey) {
+                e.preventDefault()
+                setSelAnchor([0, 0])
+                setFocusCell([totalRows - 1, totalCols - 1])
+              }
+              break
             default:
               // Start typing immediately enters edit mode
               if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                setSelAnchor(null)
                 setEditingCell(true)
               }
               break
@@ -784,8 +909,18 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                 </td>
                 {displayCols.map((col, ci) => {
                   const isFocused = focusCell[0] === ri && focusCell[1] === ci
-                  const focusBorder = isFocused ? '2px solid #555' : '1px solid #e0e0e0'
-                  const cellClick = () => { setFocusCell([ri, ci]); setEditingCell(false) }
+                  const isSel = isSelected(ri, ci)
+                  const focusBorder = isFocused ? '2px solid #1976d2' : isSel ? '1px solid #90caf9' : '1px solid #e0e0e0'
+                  const selBg = isSel && !isFocused ? 'rgba(25,118,210,0.08)' : undefined
+                  const cellClick = (e: React.MouseEvent) => {
+                    if (e.shiftKey) {
+                      if (!selAnchor) setSelAnchor([focusCell[0], focusCell[1]])
+                      setFocusCell([ri, ci])
+                    } else {
+                      setSelAnchor(null); setFocusCell([ri, ci])
+                    }
+                    setEditingCell(false)
+                  }
 
                   // For sum columns: always show aggregated value
                   if (col.isSum) {
@@ -801,7 +936,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     return (
                       <td key={`${col.node.record.id}-s`} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
-                        textAlign: 'right', color: '#555', background: '#e8eaf6', fontSize: 13,
+                        textAlign: 'right', color: '#555', background: selBg || '#e8eaf6', fontSize: 13,
                         fontWeight: 600,
                       }}>
                         {has ? fmtDisplay(String(sum), dataType) : ''}
@@ -816,7 +951,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
 
                   if (mode === 'settings') {
                     return (
-                      <td key={colRecId} onClick={cellClick} style={{ border: focusBorder, padding: 0, background: '#fafbfc' }}>
+                      <td key={colRecId} onClick={cellClick} style={{ border: focusBorder, padding: 0, background: selBg || '#fafbfc' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center' }}>
                           <Select
                             value={rule}
@@ -848,7 +983,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
-                        textAlign: 'right', color: '#555', background: '#fffde7', fontSize: 13,
+                        textAlign: 'right', color: '#555', background: selBg || '#fffde7', fontSize: 13,
                       }} title={fText ? `ƒ ${fText}` : 'Формула не задана'}>
                         {result !== null ? fmtDisplay(String(result), dataType) : ''}
                       </td>
@@ -861,7 +996,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
-                        textAlign: 'right', color: '#666', background: '#fffde7', fontSize: 13,
+                        textAlign: 'right', color: '#666', background: selBg || '#fffde7', fontSize: 13,
                       }}>
                         {agg !== null ? fmtDisplay(String(agg), dataType) : ''}
                       </td>
@@ -872,7 +1007,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
-                        background: '#fffde7', color: '#666', fontSize: 13,
+                        background: selBg || '#fffde7', color: '#666', fontSize: 13,
                       }}>{cells[coordKey] ?? ''}</td>
                     )
                   }
