@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.db import init_db, close_db
-from backend.routers import models, analytics, sheets, cells, excel_io, users
+from backend.routers import models, analytics, sheets, cells, excel_io, users, import_excel
 
 
 @asynccontextmanager
@@ -27,6 +27,7 @@ app.include_router(sheets.router)
 app.include_router(cells.router)
 app.include_router(excel_io.router)
 app.include_router(users.router)
+app.include_router(import_excel.router)
 
 
 @app.get("/api/health")

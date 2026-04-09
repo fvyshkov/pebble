@@ -99,6 +99,14 @@ export const getSheetPermissions = (sheetId: string) =>
 export const setSheetPermission = (sheetId: string, data: { user_id: string; can_view: boolean; can_edit: boolean }) =>
   fetch(`${BASE}/users/permissions/by-sheet/${sheetId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => json<any>(r))
 
+// Import model from Excel
+export const importExcelModel = (file: File, modelName: string) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('model_name', modelName)
+  return fetch(`${BASE}/import/excel`, { method: 'POST', body: fd }).then(r => json<any>(r))
+}
+
 // Excel
 export const exportExcelUrl = (analyticId: string) => `${BASE}/excel/analytics/${analyticId}/export`
 export const importExcel = (analyticId: string, file: File) => {
