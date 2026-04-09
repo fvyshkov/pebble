@@ -905,7 +905,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
                     position: 'sticky', left: 0, zIndex: 1,
                     cursor: row.dragInfo ? 'grab' : 'default',
                   }}>
-                  {row.label || '—'}
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    {row.analyticId && (() => { const ic = getIcon(row.analyticId); return ic ? <span style={{ display: 'inline-flex', opacity: 0.5 }}>{ic}</span> : null })()}
+                    {row.label || '—'}
+                  </span>
                 </td>
                 {displayCols.map((col, ci) => {
                   const isFocused = focusCell[0] === ri && focusCell[1] === ci
