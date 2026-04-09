@@ -238,6 +238,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
   const [recordsByAnalytic, setRecordsByAnalytic] = useState<Record<string, RecordNode[]>>({})
   const [cells, setCells] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
+  const [sheetName, setSheetName] = useState('')
+  const [modelName, setModelName] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [order, setOrder] = useState<string[]>([])
   const [pinned, setPinned] = useState<Record<string, string>>({})
@@ -260,7 +262,11 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
 
   const load = useCallback(async () => {
     setLoading(true)
-    const sa = await api.listSheetAnalytics(sheetId)
+    // Load model and sheet names
+    const [tree, sa] = await Promise.all([api.getModelTree(modelId), api.listSheetAnalytics(sheetId)])
+    setModelName(tree.name || '')
+    const sh = (tree.sheets || []).find((s: any) => s.id === sheetId)
+    setSheetName(sh?.name || '')
     setBindings(sa)
     const aMap: Record<string, Analytic> = {}
     const rMap: Record<string, RecordNode[]> = {}
@@ -809,7 +815,11 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, onClose }: 
         })}
 
 
-        <Box sx={{ flex: 1 }} />
+        <Box sx={{ flex: 1, display: 'flex', justifyContent: 'center', minWidth: 0 }}>
+          <Typography noWrap sx={{ fontSize: 13, color: '#555' }}>
+            {modelName}{modelName && sheetName ? ' → ' : ''}{sheetName}
+          </Typography>
+        </Box>
         <IconButton size="small" onClick={onClose}><CloseOutlined fontSize="small" /></IconButton>
       </Box>
 
