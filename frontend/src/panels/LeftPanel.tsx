@@ -7,6 +7,7 @@ import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
 import FolderOutlined from '@mui/icons-material/FolderOutlined'
 import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
 import CategoryOutlined from '@mui/icons-material/CategoryOutlined'
+import LockOutlined from '@mui/icons-material/LockOutlined'
 import * as Icons from '@mui/icons-material'
 import * as api from '../api'
 import type { Model, Sheet, Analytic, TreeSelection } from '../types'
@@ -17,29 +18,48 @@ interface Props {
   refreshKey: number
   expandAfterCreate?: { modelId: string; folder: string; selectId: string; selectType: string } | null
   onCreated?: (info: { modelId: string; folder: 'sheets' | 'analytics'; id: string; type: 'sheet' | 'analytic' }) => void
+  sheetsOnly?: boolean
+  currentUserId?: string
 }
 
 interface ModelTree {
   model: Model
-  sheets: Sheet[]
+  sheets: (Sheet & { can_edit?: boolean })[]
   analytics: Analytic[]
 }
 
-export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated }: Props) {
+export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId }: Props) {
   const [trees, setTrees] = useState<ModelTree[]>([])
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string[]>([])
 
   const load = useCallback(async () => {
-    const models = await api.listModels()
-    const treesData: ModelTree[] = await Promise.all(
-      models.map(async m => {
-        const tree = await api.getModelTree(m.id)
-        return { model: m, sheets: tree.sheets || [], analytics: tree.analytics || [] }
+    if (sheetsOnly && currentUserId) {
+      // Load only accessible sheets grouped by model
+      const accessible = await api.getAccessibleSheets(currentUserId)
+      const treesData: ModelTree[] = accessible.map((m: any) => ({
+        model: { id: m.id, name: m.name } as Model,
+        sheets: m.sheets.map((s: any) => ({ id: s.id, name: s.name, can_edit: s.can_edit, model_id: m.id } as Sheet & { can_edit?: boolean })),
+        analytics: [],
+      }))
+      setTrees(treesData)
+      // Auto-expand all models in sheets-only mode
+      setExpanded(prev => {
+        const modelIds = treesData.map(t => `model:${t.model.id}`)
+        const next = [...new Set([...prev, ...modelIds])]
+        return next
       })
-    )
-    setTrees(treesData)
-  }, [])
+    } else {
+      const models = await api.listModels()
+      const treesData: ModelTree[] = await Promise.all(
+        models.map(async m => {
+          const tree = await api.getModelTree(m.id)
+          return { model: m, sheets: tree.sheets || [], analytics: tree.analytics || [] }
+        })
+      )
+      setTrees(treesData)
+    }
+  }, [sheetsOnly, currentUserId])
 
   useEffect(() => { load() }, [load, refreshKey])
 
@@ -120,6 +140,53 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
 
   const q = search.toLowerCase()
   const selectedItemId = selection ? `${selection.type}:${selection.id}:${selection.modelId}` : ''
+
+  // Sheets-only mode: flat list of models > sheets (no folders, no analytics)
+  if (sheetsOnly) {
+    return (
+      <div className="panel-left">
+        <div className="panel-left-toolbar">
+          <input placeholder="Поиск..." value={search} onChange={e => setSearch(e.target.value)} />
+        </div>
+        <div className="panel-left-tree">
+          <SimpleTreeView
+            selectedItems={selectedItemId}
+            onSelectedItemsChange={handleItemSelect}
+            expandedItems={expanded}
+            onExpandedItemsChange={handleExpandChange}
+          >
+            {trees.map(({ model, sheets }) => {
+              const mMatch = !q || model.name.toLowerCase().includes(q)
+              const filteredSheets = sheets.filter(s => !q || mMatch || s.name.toLowerCase().includes(q))
+              if (!mMatch && filteredSheets.length === 0) return null
+
+              return (
+                <TreeItem
+                  key={model.id}
+                  itemId={`model:${model.id}`}
+                  label={<div className="tree-item-label"><span style={{ fontWeight: 600 }}>{model.name || 'Без названия'}</span></div>}
+                >
+                  {filteredSheets.map(s => (
+                    <TreeItem
+                      key={s.id}
+                      itemId={`sheet:${s.id}:${model.id}`}
+                      label={
+                        <div className="tree-item-label">
+                          <DescriptionOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
+                          <span style={{ color: s.can_edit === false ? '#999' : undefined }}>{s.name || 'Без названия'}</span>
+                          {s.can_edit === false && <LockOutlined sx={{ fontSize: 12, color: '#ccc', ml: 'auto' }} />}
+                        </div>
+                      }
+                    />
+                  ))}
+                </TreeItem>
+              )
+            })}
+          </SimpleTreeView>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="panel-left">

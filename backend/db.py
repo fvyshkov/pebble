@@ -123,6 +123,7 @@ MIGRATIONS = [
     "ALTER TABLE analytics ADD COLUMN data_type TEXT NOT NULL DEFAULT 'sum'",
     "ALTER TABLE cell_data ADD COLUMN rule TEXT NOT NULL DEFAULT 'manual'",
     "ALTER TABLE cell_data ADD COLUMN formula TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN can_admin INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -146,9 +147,11 @@ async def init_db():
         import uuid
         admin_id = str(uuid.uuid4())
         await _db.execute(
-            "INSERT INTO users (id, username, password) VALUES (?, 'Админ', 'admin')",
+            "INSERT INTO users (id, username, password, can_admin) VALUES (?, 'Админ', 'admin', 1)",
             (admin_id,),
         )
+    # Ensure 'admin' user has can_admin flag
+    await _db.execute("UPDATE users SET can_admin = 1 WHERE username IN ('Админ', 'admin')")
     await _db.commit()
 
 

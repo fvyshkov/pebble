@@ -13,7 +13,7 @@ class UserIn(BaseModel):
 @router.get("")
 async def list_users():
     db = get_db()
-    rows = await db.execute_fetchall("SELECT id, username, created_at FROM users ORDER BY username")
+    rows = await db.execute_fetchall("SELECT id, username, created_at, can_admin FROM users ORDER BY username")
     return [dict(r) for r in rows]
 
 

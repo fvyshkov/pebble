@@ -2,9 +2,12 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import {
   IconButton, Tooltip, Badge, Select, MenuItem, FormControl,
   Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, CircularProgress,
+  ToggleButton, ToggleButtonGroup,
 } from '@mui/material'
 import SaveOutlined from '@mui/icons-material/SaveOutlined'
-import GridOnOutlined from '@mui/icons-material/GridOnOutlined'
+import SettingsOutlined from '@mui/icons-material/SettingsOutlined'
+import TableChartOutlined from '@mui/icons-material/TableChartOutlined'
+import FunctionsOutlined from '@mui/icons-material/FunctionsOutlined'
 import PeopleOutlined from '@mui/icons-material/PeopleOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import type { TreeSelection } from './types'
@@ -16,6 +19,8 @@ import PivotGrid from './features/sheet/PivotGrid'
 import { PendingProvider, usePending } from './store/PendingContext'
 import * as api from './api'
 import './App.css'
+
+type AppMode = 'settings' | 'data' | 'formulas'
 
 function SaveButton() {
   const { isDirty, flush } = usePending()
@@ -50,7 +55,6 @@ function ImportDialog({ open, onClose, onImported }: {
     if (f) {
       setFile(f)
       if (!modelName) {
-        // Suggest name from filename
         setModelName(f.name.replace(/\.xlsx?$/i, ''))
       }
     }
@@ -110,10 +114,10 @@ function ImportDialog({ open, onClose, onImported }: {
 }
 
 function AppInner() {
+  const [mode, setMode] = useState<AppMode>('settings')
   const [selection, setSelection] = useState<TreeSelection | null>(null)
   const [leftWidth, setLeftWidth] = useState(280)
   const [refreshKey, setRefreshKey] = useState(0)
-  const [showPivot, setShowPivot] = useState(false)
   const [showUsers, setShowUsers] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [expandAfterCreate, setExpandAfterCreate] = useState<any>(null)
@@ -140,44 +144,60 @@ function AppInner() {
     setRefreshKey(k => k + 1)
   }, [])
 
-  const isSheetSelected = selection?.type === 'sheet'
-
-  // Track which sheet is shown in PivotGrid (can navigate within it)
-  const [pivotSheetId, setPivotSheetId] = useState('')
-  const [pivotModelId, setPivotModelId] = useState('')
-
-  const openPivot = useCallback(() => {
-    if (isSheetSelected) {
-      setPivotSheetId(selection.id)
-      setPivotModelId(selection.modelId)
-      setShowPivot(true)
-    }
-  }, [isSheetSelected, selection])
-
-  const handlePivotSheetChange = useCallback((sid: string, mid: string) => {
-    setPivotSheetId(sid)
-    setPivotModelId(mid)
+  // When switching to data/formulas mode, if a sheet is selected — keep it.
+  // When clicking a sheet in left panel — select it and switch to data mode if needed.
+  const handleSelect = useCallback((sel: TreeSelection | null) => {
+    setSelection(sel)
   }, [])
 
-  const currentUserName = users.find(u => u.id === currentUserId)?.username || ''
+  const isSheetSelected = selection?.type === 'sheet'
+  const isDataMode = mode === 'data' || mode === 'formulas'
+  const currentUser = users.find(u => u.id === currentUserId)
+  const isAdmin = !!currentUser?.can_admin
+
+  // Non-admin users can only use data mode
+  useEffect(() => {
+    if (currentUserId && !isAdmin && mode !== 'data') {
+      setMode('data')
+    }
+  }, [currentUserId, isAdmin])
 
   return (
     <PendingProvider onFlushed={onRefresh}>
       <div className="app-root">
         <div className="app-toolbar">
           <SaveButton />
-          <Tooltip title="Просмотр / ввод данных">
-            <span>
-              <IconButton size="small" disabled={!isSheetSelected} onClick={openPivot}>
-                <GridOnOutlined fontSize="small" />
+
+          {/* Mode toggle */}
+          <ToggleButtonGroup
+            size="small" exclusive
+            value={mode}
+            onChange={(_, v) => { if (v) setMode(v) }}
+            sx={{ '& .MuiToggleButton-root': { py: 0.25, px: 1, fontSize: 12, textTransform: 'none' } }}
+          >
+            {isAdmin && (
+              <ToggleButton value="settings">
+                <Tooltip title="Настройки модели"><SettingsOutlined sx={{ fontSize: 16 }} /></Tooltip>
+              </ToggleButton>
+            )}
+            <ToggleButton value="data">
+              <Tooltip title="Просмотр / ввод данных"><TableChartOutlined sx={{ fontSize: 16 }} /></Tooltip>
+            </ToggleButton>
+            {isAdmin && (
+              <ToggleButton value="formulas">
+                <Tooltip title="Формулы и правила"><FunctionsOutlined sx={{ fontSize: 16 }} /></Tooltip>
+              </ToggleButton>
+            )}
+          </ToggleButtonGroup>
+
+          {isAdmin && (
+            <Tooltip title="Импорт модели из Excel">
+              <IconButton size="small" onClick={() => setShowImport(true)}>
+                <FileUploadOutlined fontSize="small" />
               </IconButton>
-            </span>
-          </Tooltip>
-          <Tooltip title="Импорт модели из Excel">
-            <IconButton size="small" onClick={() => setShowImport(true)}>
-              <FileUploadOutlined fontSize="small" />
-            </IconButton>
-          </Tooltip>
+            </Tooltip>
+          )}
+
           <div style={{ flex: 1 }} />
 
           {/* User selector — right aligned */}
@@ -201,25 +221,34 @@ function AppInner() {
             </IconButton>
           </Tooltip>
         </div>
+
         <div className="app-body">
           <div style={{ width: leftWidth, minWidth: 180, flexShrink: 0 }}>
             <LeftPanel
-              selection={selection} onSelect={setSelection}
+              selection={selection} onSelect={handleSelect}
               refreshKey={refreshKey} expandAfterCreate={expandAfterCreate} onCreated={onCreated}
+              sheetsOnly={isDataMode} currentUserId={isDataMode ? currentUserId : undefined}
             />
           </div>
           <Splitter onResize={d => setLeftWidth(w => Math.max(180, w + d))} />
-          <CenterPanel selection={selection} onRefresh={onRefresh} />
+
+          {/* Center area: settings or pivot grid */}
+          {mode === 'settings' ? (
+            <CenterPanel selection={selection} onRefresh={onRefresh} />
+          ) : isSheetSelected ? (
+            <PivotGrid
+              key={selection.id}
+              sheetId={selection.id} modelId={selection.modelId}
+              currentUserId={currentUserId}
+              mode={mode === 'formulas' ? 'settings' : 'data'}
+            />
+          ) : (
+            <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
+              Выберите лист для просмотра данных
+            </div>
+          )}
         </div>
-        {showPivot && pivotSheetId && (
-          <PivotGrid
-            sheetId={pivotSheetId} modelId={pivotModelId}
-            currentUserId={currentUserId} currentUserName={currentUserName}
-            users={users} onUserChange={setCurrentUserId}
-            onSheetChange={handlePivotSheetChange}
-            onClose={() => setShowPivot(false)}
-          />
-        )}
+
         <UsersDialog open={showUsers} onClose={() => setShowUsers(false)} />
         <ImportDialog open={showImport} onClose={() => setShowImport(false)} onImported={handleImported} />
       </div>
