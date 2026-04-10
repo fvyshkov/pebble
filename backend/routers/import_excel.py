@@ -40,36 +40,66 @@ You are an assistant that analyzes Excel financial models for import into Pebble
 Pebble object model:
 - Model: top-level container (e.g. "BaaS Financial Model")
 - Analytic: a dimension/axis (e.g. "Периоды", "Показатели"). Has fields and hierarchical records.
-  - Fields define the schema (e.g. "Наименование", "Единица измерения")
   - Records are hierarchical (parent_id tree): groups contain children
-- Sheet: a named view binding 2+ analytics. First analytic = columns (periods), rest = rows (indicators)
-- Cell: intersection of records from each bound analytic. Has value, rule (manual/formula)
+- Sheet: a named view binding 2+ analytics. First = columns (periods), rest = rows
+- Cell: value + rule (manual = user input, formula = computed)
 
-Period analytic has year > quarter > month hierarchy (e.g. "2026" → "1-й квартал" → "Январь 2026").
-Indicator analytics contain financial line items organized into groups.
+Pebble formula syntax (references by indicator NAME, not cell):
+- [indicator_name] — value of another indicator, same period, same group
+- [indicator_name]@prev — value from PREVIOUS period
+- [SheetName.indicator_name] — cross-sheet reference
+- Standard math: +, -, *, /, parentheses, numbers
+- SUM([a], [b], [c]) — sum of multiple indicators
+- For first-period special cases (e.g. no previous period), use "0" as value
 
-Your task: analyze Excel sheets and return their indicator hierarchy as JSON.
+Examples:
+  Excel: =D13*D14 (where R13=количество партнеров, R14=ср. количество выдач)
+  Pebble: [количество партнеров] * [среднее количество выдач на 1 партнера]
+
+  Excel: =D20/E18 (previous period's портфель / current ср.срок)
+  Pebble: [кредитный портфель]@prev / [cр. срок портфеля]
+
+  Excel: =(C20+D20)/2*D24/12 (avg of prev+current портфель * rate / 12)
+  Pebble: ([кредитный портфель]@prev + [кредитный портфель]) / 2 * [ср. % ставка портфеля] / 12
+
+  Excel: =D27-C27 (delta from previous period)
+  Pebble: [РППУ на конец месяца] - [РППУ на конец месяца]@prev
+
+  Excel: =SUM(D28:D31) (sum of rows 28-31)
+  Pebble: SUM([% доход], [трансфертный расход], [комиссия партнеру], [расходы на провизии])
 """
 
 SHEET_ANALYSIS_PROMPT = """\
 Analyze ONE sheet from an Excel financial model. The text shows:
 - Header rows (dates, labels)
-- Row labels with row numbers, formatting (BOLD, indent), data presence (HAS_DATA, INPUT, FORMULA)
+- Row labels with row numbers, formatting (BOLD, indent), data presence flags
+- F1= formula for first period, F2= formula for second period (if different)
+- INPUT = manual input cell, FORMULA = computed cell
 
-Return a JSON describing THIS sheet's indicator hierarchy.
+Return a JSON describing the sheet's indicator hierarchy WITH formulas.
 
 RULES:
-1. Build a hierarchical tree. Group headers (BOLD rows without HAS_DATA, or section titles) become parent nodes.
-2. Items with HAS_DATA beneath a group become its children.
-3. Sections like "Курсы валют", "Процентные ставки": individual items (USD, EUR, rates) MUST be children UNDER the group header, not siblings.
-4. Indented rows (indent=N) are children of the nearest preceding non-indented or less-indented row.
-5. Rows like "Показатель", "ЕИ", "Отв.исп." are column headers — skip them.
-6. display_name: use A1 or B1 title if it's descriptive, otherwise use the sheet tab name.
-7. data_start_col: the column number where period data begins (where dates are in headers).
-8. Groups with HAS_DATA: a row can be both a group AND have data (e.g. "Итого" row with summed values and child detail rows below). Mark is_group=true if it has children.
+1. Build a hierarchical tree. BOLD rows with "ЕИ" = group headers (product types, sections).
+2. Items beneath a group are its children indicators.
+3. For each indicator: name, unit, row, rule (manual/formula), and for formulas: the Pebble formula.
+4. Convert Excel cell references to Pebble [indicator_name] references using the ROW MAPPING.
+5. If F1 and F2 differ (e.g. first period is 0, subsequent use @prev), provide TWO formulas: "formula_first" and "formula".
+6. Cross-sheet references like ='0'!D10 → [Параметры.количество партнеров] (or the indicator name on sheet 0 at that row).
+7. display_name: from A1/B1 title. data_start_col: first period column number.
+8. Skip header rows (Показатель, ЕИ, Отв.исп.) — they are not indicators.
 
 Return ONLY valid JSON, no markdown:
-{"excel_name":"Tab","display_name":"Title","data_start_col":4,"indicators":[{"name":"Group","unit":"","row":5,"is_group":true,"children":[{"name":"Item","unit":"%","row":6,"is_group":false,"children":[]}]}]}
+{"excel_name":"Tab","display_name":"Title","data_start_col":4,"indicators":[
+  {"name":"Тип продукта","unit":"","row":12,"is_group":true,"children":[
+    {"name":"показатель","unit":"тыс сом","row":13,"is_group":false,"children":[],
+     "rule":"formula","formula":"[a] * [b]"},
+    {"name":"ввод","unit":"%","row":14,"is_group":false,"children":[],
+     "rule":"manual"}
+  ]}
+]}
+
+For formulas with first-period exception:
+{"rule":"formula","formula":"[портфель]@prev / [срок]","formula_first":"0"}
 
 Sheet content:
 """
@@ -136,6 +166,23 @@ def _extract_sheet_text(ws, sheet_name: str, max_rows: int = 500) -> str:
                 is_input = True
                 break
 
+        # Extract first two period formulas for formula cells
+        formula_m1 = ""
+        formula_m2 = ""
+        if has_formula:
+            for c in range(4, min(max_col + 1, 50)):
+                cv = ws.cell(r, c).value
+                if cv and isinstance(cv, str) and cv.startswith("="):
+                    if not formula_m1:
+                        formula_m1 = str(cv)[:80]
+                    elif not formula_m2:
+                        formula_m2 = str(cv)[:80]
+                        break
+                elif cv is not None and not formula_m1:
+                    # First period is a constant (e.g. 0 for погашения)
+                    formula_m1 = str(cv)[:20]
+                    continue
+
         flags = []
         if is_bold:
             flags.append("BOLD")
@@ -149,7 +196,12 @@ def _extract_sheet_text(ws, sheet_name: str, max_rows: int = 500) -> str:
             flags.append("INPUT")
 
         flag_str = f" [{', '.join(flags)}]" if flags else ""
-        lines.append(f"  Row {r}: {' | '.join(labels)}{flag_str}")
+        formula_str = ""
+        if formula_m1:
+            formula_str = f" F1={formula_m1}"
+            if formula_m2 and formula_m2 != formula_m1:
+                formula_str += f" F2={formula_m2}"
+        lines.append(f"  Row {r}: {' | '.join(labels)}{flag_str}{formula_str}")
 
     return "\n".join(lines)
 
@@ -362,9 +414,12 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
 
 # ── Indicator records creation (recursive) ─────────────────────────────────
 
-async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]) -> dict:
-    """Create hierarchical indicator records. Returns {excel_row: record_id}."""
+async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]) -> tuple[dict, dict]:
+    """Create hierarchical indicator records.
+    Returns (row_to_rid: {excel_row: record_id}, rid_to_formula: {record_id: {rule, formula, formula_first}})
+    """
     row_to_rid = {}
+    rid_to_formula = {}
     sort_idx = 0
 
     async def insert_items(items: list[dict], parent_id: str | None):
@@ -380,13 +435,23 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
                 (rid, analytic_id, parent_id, sort_idx, json.dumps(data, ensure_ascii=False)),
             )
             row_to_rid[item["row"]] = rid
+
+            # Store formula info
+            rule = item.get("rule", "manual")
+            if rule == "formula":
+                rid_to_formula[rid] = {
+                    "rule": "formula",
+                    "formula": item.get("formula", ""),
+                    "formula_first": item.get("formula_first", ""),
+                }
+
             sort_idx += 1
 
             if item.get("children"):
                 await insert_items(item["children"], rid)
 
     await insert_items(indicators, None)
-    return row_to_rid
+    return row_to_rid, rid_to_formula
 
 
 # ── Main import endpoint ───────────────────────────────────────────────────
@@ -507,7 +572,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             )
 
         # Create hierarchical indicator records
-        row_to_rid = await _create_indicator_records(db, indicator_analytic_id, indicators)
+        row_to_rid, rid_to_formula = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
         # Create Pebble sheet
         pebble_sheet_id = str(uuid.uuid4())
@@ -548,19 +613,31 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 if key in month_record_ids:
                     col_to_period_rid[sp["col"]] = month_record_ids[key]
 
+        # Determine which period is "first" (for formula_first)
+        sorted_period_cols = sorted(col_to_period_rid.keys())
+        first_period_rid = col_to_period_rid[sorted_period_cols[0]] if sorted_period_cols else None
+
         cell_count = 0
         for row_num, indicator_rid in row_to_rid.items():
+            formula_info = rid_to_formula.get(indicator_rid)
+
             for col_num, period_rid in col_to_period_rid.items():
                 cell_val = ws_d.cell(row_num, col_num)
-                cell_fmt = ws_f.cell(row_num, col_num)
-
                 val = cell_val.value
                 if val is None:
                     continue
 
-                is_input = _is_input_cell(cell_fmt)
-                is_formula = str(cell_fmt.value).startswith("=") if cell_fmt.value else False
-                rule = "manual" if is_input else "formula" if is_formula else "manual"
+                # Determine rule and formula from Claude analysis
+                if formula_info:
+                    rule = "formula"
+                    is_first = (period_rid == first_period_rid)
+                    if is_first and formula_info.get("formula_first"):
+                        formula_text = formula_info["formula_first"]
+                    else:
+                        formula_text = formula_info.get("formula", "")
+                else:
+                    rule = "manual"
+                    formula_text = ""
 
                 coord_key = f"{period_rid}|{indicator_rid}"
                 value_str = str(val)
@@ -569,7 +646,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 try:
                     await db.execute(
                         "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
-                        (cid, pebble_sheet_id, coord_key, value_str, "sum", rule, ""),
+                        (cid, pebble_sheet_id, coord_key, value_str, "sum", rule, formula_text),
                     )
                     cell_count += 1
                 except Exception:
@@ -741,7 +818,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     (str(uuid.uuid4()), indicator_analytic_id, fname, fcode, ftype, sort_i),
                 )
 
-            row_to_rid = await _create_indicator_records(db, indicator_analytic_id, indicators)
+            row_to_rid, rid_to_formula = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
             await db.execute("INSERT INTO sheets (id, model_id, name) VALUES (?,?,?)",
@@ -773,20 +850,30 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     if key in month_record_ids:
                         col_to_period_rid[sp["col"]] = month_record_ids[key]
 
+            sorted_period_cols = sorted(col_to_period_rid.keys())
+            first_period_rid = col_to_period_rid[sorted_period_cols[0]] if sorted_period_cols else None
+
             cell_count = 0
             for row_num, indicator_rid in row_to_rid.items():
+                formula_info = rid_to_formula.get(indicator_rid)
                 for col_num, period_rid in col_to_period_rid.items():
                     val = ws_d.cell(row_num, col_num).value
                     if val is None:
                         continue
-                    cell_fmt = ws_f.cell(row_num, col_num)
-                    is_input = _is_input_cell(cell_fmt)
-                    is_formula = str(cell_fmt.value).startswith("=") if cell_fmt.value else False
-                    rule = "manual" if is_input else "formula" if is_formula else "manual"
+                    if formula_info:
+                        rule = "formula"
+                        is_first = (period_rid == first_period_rid)
+                        if is_first and formula_info.get("formula_first"):
+                            formula_text = formula_info["formula_first"]
+                        else:
+                            formula_text = formula_info.get("formula", "")
+                    else:
+                        rule = "manual"
+                        formula_text = ""
                     try:
                         await db.execute(
                             "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
-                            (str(uuid.uuid4()), pebble_sheet_id, f"{period_rid}|{indicator_rid}", str(val), "sum", rule, ""),
+                            (str(uuid.uuid4()), pebble_sheet_id, f"{period_rid}|{indicator_rid}", str(val), "sum", rule, formula_text),
                         )
                         cell_count += 1
                     except Exception:
