@@ -521,7 +521,9 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
 
     # ── Evaluate all formula cells ──
     ctx = FormulaContext(cells, resolve_ref)
-    computed = {}
+
+    # Save original values to detect actual changes
+    original_values = {k: cells.get(k, "") for k in formula_cells}
 
     # Iterative evaluation — multiple passes until stable
     for pass_num in range(10):
@@ -538,14 +540,18 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
             new_val = evaluate(formula, ctx)
             new_str = str(round(new_val, 6)) if new_val != 0 else "0"
 
-            # First pass: always store (initial values may be stale)
-            if pass_num == 0 or new_str != old_val:
+            if new_str != old_val:
                 cells[coord_key] = new_str
-                computed[coord_key] = new_str
-                if new_str != old_val:
-                    changed = True
+                changed = True
 
-        if pass_num > 0 and not changed:
+        if not changed:
             break
+
+    # Return only cells that actually changed from their original DB values
+    computed = {}
+    for coord_key in formula_cells:
+        new_val = cells.get(coord_key, "")
+        if new_val != original_values.get(coord_key, ""):
+            computed[coord_key] = new_val
 
     return computed
