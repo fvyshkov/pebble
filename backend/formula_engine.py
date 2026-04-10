@@ -48,26 +48,24 @@ def parse_ref(token: str) -> dict:
     for pm in PARAM_RE.finditer(params_str):
         params[pm.group(1)] = pm.group(2)
 
+    # Cross-sheet separator is "::" — e.g. [SheetName::indicator]
+    # Also support legacy "." separator for backwards compat (but "::" preferred)
     sheet = None
-    if "." in name:
-        # Try each dot position LEFT-TO-RIGHT. Accept the split where:
-        # 1. Right part doesn't start with a digit (that would be "BaaS.1")
-        # 2. Right part has a space or is long enough to be an indicator name
-        # 3. Last segment before dot is not an abbreviation
+    if "::" in name:
+        parts = name.split("::", 1)
+        sheet = parts[0].strip()
+        name = parts[1].strip()
+    elif "." in name:
+        # Legacy: try dot as separator, but only if left part is clearly a sheet name
+        # (not an abbreviation like "ср.", not a number like "BaaS.1")
         dots = [i for i, c in enumerate(name) if c == "."]
         for di in dots:
             left = name[:di].strip()
             right = name[di + 1:].strip()
-            if not right:
-                continue
-            # Skip if right starts with digit (e.g. "BaaS.1" → "1" is part of sheet name)
-            if right and right[0].isdigit():
-                continue
-            # Skip if left ends with an abbreviation
+            if not right: continue
+            if right[0].isdigit(): continue
             last_seg = left.rsplit(".", 1)[-1].strip().lower()
-            if last_seg in ABBREVS:
-                continue
-            # Accept this split
+            if last_seg in ABBREVS: continue
             sheet = left; name = right; break
 
     return {"name": name, "sheet": sheet, "params": params}
@@ -481,13 +479,18 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                     if score > best_score:
                         best_score = score; best_rid = rids[0]
         if best_rid: return best_rid
-        # Word overlap with stemming
+        # Word overlap with stemming + abbreviation expansion
+        ABBREV_EXPAND = {"ср": "средн", "средн": "ср"}
         def norm(s):
-            words = set(re.sub(r'[()]', ' ', s.lower()).split())
+            words = set(re.sub(r'[().%]', ' ', s.lower()).split())
             stemmed = set()
             for w in words:
                 stemmed.add(w)
                 if len(w) > 4: stemmed.add(w[:len(w)-2])
+                # Expand abbreviations
+                if w in ABBREV_EXPAND: stemmed.add(ABBREV_EXPAND[w])
+                if len(w) > 4 and w[:len(w)-2] in ABBREV_EXPAND:
+                    stemmed.add(ABBREV_EXPAND[w[:len(w)-2]])
             return stemmed
         nw = norm(name)
         best = 0; best_rid = None
@@ -496,7 +499,7 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             for iname, rids in nmap.items():
                 iw = norm(iname)
                 o = len(nw & iw)
-                if o > best and o >= max(2, len(nw) * 0.4):
+                if o > best and o >= max(2, len(nw) * 0.3):
                     best = o; best_rid = rids[0]
         return best_rid
 
