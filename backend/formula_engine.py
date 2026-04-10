@@ -379,6 +379,23 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                 continue
 
             candidates = nmap.get(name, [])
+
+            # If no exact match, try prefix match: "количество партнеров" matches
+            # "количество партнеров (рассрочка)" — but only within the same parent group
+            if not candidates:
+                current_rid = context.get(aid)
+                current_parent = record_by_id.get(current_rid, {}).get("parent_id") if current_rid else None
+                for rname, rids in nmap.items():
+                    if rname.startswith(name) and rname != name:
+                        # Check if any candidate shares the current parent
+                        for crid in rids:
+                            crec = record_by_id.get(crid)
+                            if crec and crec.get("parent_id") == current_parent:
+                                candidates = [crid]
+                                break
+                    if candidates:
+                        break
+
             if not candidates:
                 continue
 
