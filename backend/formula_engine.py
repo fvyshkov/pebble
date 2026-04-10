@@ -318,16 +318,6 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             return 0.0
 
         target_ck = f"{period_rid}|{ind_rid}"
-
-        # If target is a group with no cell data, use first child
-        if (target_sid, target_ck) not in _original_cell_keys:
-            for crid, crec in target_meta["record_by_id"].items():
-                if crec.get("parent_id") == ind_rid:
-                    child_ck = f"{period_rid}|{crid}"
-                    if (target_sid, child_ck) in _original_cell_keys:
-                        return get_cell(target_sid, child_ck)
-            return 0.0
-
         return get_cell(target_sid, target_ck)
 
     def _resolve_local(ref, context, meta):
