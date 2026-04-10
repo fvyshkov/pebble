@@ -46,17 +46,29 @@ def parse_ref(token: str) -> dict:
         params[pm.group(1)] = pm.group(2)
 
     # Handle Sheet.indicator cross-sheet reference
-    # Split on "." only if: no space before the dot AND char after dot is not a space
-    # This avoids splitting "ср. сумма" or "ср. % ставка" which are abbreviations
+    # Try each "." position: find the longest left part that looks like a sheet name
+    # Abbreviations (ср., тыс., мин.) are NOT sheet names
+    ABBREVS = {"ср", "тыс", "мін", "мин", "макс", "кол", "шт", "руб", "дол", "коэф", "кред"}
     sheet = None
     if "." in name:
-        dot_pos = name.index(".")
-        left = name[:dot_pos].strip()
-        right = name[dot_pos + 1:]
-        # Abbreviations always have space after dot; sheet refs don't
-        if left and right and not right.startswith(" "):
-            sheet = left
-            name = right.strip()
+        # Try all dot positions (rightmost first for "BaaS.1.indicator")
+        for i in range(len(name) - 1, -1, -1):
+            if name[i] == ".":
+                left = name[:i].strip()
+                right = name[i + 1:].strip()
+                left_lower = left.lower()
+                # Skip if left is a known abbreviation
+                if left_lower in ABBREVS:
+                    continue
+                # Skip if left is too short (1-2 chars) — likely abbreviation
+                if len(left) <= 2:
+                    continue
+                # Accept: left has no spaces (like "OPEX+CAPEX", "BaaS.1", "Параметры")
+                # OR left is a clear multi-word sheet name
+                if right:
+                    sheet = left
+                    name = right
+                    break
 
     return {"name": name, "sheet": sheet, "params": params}
 
@@ -388,16 +400,22 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                         ind_rid = irid
                         break
             if not ind_rid:
-                # Normalize: remove parens and compare word sets
+                # Normalize: remove parens, stem Russian words (drop last 2 chars)
                 import re
-                def norm(s): return set(re.sub(r'[()]', ' ', s.lower()).split())
+                def norm(s):
+                    words = set(re.sub(r'[()]', ' ', s.lower()).split())
+                    # Add stemmed versions (crude: drop last 1-3 chars for Russian)
+                    stemmed = set()
+                    for w in words:
+                        if len(w) > 4: stemmed.add(w[:len(w)-2])
+                        stemmed.add(w)
+                    return stemmed
                 name_words = norm(name)
                 best_score = 0
                 for iname, irid in xs["name_to_rid"].items():
                     iwords = norm(iname)
                     overlap = len(name_words & iwords)
-                    # Require at least 2 word overlap and >50% of query words
-                    if overlap > best_score and overlap >= max(2, len(name_words) * 0.5):
+                    if overlap > best_score and overlap >= max(2, len(name_words) * 0.4):
                         best_score = overlap
                         ind_rid = irid
             if not ind_rid:
