@@ -46,11 +46,17 @@ def parse_ref(token: str) -> dict:
         params[pm.group(1)] = pm.group(2)
 
     # Handle Sheet.indicator cross-sheet reference
+    # Split on "." only if: no space before the dot AND char after dot is not a space
+    # This avoids splitting "ср. сумма" or "ср. % ставка" which are abbreviations
     sheet = None
     if "." in name:
-        parts = name.split(".", 1)
-        sheet = parts[0]
-        name = parts[1]
+        dot_pos = name.index(".")
+        left = name[:dot_pos].strip()
+        right = name[dot_pos + 1:]
+        # Abbreviations always have space after dot; sheet refs don't
+        if left and right and not right.startswith(" "):
+            sheet = left
+            name = right.strip()
 
     return {"name": name, "sheet": sheet, "params": params}
 
@@ -230,7 +236,7 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
     # Load records per analytic: {analytic_id: [{id, parent_id, data_json, sort_order}]}
     analytic_records = {}
     record_by_id = {}
-    name_to_rid = {}  # {analytic_id: {name: record_id}}
+    name_to_rids = {}  # {analytic_id: {name: [record_id, ...]}}
     period_analytic_id = None
     period_order = []  # ordered list of leaf period record IDs
 
@@ -242,15 +248,15 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
         )
         recs = [dict(r) for r in recs]
         analytic_records[aid] = recs
-        name_map = {}
+        name_map: dict[str, list[str]] = {}
         for r in recs:
             record_by_id[r["id"]] = r
             data = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
             r["_data"] = data
             name = data.get("name", "")
-            name_map[name] = r["id"]
+            name_map.setdefault(name, []).append(r["id"])
 
-        name_to_rid[aid] = name_map
+        name_to_rids[aid] = name_map
 
         if b["is_periods"]:
             period_analytic_id = aid
@@ -281,22 +287,122 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
     for i in range(1, len(period_order)):
         prev_period[period_order[i]] = period_order[i - 1]
 
+    # ── Load cross-sheet data for [Sheet.indicator] references ──
+    # Get model_id for this sheet
+    sheet_row = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
+    model_id = sheet_row[0]["model_id"] if sheet_row else None
+
+    # Cross-sheet lookup: {sheet_display_name: {indicator_name: {period_rid: value}}}
+    xsheet = {}
+    if model_id:
+        other_sheets = await db.execute_fetchall(
+            "SELECT id, name FROM sheets WHERE model_id = ? AND id != ?", (model_id, sheet_id))
+        for os in other_sheets:
+            os_bindings = await db.execute_fetchall(
+                "SELECT sa.analytic_id, a.is_periods FROM sheet_analytics sa "
+                "JOIN analytics a ON a.id = sa.analytic_id WHERE sa.sheet_id = ? ORDER BY sa.sort_order",
+                (os["id"],))
+            os_period_aid = None
+            os_indicator_aid = None
+            for ob in os_bindings:
+                if ob["is_periods"]:
+                    os_period_aid = ob["analytic_id"]
+                else:
+                    os_indicator_aid = ob["analytic_id"]
+            if not os_period_aid or not os_indicator_aid:
+                continue
+            # Build indicator name → record_id map
+            os_recs = await db.execute_fetchall(
+                "SELECT id, data_json FROM analytic_records WHERE analytic_id = ?", (os_indicator_aid,))
+            os_name_to_rid = {}
+            for r in os_recs:
+                d = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
+                os_name_to_rid[d.get("name", "")] = r["id"]
+            # Load cells
+            os_cells = await db.execute_fetchall(
+                "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (os["id"],))
+            indicator_data = {}
+            for c in os_cells:
+                parts = c["coord_key"].split("|")
+                if len(parts) == 2:
+                    p_rid, i_rid = parts
+                    indicator_data[(p_rid, i_rid)] = c["value"] or ""
+            xsheet[os["name"]] = {"name_to_rid": os_name_to_rid, "cells": indicator_data}
+
     # ── Reference resolver ──
     def resolve_ref(ref: dict, context: dict) -> str | None:
         """Resolve a parsed reference to a coord_key."""
         name = ref["name"]
+        sheet_name = ref.get("sheet")
         params = ref.get("params", {})
 
-        # Find which analytic this indicator belongs to
+        # ── Cross-sheet reference: [Sheet.indicator] ──
+        if sheet_name:
+            # Exact match first, then fuzzy (partial name match)
+            xs = xsheet.get(sheet_name)
+            if not xs:
+                for sn, sd in xsheet.items():
+                    if sheet_name.lower() in sn.lower() or sn.lower() in sheet_name.lower():
+                        xs = sd
+                        break
+            if not xs:
+                return None
+            # Find indicator: exact, then fuzzy
+            ind_rid = xs["name_to_rid"].get(name)
+            if not ind_rid:
+                for iname, irid in xs["name_to_rid"].items():
+                    if name.lower() in iname.lower() or iname.lower() in name.lower():
+                        ind_rid = irid
+                        break
+            if not ind_rid:
+                return None
+            # Get the period from current context
+            period_rid = context.get(period_analytic_id)
+            if not period_rid:
+                return None
+            val = xs["cells"].get((period_rid, ind_rid))
+            if val is not None:
+                # Store directly in cells dict with a synthetic key so evaluator picks it up
+                synth_key = f"__xsheet__{sheet_name}__{name}__{period_rid}"
+                cells[synth_key] = val
+                return synth_key
+            return None
+
+        # Find which analytic this indicator belongs to.
+        # Key: prefer a record that shares the same parent as the current context record
+        # (e.g. within the same product group)
         target_rid = None
         target_analytic_id = None
-        for aid, nmap in name_to_rid.items():
+
+        for aid, nmap in name_to_rids.items():
             if aid == period_analytic_id:
-                continue  # periods are not indicators
-            if name in nmap:
-                target_rid = nmap[name]
+                continue
+
+            candidates = nmap.get(name, [])
+            if not candidates:
+                continue
+
+            if len(candidates) == 1:
+                target_rid = candidates[0]
                 target_analytic_id = aid
                 break
+
+            # Multiple matches — pick the one with the same parent as current context
+            current_rid = context.get(aid)
+            if current_rid:
+                current_rec = record_by_id.get(current_rid)
+                current_parent = current_rec["parent_id"] if current_rec else None
+                for crid in candidates:
+                    crec = record_by_id.get(crid)
+                    if crec and crec["parent_id"] == current_parent:
+                        target_rid = crid
+                        target_analytic_id = aid
+                        break
+
+            if not target_rid:
+                target_rid = candidates[0]
+                target_analytic_id = aid
+            break
 
         if target_rid is None:
             return None
@@ -346,12 +452,10 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
     ctx = FormulaContext(cells, resolve_ref)
     computed = {}
 
-    # Simple iterative evaluation (multiple passes for dependencies)
-    # In practice 3-5 passes is enough for most financial models
-    for _ in range(10):
+    # Iterative evaluation — multiple passes until stable
+    for pass_num in range(10):
         changed = False
         for coord_key, formula in formula_cells.items():
-            # Parse context from coord_key
             parts = coord_key.split("|")
             context = {}
             for i, aid in enumerate(ordered_analytic_ids):
@@ -363,12 +467,14 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
             new_val = evaluate(formula, ctx)
             new_str = str(round(new_val, 6)) if new_val != 0 else "0"
 
-            if new_str != old_val:
+            # First pass: always store (initial values may be stale)
+            if pass_num == 0 or new_str != old_val:
                 cells[coord_key] = new_str
                 computed[coord_key] = new_str
-                changed = True
+                if new_str != old_val:
+                    changed = True
 
-        if not changed:
+        if pass_num > 0 and not changed:
             break
 
     return computed
