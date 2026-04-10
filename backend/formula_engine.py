@@ -375,18 +375,29 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     computed_set = set()
     computing_set = set()
 
+    _trace_cell = None
+
     def get_cell(sheet_id: str, coord_key: str) -> float:
         gk = (sheet_id, coord_key)
 
         if gk in computed_set:
-            return _to_float(global_cells.get(gk, ""))
+            v = _to_float(global_cells.get(gk, ""))
+            if _trace_cell and _trace_cell in coord_key:
+                import sys; print(f"TRACE cached {coord_key[:20]}={v}", file=sys.stderr)
+            return v
 
         if gk in computing_set:
-            return _to_float(global_cells.get(gk, ""))  # cycle — use current
+            v = _to_float(global_cells.get(gk, ""))
+            if _trace_cell and _trace_cell in coord_key:
+                import sys; print(f"TRACE CYCLE {coord_key[:20]}={v}", file=sys.stderr)
+            return v
 
         formula = global_formulas.get(gk)
         if not formula:
-            return _to_float(global_cells.get(gk, ""))
+            v = _to_float(global_cells.get(gk, ""))
+            if _trace_cell and _trace_cell in coord_key:
+                import sys; print(f"TRACE manual {coord_key[:20]}={v} (no formula)", file=sys.stderr)
+            return v
 
         computing_set.add(gk)
         meta = sheet_meta[sheet_id]
@@ -462,24 +473,18 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
     def _find_indicator(name, meta):
         """Find indicator record_id by name in a sheet's metadata."""
+        # 1. Exact match (case-sensitive)
         for aid, nmap in meta["name_to_rids"].items():
             if aid == meta["period_aid"]: continue
             rids = nmap.get(name)
             if rids: return rids[0]
-        # Fuzzy: substring (case-insensitive)
+        # 2. Case-insensitive exact
         nl = name.lower()
-        best_score = 0; best_rid = None
         for aid, nmap in meta["name_to_rids"].items():
             if aid == meta["period_aid"]: continue
             for iname, rids in nmap.items():
-                il = iname.lower()
-                if nl in il or il in nl:
-                    # Similarity: closer lengths = better match
-                    score = min(len(nl), len(il)) / max(len(nl), len(il), 1)
-                    if score > best_score:
-                        best_score = score; best_rid = rids[0]
-        if best_rid: return best_rid
-        # Word overlap with stemming + abbreviation expansion
+                if iname.lower() == nl: return rids[0]
+        # 3. Word overlap with stemming (primary fuzzy method)
         ABBREV_EXPAND = {"ср": "средн", "средн": "ср"}
         def norm(s):
             words = set(re.sub(r'[().%]', ' ', s.lower()).split())
