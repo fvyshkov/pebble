@@ -1,14 +1,16 @@
-"""Pebble formula engine — parses and evaluates cell formulas.
+"""Pebble formula engine — lazy pull-based evaluation with memoization.
+
+Each cell is a lazy function. Requesting a cell's value recursively
+evaluates its dependencies until it reaches manual inputs. Results
+are cached per calculation run.
 
 Formula syntax:
-  [indicator_name]                              — same context (period, product, etc.)
+  [indicator_name]                              — same context
   [indicator_name](периоды="предыдущий")        — previous period
-  [indicator_name](периоды="Январь 2026")       — specific period value
-  [indicator_name](продукты="Потребительский кредит")  — specific analytic value
+  [indicator_name](периоды="Январь 2026")       — specific period
   [Sheet.indicator_name]                        — cross-sheet reference
-  SUM([a], [b], [c])                            — sum of references
-
-Supports: +, -, *, /, parentheses, numbers, unary minus.
+  SUM([a], [b], [c])                            — sum function
+  Standard math: +, -, *, /, parentheses, numbers
 """
 
 import re
@@ -27,15 +29,16 @@ TOKEN_RE = re.compile(r"""
 """, re.VERBOSE)
 
 REF_RE = re.compile(r"""
-    \[([^\]]+)\]              # indicator name (may include Sheet. prefix)
+    \[([^\]]+)\]              # indicator name
     (?:\(([^)]*)\))?          # optional (key="value", ...) params
 """, re.VERBOSE)
 
 PARAM_RE = re.compile(r'([\w\s]+?)\s*=\s*"([^"]*)"')
 
+ABBREVS = {"ср", "тыс", "мін", "мин", "макс", "кол", "шт", "руб", "дол", "коэф", "кред"}
+
 
 def parse_ref(token: str) -> dict:
-    """Parse a reference token like [name](key="val") into structured form."""
     m = REF_RE.match(token)
     if not m:
         return {"name": token, "params": {}}
@@ -45,88 +48,45 @@ def parse_ref(token: str) -> dict:
     for pm in PARAM_RE.finditer(params_str):
         params[pm.group(1)] = pm.group(2)
 
-    # Handle Sheet.indicator cross-sheet reference
-    # Try each "." position: find the longest left part that looks like a sheet name
-    # Abbreviations (ср., тыс., мин.) are NOT sheet names
-    ABBREVS = {"ср", "тыс", "мін", "мин", "макс", "кол", "шт", "руб", "дол", "коэф", "кред"}
     sheet = None
     if "." in name:
-        # Try all dot positions (rightmost first for "BaaS.1.indicator")
         for i in range(len(name) - 1, -1, -1):
             if name[i] == ".":
                 left = name[:i].strip()
                 right = name[i + 1:].strip()
-                left_lower = left.lower()
-                # Skip if left is a known abbreviation
-                if left_lower in ABBREVS:
+                if left.lower() in ABBREVS or len(left) <= 2:
                     continue
-                # Skip if left is too short (1-2 chars) — likely abbreviation
-                if len(left) <= 2:
-                    continue
-                # Accept: left has no spaces (like "OPEX+CAPEX", "BaaS.1", "Параметры")
-                # OR left is a clear multi-word sheet name
                 if right:
-                    sheet = left
-                    name = right
-                    break
+                    sheet = left; name = right; break
 
     return {"name": name, "sheet": sheet, "params": params}
 
 
 def tokenize(formula: str) -> list:
-    """Tokenize formula into list of (type, value) tuples."""
     tokens = []
     pos = 0
     while pos < len(formula):
         m = TOKEN_RE.match(formula, pos)
         if not m:
-            pos += 1
-            continue
-        if m.group(1):  # reference
+            pos += 1; continue
+        if m.group(1):
             tokens.append(("REF", m.group(1)))
-        elif m.group(2):  # SUM
+        elif m.group(2):
             tokens.append(("SUM", "SUM"))
-        elif m.group(3):  # number
+        elif m.group(3):
             tokens.append(("NUM", float(m.group(3))))
-        elif m.group(4):  # operator/paren
+        elif m.group(4):
             tokens.append(("OP", m.group(4)))
-        # skip whitespace
         pos = m.end()
     return tokens
 
 
-# ── Evaluator ──────────────────────────────────────────────────────────────
+# ── Evaluator (stateless — uses callback for value resolution) ─────────────
 
-class FormulaContext:
-    """Provides cell value resolution for formula evaluation."""
-
-    def __init__(self, cells: dict[str, str], resolve_ref: callable):
-        """
-        cells: {coord_key: value_str}
-        resolve_ref: (ref_dict, current_coord_context) -> coord_key or None
-        """
-        self.cells = cells
-        self.resolve_ref = resolve_ref
-        self.current_context = {}  # set before each evaluation
-
-    def get_value(self, ref_token: str) -> float:
-        ref = parse_ref(ref_token)
-        coord_key = self.resolve_ref(ref, self.current_context)
-        if coord_key is None:
-            return 0.0
-        val = self.cells.get(coord_key, "")
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            return 0.0
-
-
-def evaluate(formula: str, ctx: FormulaContext) -> float:
-    """Evaluate a Pebble formula string. Returns numeric result."""
+def evaluate(formula: str, get_ref_value) -> float:
+    """Evaluate formula. get_ref_value(token_str) -> float."""
     if not formula or not formula.strip():
         return 0.0
-
-    # Simple constant check
     try:
         return float(formula)
     except ValueError:
@@ -136,24 +96,18 @@ def evaluate(formula: str, ctx: FormulaContext) -> float:
     if not tokens:
         return 0.0
 
-    # Recursive descent parser
     pos = [0]
 
     def peek():
-        if pos[0] < len(tokens):
-            return tokens[pos[0]]
-        return None
+        return tokens[pos[0]] if pos[0] < len(tokens) else None
 
     def advance():
-        t = tokens[pos[0]]
-        pos[0] += 1
-        return t
+        t = tokens[pos[0]]; pos[0] += 1; return t
 
     def expect_op(op):
         t = peek()
         if t and t[0] == "OP" and t[1] == op:
-            advance()
-            return True
+            advance(); return True
         return False
 
     def parse_expr():
@@ -161,8 +115,7 @@ def evaluate(formula: str, ctx: FormulaContext) -> float:
         while True:
             t = peek()
             if t and t[0] == "OP" and t[1] in ("+", "-"):
-                op = advance()[1]
-                right = parse_term()
+                op = advance()[1]; right = parse_term()
                 left = left + right if op == "+" else left - right
             else:
                 break
@@ -173,12 +126,8 @@ def evaluate(formula: str, ctx: FormulaContext) -> float:
         while True:
             t = peek()
             if t and t[0] == "OP" and t[1] in ("*", "/"):
-                op = advance()[1]
-                right = parse_unary()
-                if op == "*":
-                    left = left * right
-                else:
-                    left = left / right if right != 0 else 0.0
+                op = advance()[1]; right = parse_unary()
+                left = left * right if op == "*" else (left / right if right != 0 else 0.0)
             else:
                 break
         return left
@@ -186,8 +135,7 @@ def evaluate(formula: str, ctx: FormulaContext) -> float:
     def parse_unary():
         t = peek()
         if t and t[0] == "OP" and t[1] == "-":
-            advance()
-            return -parse_primary()
+            advance(); return -parse_primary()
         return parse_primary()
 
     def parse_primary():
@@ -195,28 +143,19 @@ def evaluate(formula: str, ctx: FormulaContext) -> float:
         if t is None:
             return 0.0
         if t[0] == "NUM":
-            advance()
-            return t[1]
+            advance(); return t[1]
         if t[0] == "REF":
-            advance()
-            return ctx.get_value(t[1])
+            advance(); return get_ref_value(t[1])
         if t[0] == "SUM":
             advance()
-            # Collect arguments until closing paren
             args = []
             while True:
                 args.append(parse_expr())
-                if not expect_op(","):
-                    break
-            expect_op(")")
-            return sum(args)
+                if not expect_op(","): break
+            expect_op(")"); return sum(args)
         if t[0] == "OP" and t[1] == "(":
-            advance()
-            val = parse_expr()
-            expect_op(")")
-            return val
-        advance()  # skip unknown
-        return 0.0
+            advance(); val = parse_expr(); expect_op(")"); return val
+        advance(); return 0.0
 
     try:
         result = parse_expr()
@@ -225,16 +164,400 @@ def evaluate(formula: str, ctx: FormulaContext) -> float:
         return 0.0
 
 
-# ── Sheet calculator ───────────────────────────────────────────────────────
+# ── Lazy calculator ────────────────────────────────────────────────────────
+
+class SheetCalculator:
+    """Lazy pull-based calculator for a sheet.
+
+    Each cell is a lazy function: requesting its value triggers recursive
+    evaluation of dependencies. Results are memoized per run.
+    """
+
+    def __init__(self, cells: dict, formula_cells: dict,
+                 resolve_ref, period_order: list, prev_period: dict):
+        """
+        cells: {coord_key: value_str} — all cell data (manual + formula)
+        formula_cells: {coord_key: formula_str} — only formula cells
+        resolve_ref: (ref_dict, context_dict) -> coord_key | None
+        """
+        self.cells = dict(cells)  # working copy
+        self.formula_cells = formula_cells
+        self.resolve_ref = resolve_ref
+        self.period_order = period_order
+        self.prev_period = prev_period
+        self._computed = set()    # already computed this run
+        self._computing = set()   # currently in stack (cycle detection)
+
+    def get_cell_value(self, coord_key: str, context: dict) -> float:
+        """Get cell value, computing lazily if it's a formula."""
+        # Already computed this run — return cached
+        if coord_key in self._computed:
+            return self._to_float(self.cells.get(coord_key, ""))
+
+        # Cycle detection
+        if coord_key in self._computing:
+            return self._to_float(self.cells.get(coord_key, ""))
+
+        formula = self.formula_cells.get(coord_key)
+        if not formula:
+            # Manual cell — just return value
+            return self._to_float(self.cells.get(coord_key, ""))
+
+        # Mark as computing
+        self._computing.add(coord_key)
+
+        # Evaluate — this will recursively pull dependencies
+        def get_ref_value(ref_token: str):
+            ref = parse_ref(ref_token)
+            resolved = self.resolve_ref(ref, context)
+            if resolved is None:
+                return 0.0
+            if resolved == coord_key:
+                return 0.0  # self-reference guard
+            # Build context for the resolved cell
+            ref_context = self._context_from_key(resolved)
+            return self.get_cell_value(resolved, ref_context)
+
+        result = evaluate(formula, get_ref_value)
+        result_str = str(round(result, 6)) if result != 0 else "0"
+
+        # Cache
+        self.cells[coord_key] = result_str
+        self._computed.add(coord_key)
+        self._computing.discard(coord_key)
+
+        return result
+
+    def _to_float(self, val: str) -> float:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _context_from_key(self, coord_key: str) -> dict:
+        """Extract context (analytic_id → record_id) from coord_key."""
+        parts = coord_key.split("|")
+        return {aid: parts[i] for i, aid in enumerate(self._ordered_aids) if i < len(parts)}
+
+    def calculate_all(self, ordered_analytic_ids: list) -> dict:
+        """Calculate all formula cells. Returns {coord_key: new_value}."""
+        self._ordered_aids = ordered_analytic_ids
+        original = {k: self.cells.get(k, "") for k in self.formula_cells}
+
+        for coord_key in self.formula_cells:
+            context = self._context_from_key(coord_key)
+            self.get_cell_value(coord_key, context)
+
+        # Return only changed
+        return {k: self.cells[k] for k in self.formula_cells
+                if self.cells.get(k, "") != original.get(k, "")}
+
+
+# ── Model-level calculator ──────────────────────────────────────────────────
+
+async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
+    """Calculate ALL formula cells across ALL sheets in a model.
+
+    Returns {sheet_id: {coord_key: new_value}}.
+    Uses lazy pull evaluation — any cell can pull dependencies from any sheet.
+    """
+    all_sheets = await db.execute_fetchall(
+        "SELECT id, name FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,))
+    if not all_sheets:
+        return {}
+
+    # ── Load entire model data ──
+    # Global cells: {(sheet_id, coord_key): value}
+    global_cells = {}
+    # Formula cells: {(sheet_id, coord_key): formula}
+    global_formulas = {}
+    # Per-sheet metadata
+    sheet_meta = {}  # sheet_id → {ordered_aids, name_to_rids, record_by_id, period_aid, prev_period, analytic_name_to_id}
+    # Sheet name → sheet_id
+    sheet_name_to_id = {}
+
+    period_aid_global = None
+    period_order = []
+    prev_period = {}
+
+    for s in all_sheets:
+        sid = s["id"]
+        sname = s["name"]
+        sheet_name_to_id[sname] = sid
+        # Aliases
+        if "параметр" in sname.lower():
+            for alias in ["Параметры", "Настройки", "BaaS - Настройки"]:
+                sheet_name_to_id[alias] = sid
+
+        bindings = await db.execute_fetchall(
+            "SELECT sa.analytic_id, sa.sort_order, a.name as analytic_name, a.is_periods "
+            "FROM sheet_analytics sa JOIN analytics a ON a.id = sa.analytic_id "
+            "WHERE sa.sheet_id = ? ORDER BY sa.sort_order", (sid,))
+
+        ordered_aids = [b["analytic_id"] for b in bindings]
+        analytic_name_to_id = {b["analytic_name"]: b["analytic_id"] for b in bindings}
+        record_by_id = {}
+        name_to_rids = {}
+        period_aid = None
+
+        for b in bindings:
+            aid = b["analytic_id"]
+            recs = [dict(r) for r in await db.execute_fetchall(
+                "SELECT * FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order", (aid,))]
+            nmap: dict[str, list[str]] = {}
+            for r in recs:
+                record_by_id[r["id"]] = r
+                data = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
+                r["_data"] = data
+                name = data.get("name", "")
+                nmap.setdefault(name, []).append(r["id"])
+                # Add compound names for cross-sheet lookup
+                if r["parent_id"] and r["parent_id"] in record_by_id:
+                    pdata = record_by_id[r["parent_id"]].get("_data", {})
+                    pname = pdata.get("name", "")
+                    if pname:
+                        nmap.setdefault(f"{name} ({pname})", []).append(r["id"])
+                        nmap.setdefault(f"{name} {pname}", []).append(r["id"])
+            name_to_rids[aid] = nmap
+
+            if b["is_periods"]:
+                period_aid = aid
+                if not period_aid_global:
+                    period_aid_global = aid
+                    parent_ids = {r["parent_id"] for r in recs if r["parent_id"]}
+                    period_order = [r["id"] for r in recs if r["id"] not in parent_ids]
+                    for i in range(1, len(period_order)):
+                        prev_period[period_order[i]] = period_order[i - 1]
+
+        sheet_meta[sid] = {
+            "ordered_aids": ordered_aids,
+            "name_to_rids": name_to_rids,
+            "record_by_id": record_by_id,
+            "period_aid": period_aid,
+            "analytic_name_to_id": analytic_name_to_id,
+            "name": sname,
+        }
+
+        # Load cells
+        for c in await db.execute_fetchall(
+                "SELECT coord_key, value, rule, formula FROM cell_data WHERE sheet_id = ?", (sid,)):
+            gk = (sid, c["coord_key"])
+            global_cells[gk] = c["value"] or ""
+            if c["rule"] == "formula" and c["formula"]:
+                global_formulas[gk] = c["formula"]
+
+    # ── Lazy evaluator ──
+    computed_set = set()
+    computing_set = set()
+
+    def get_cell(sheet_id: str, coord_key: str) -> float:
+        gk = (sheet_id, coord_key)
+
+        if gk in computed_set:
+            return _to_float(global_cells.get(gk, ""))
+
+        if gk in computing_set:
+            return _to_float(global_cells.get(gk, ""))  # cycle — use current
+
+        formula = global_formulas.get(gk)
+        if not formula:
+            return _to_float(global_cells.get(gk, ""))
+
+        computing_set.add(gk)
+        meta = sheet_meta[sheet_id]
+        context = _context_from_key(coord_key, meta["ordered_aids"])
+
+        def get_ref_value(ref_token: str) -> float:
+            ref = parse_ref(ref_token)
+            ref_sheet = ref.get("sheet")
+
+            if ref_sheet:
+                # Cross-sheet reference
+                target_sid = _find_sheet(ref_sheet)
+                if not target_sid:
+                    return 0.0
+                target_meta = sheet_meta[target_sid]
+                ind_rid = _find_indicator(ref["name"], target_meta)
+                if not ind_rid:
+                    return 0.0
+                period_rid = context.get(meta["period_aid"])
+                if not period_rid:
+                    return 0.0
+                target_aids = target_meta["ordered_aids"]
+                # Build target coord_key: period_rid | ind_rid
+                target_parts = []
+                for aid in target_aids:
+                    if aid == target_meta["period_aid"]:
+                        target_parts.append(period_rid)
+                    elif any(ind_rid in rids for rids in target_meta["name_to_rids"].get(aid, {}).values()):
+                        target_parts.append(ind_rid)
+                    else:
+                        target_parts.append("")
+                if any(p == "" for p in target_parts):
+                    # Simpler: just period|indicator
+                    target_ck = f"{period_rid}|{ind_rid}"
+                else:
+                    target_ck = "|".join(target_parts)
+                return get_cell(target_sid, target_ck)
+            else:
+                # Local reference
+                resolved = _resolve_local(ref, context, meta)
+                if not resolved or resolved == coord_key:
+                    return 0.0
+                return get_cell(sheet_id, resolved)
+
+        result = evaluate(formula, get_ref_value)
+        result_str = str(round(result, 6)) if result != 0 else "0"
+        global_cells[gk] = result_str
+        computed_set.add(gk)
+        computing_set.discard(gk)
+        return result
+
+    def _to_float(val):
+        try: return float(val)
+        except: return 0.0
+
+    def _context_from_key(coord_key, ordered_aids):
+        parts = coord_key.split("|")
+        return {aid: parts[i] for i, aid in enumerate(ordered_aids) if i < len(parts)}
+
+    def _find_sheet(name):
+        sid = sheet_name_to_id.get(name)
+        if sid: return sid
+        nl = name.lower()
+        for sn, si in sheet_name_to_id.items():
+            sl = sn.lower()
+            if nl in sl or sl in nl:
+                return si
+        # Word overlap
+        nw = set(re.sub(r'[^а-яa-z0-9\s]', '', nl).split())
+        best = 0; best_sid = None
+        for sn, si in sheet_name_to_id.items():
+            sw = set(re.sub(r'[^а-яa-z0-9\s]', '', sn.lower()).split())
+            o = len(nw & sw)
+            if o > best and o >= 1: best = o; best_sid = si
+        return best_sid
+
+    def _find_indicator(name, meta):
+        """Find indicator record_id by name in a sheet's metadata."""
+        for aid, nmap in meta["name_to_rids"].items():
+            if aid == meta["period_aid"]: continue
+            rids = nmap.get(name)
+            if rids: return rids[0]
+        # Fuzzy: substring
+        nl = name.lower()
+        for aid, nmap in meta["name_to_rids"].items():
+            if aid == meta["period_aid"]: continue
+            for iname, rids in nmap.items():
+                il = iname.lower()
+                if nl in il or il in nl:
+                    return rids[0]
+        # Word overlap with stemming
+        def norm(s):
+            words = set(re.sub(r'[()]', ' ', s.lower()).split())
+            stemmed = set()
+            for w in words:
+                stemmed.add(w)
+                if len(w) > 4: stemmed.add(w[:len(w)-2])
+            return stemmed
+        nw = norm(name)
+        best = 0; best_rid = None
+        for aid, nmap in meta["name_to_rids"].items():
+            if aid == meta["period_aid"]: continue
+            for iname, rids in nmap.items():
+                iw = norm(iname)
+                o = len(nw & iw)
+                if o > best and o >= max(2, len(nw) * 0.4):
+                    best = o; best_rid = rids[0]
+        return best_rid
+
+    def _resolve_local(ref, context, meta):
+        """Resolve a local [indicator] reference within a sheet."""
+        name = ref["name"]
+        params = ref.get("params", {})
+        ordered_aids = meta["ordered_aids"]
+        period_aid = meta["period_aid"]
+        name_to_rids = meta["name_to_rids"]
+        record_by_id = meta["record_by_id"]
+        analytic_name_to_id = meta["analytic_name_to_id"]
+
+        target_rid = None; target_aid = None
+        for aid, nmap in name_to_rids.items():
+            if aid == period_aid: continue
+            candidates = nmap.get(name, [])
+            if not candidates:
+                cur_rid = context.get(aid)
+                cur_parent = record_by_id.get(cur_rid, {}).get("parent_id") if cur_rid else None
+                for rname, rids in nmap.items():
+                    if rname.startswith(name) and rname != name:
+                        for crid in rids:
+                            crec = record_by_id.get(crid)
+                            if crec and crec.get("parent_id") == cur_parent:
+                                candidates = [crid]; break
+                    if candidates: break
+            if not candidates: continue
+            if len(candidates) == 1:
+                target_rid = candidates[0]; target_aid = aid; break
+            cur_rid = context.get(aid)
+            if cur_rid:
+                cur_parent = record_by_id.get(cur_rid, {}).get("parent_id")
+                for crid in candidates:
+                    crec = record_by_id.get(crid)
+                    if crec and crec.get("parent_id") == cur_parent:
+                        target_rid = crid; target_aid = aid; break
+            if not target_rid:
+                target_rid = candidates[0]; target_aid = aid
+            break
+
+        if target_rid is None: return None
+
+        parts = {}
+        for aid in ordered_aids:
+            if aid == target_aid: parts[aid] = target_rid
+            elif aid in context: parts[aid] = context[aid]
+
+        for pname, pval in params.items():
+            paid = analytic_name_to_id.get(pname)
+            if not paid:
+                for aname, aid in analytic_name_to_id.items():
+                    if pname.lower() in aname.lower(): paid = aid; break
+            if not paid: continue
+            if pval == "предыдущий" and paid == period_aid:
+                cur = parts.get(paid)
+                if cur and cur in prev_period: parts[paid] = prev_period[cur]
+                else: return None
+            else:
+                nmap = name_to_rids.get(paid, {})
+                rids = nmap.get(pval, [])
+                if rids: parts[paid] = rids[0]
+                else: return None
+
+        coord_parts = [parts.get(aid, "") for aid in ordered_aids]
+        if any(p == "" for p in coord_parts): return None
+        return "|".join(coord_parts)
+
+    # ── Run: evaluate all formula cells ──
+    for gk in global_formulas:
+        sheet_id, coord_key = gk
+        meta = sheet_meta[sheet_id]
+        context = _context_from_key(coord_key, meta["ordered_aids"])
+        get_cell(sheet_id, coord_key)
+
+    # Return all computed formula values grouped by sheet
+    result = {}
+    for (sid, ck) in global_formulas:
+        new_val = global_cells.get((sid, ck), "")
+        if sid not in result: result[sid] = {}
+        result[sid][ck] = new_val
+
+    return result
+
+
+# ── Sheet calculator (convenience wrapper) ─────────────────────────────────
 
 async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
-    """Calculate all formula cells in a sheet. Returns {coord_key: computed_value}.
+    """Calculate all formula cells in a sheet using lazy evaluation."""
 
-    1. Load sheet structure (analytics, records, cells)
-    2. Build reference resolver
-    3. Topological sort by dependencies
-    4. Evaluate in order
-    """
     # Load bindings
     bindings = await db.execute_fetchall(
         "SELECT sa.analytic_id, sa.sort_order, a.name as analytic_name, a.is_periods "
@@ -245,21 +568,16 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
     if not bindings:
         return {}
 
-    # Load records per analytic: {analytic_id: [{id, parent_id, data_json, sort_order}]}
-    analytic_records = {}
+    # Load records per analytic
     record_by_id = {}
     name_to_rids = {}  # {analytic_id: {name: [record_id, ...]}}
     period_analytic_id = None
-    period_order = []  # ordered list of leaf period record IDs
+    period_order = []
 
     for b in bindings:
         aid = b["analytic_id"]
-        recs = await db.execute_fetchall(
-            "SELECT * FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
-            (aid,),
-        )
-        recs = [dict(r) for r in recs]
-        analytic_records[aid] = recs
+        recs = [dict(r) for r in await db.execute_fetchall(
+            "SELECT * FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order", (aid,))]
         name_map: dict[str, list[str]] = {}
         for r in recs:
             record_by_id[r["id"]] = r
@@ -267,26 +585,19 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
             r["_data"] = data
             name = data.get("name", "")
             name_map.setdefault(name, []).append(r["id"])
-
         name_to_rids[aid] = name_map
 
         if b["is_periods"]:
             period_analytic_id = aid
-            # Get ordered leaf periods (no children)
             parent_ids = {r["parent_id"] for r in recs if r["parent_id"]}
             period_order = [r["id"] for r in recs if r["id"] not in parent_ids]
 
-    # Analytic name → analytic_id
     analytic_name_to_id = {b["analytic_name"]: b["analytic_id"] for b in bindings}
-
-    # Build ordered analytics list (for coord_key construction)
     ordered_analytic_ids = [b["analytic_id"] for b in bindings]
 
     # Load cells
     cells_raw = await db.execute_fetchall(
-        "SELECT coord_key, value, rule, formula FROM cell_data WHERE sheet_id = ?",
-        (sheet_id,),
-    )
+        "SELECT coord_key, value, rule, formula FROM cell_data WHERE sheet_id = ?", (sheet_id,))
     cells = {}
     formula_cells = {}
     for c in cells_raw:
@@ -299,12 +610,10 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
     for i in range(1, len(period_order)):
         prev_period[period_order[i]] = period_order[i - 1]
 
-    # ── Load cross-sheet data for [Sheet.indicator] references ──
-    # Get model_id for this sheet
+    # ── Cross-sheet data ──
     sheet_row = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
     model_id = sheet_row[0]["model_id"] if sheet_row else None
 
-    # Cross-sheet lookup: {sheet_display_name: {indicator_name: {period_rid: value}}}
     xsheet = {}
     if model_id:
         other_sheets = await db.execute_fetchall(
@@ -314,8 +623,7 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                 "SELECT sa.analytic_id, a.is_periods FROM sheet_analytics sa "
                 "JOIN analytics a ON a.id = sa.analytic_id WHERE sa.sheet_id = ? ORDER BY sa.sort_order",
                 (os["id"],))
-            os_period_aid = None
-            os_indicator_aid = None
+            os_period_aid = os_indicator_aid = None
             for ob in os_bindings:
                 if ob["is_periods"]:
                     os_period_aid = ob["analytic_id"]
@@ -323,9 +631,9 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                     os_indicator_aid = ob["analytic_id"]
             if not os_period_aid or not os_indicator_aid:
                 continue
-            # Build indicator name → record_id map (includes parent+child compound names)
             os_recs = [dict(r) for r in await db.execute_fetchall(
-                "SELECT id, parent_id, data_json FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order", (os_indicator_aid,))]
+                "SELECT id, parent_id, data_json FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+                (os_indicator_aid,))]
             os_name_to_rid = {}
             os_by_id = {}
             for r in os_recs:
@@ -333,43 +641,35 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                 r["_name"] = d.get("name", "")
                 os_by_id[r["id"]] = r
                 os_name_to_rid[r["_name"]] = r["id"]
-            # Add compound names: "child_name (parent_name)" and "child_name parent_name"
             for r in os_recs:
                 if r["parent_id"] and r["parent_id"] in os_by_id:
                     pname = os_by_id[r["parent_id"]]["_name"]
                     cname = r["_name"]
                     os_name_to_rid[f"{cname} ({pname})"] = r["id"]
                     os_name_to_rid[f"{cname} {pname}"] = r["id"]
-                    # Also lowercase variants
                     os_name_to_rid[f"{cname} ({pname.lower()})"] = r["id"]
-            # Load cells
-            os_cells = await db.execute_fetchall(
-                "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (os["id"],))
-            indicator_data = {}
-            for c in os_cells:
-                parts = c["coord_key"].split("|")
-                if len(parts) == 2:
-                    p_rid, i_rid = parts
-                    indicator_data[(p_rid, i_rid)] = c["value"] or ""
-            xsheet[os["name"]] = {"name_to_rid": os_name_to_rid, "cells": indicator_data}
-            # Also register under common aliases/abbreviations
-            # "BaaS - параметры модели" → also "параметры", "настройки", "0"
+
+            os_cells = {(c["coord_key"].split("|")[0], c["coord_key"].split("|")[1]): c["value"] or ""
+                        for c in await db.execute_fetchall(
+                            "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (os["id"],))
+                        if "|" in c["coord_key"]}
+
+            entry = {"name_to_rid": os_name_to_rid, "cells": os_cells}
+            xsheet[os["name"]] = entry
+            # Aliases
             name_lower = os["name"].lower()
             if "параметр" in name_lower:
-                xsheet["Параметры"] = xsheet[os["name"]]
-                xsheet["Настройки"] = xsheet[os["name"]]
-                xsheet["BaaS - Настройки"] = xsheet[os["name"]]
+                for alias in ["Параметры", "Настройки", "BaaS - Настройки"]:
+                    xsheet[alias] = entry
 
     # ── Reference resolver ──
     def resolve_ref(ref: dict, context: dict) -> str | None:
-        """Resolve a parsed reference to a coord_key."""
         name = ref["name"]
         sheet_name = ref.get("sheet")
         params = ref.get("params", {})
 
-        # ── Cross-sheet reference: [Sheet.indicator] ──
+        # Cross-sheet
         if sheet_name:
-            # Exact match first, then fuzzy
             xs = xsheet.get(sheet_name)
             if not xs:
                 sn_lower = sheet_name.lower()
@@ -378,145 +678,108 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                     if sn_lower in sl or sl in sn_lower:
                         xs = sd; break
             if not xs:
-                # Word overlap matching
-                import re
                 sn_words = set(re.sub(r'[^а-яa-z0-9\s]', '', sheet_name.lower()).split())
-                best_score = 0
+                best = 0
                 for sn, sd in xsheet.items():
                     sw = set(re.sub(r'[^а-яa-z0-9\s]', '', sn.lower()).split())
-                    overlap = len(sn_words & sw)
-                    if overlap > best_score and overlap >= 1:
-                        best_score = overlap; xs = sd
+                    o = len(sn_words & sw)
+                    if o > best and o >= 1:
+                        best = o; xs = sd
             if not xs:
                 return None
-            # Find indicator: exact → prefix → substring → word overlap
+
             ind_rid = xs["name_to_rid"].get(name)
             if not ind_rid:
-                name_lower = name.lower()
-                # Try substring match
+                nl = name.lower()
                 for iname, irid in xs["name_to_rid"].items():
                     il = iname.lower()
-                    if name_lower in il or il in name_lower:
-                        ind_rid = irid
-                        break
+                    if nl in il or il in nl:
+                        ind_rid = irid; break
             if not ind_rid:
-                # Normalize: remove parens, stem Russian words (drop last 2 chars)
-                import re
                 def norm(s):
                     words = set(re.sub(r'[()]', ' ', s.lower()).split())
-                    # Add stemmed versions (crude: drop last 1-3 chars for Russian)
                     stemmed = set()
                     for w in words:
-                        if len(w) > 4: stemmed.add(w[:len(w)-2])
                         stemmed.add(w)
+                        if len(w) > 4: stemmed.add(w[:len(w)-2])
                     return stemmed
-                name_words = norm(name)
-                best_score = 0
+                nw = norm(name)
+                best = 0
                 for iname, irid in xs["name_to_rid"].items():
-                    iwords = norm(iname)
-                    overlap = len(name_words & iwords)
-                    if overlap > best_score and overlap >= max(2, len(name_words) * 0.4):
-                        best_score = overlap
-                        ind_rid = irid
+                    iw = norm(iname)
+                    o = len(nw & iw)
+                    if o > best and o >= max(2, len(nw) * 0.4):
+                        best = o; ind_rid = irid
             if not ind_rid:
                 return None
-            # Get the period from current context
+
             period_rid = context.get(period_analytic_id)
             if not period_rid:
                 return None
             val = xs["cells"].get((period_rid, ind_rid))
             if val is not None:
-                # Store directly in cells dict with a synthetic key so evaluator picks it up
-                synth_key = f"__xsheet__{sheet_name}__{name}__{period_rid}"
-                cells[synth_key] = val
-                return synth_key
+                synth = f"__xs__{sheet_name}__{name}__{period_rid}"
+                cells[synth] = val
+                return synth
             return None
 
-        # Find which analytic this indicator belongs to.
-        # Key: prefer a record that shares the same parent as the current context record
-        # (e.g. within the same product group)
+        # Local reference
         target_rid = None
-        target_analytic_id = None
-
+        target_aid = None
         for aid, nmap in name_to_rids.items():
             if aid == period_analytic_id:
                 continue
-
             candidates = nmap.get(name, [])
-
-            # If no exact match, try prefix match: "количество партнеров" matches
-            # "количество партнеров (рассрочка)" — but only within the same parent group
             if not candidates:
                 current_rid = context.get(aid)
                 current_parent = record_by_id.get(current_rid, {}).get("parent_id") if current_rid else None
                 for rname, rids in nmap.items():
                     if rname.startswith(name) and rname != name:
-                        # Check if any candidate shares the current parent
                         for crid in rids:
                             crec = record_by_id.get(crid)
                             if crec and crec.get("parent_id") == current_parent:
-                                candidates = [crid]
-                                break
-                    if candidates:
-                        break
-
+                                candidates = [crid]; break
+                    if candidates: break
             if not candidates:
                 continue
-
             if len(candidates) == 1:
-                target_rid = candidates[0]
-                target_analytic_id = aid
-                break
-
-            # Multiple matches — pick the one with the same parent as current context
+                target_rid = candidates[0]; target_aid = aid; break
             current_rid = context.get(aid)
             if current_rid:
-                current_rec = record_by_id.get(current_rid)
-                current_parent = current_rec["parent_id"] if current_rec else None
+                current_parent = record_by_id.get(current_rid, {}).get("parent_id")
                 for crid in candidates:
                     crec = record_by_id.get(crid)
-                    if crec and crec["parent_id"] == current_parent:
-                        target_rid = crid
-                        target_analytic_id = aid
-                        break
-
+                    if crec and crec.get("parent_id") == current_parent:
+                        target_rid = crid; target_aid = aid; break
             if not target_rid:
-                target_rid = candidates[0]
-                target_analytic_id = aid
+                target_rid = candidates[0]; target_aid = aid
             break
 
         if target_rid is None:
             return None
 
-        # Build coord_key parts
         parts = {}
         for aid in ordered_analytic_ids:
-            if aid == target_analytic_id:
+            if aid == target_aid:
                 parts[aid] = target_rid
             elif aid in context:
                 parts[aid] = context[aid]
 
-        # Apply params overrides
         for param_name, param_value in params.items():
-            # Find analytic by name
             param_aid = analytic_name_to_id.get(param_name)
             if not param_aid:
-                # Try fuzzy match
                 for aname, aid in analytic_name_to_id.items():
                     if param_name.lower() in aname.lower():
-                        param_aid = aid
-                        break
+                        param_aid = aid; break
             if not param_aid:
                 continue
-
             if param_value == "предыдущий" and param_aid == period_analytic_id:
-                current_period = parts.get(param_aid)
-                if current_period and current_period in prev_period:
-                    parts[param_aid] = prev_period[current_period]
+                cur = parts.get(param_aid)
+                if cur and cur in prev_period:
+                    parts[param_aid] = prev_period[cur]
                 else:
-                    return None  # no previous period
+                    return None
             else:
-                # Look up by record name
                 nmap = name_to_rids.get(param_aid, {})
                 rids_list = nmap.get(param_value, [])
                 if rids_list:
@@ -524,52 +787,17 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                 else:
                     return None
 
-        # Build coord_key
         coord_parts = [parts.get(aid, "") for aid in ordered_analytic_ids]
         if any(p == "" for p in coord_parts):
             return None
         result_key = "|".join(coord_parts)
 
-        # Guard: self-reference detection (formula referencing its own cell)
         current_key = "|".join(context.get(aid, "") for aid in ordered_analytic_ids)
         if result_key == current_key:
-            return None  # prevent infinite recursion
+            return None
 
         return result_key
 
-    # ── Evaluate all formula cells ──
-    ctx = FormulaContext(cells, resolve_ref)
-
-    # Save original values to detect actual changes
-    original_values = {k: cells.get(k, "") for k in formula_cells}
-
-    # Iterative evaluation — multiple passes until stable
-    for pass_num in range(10):
-        changed = False
-        for coord_key, formula in formula_cells.items():
-            parts = coord_key.split("|")
-            context = {}
-            for i, aid in enumerate(ordered_analytic_ids):
-                if i < len(parts):
-                    context[aid] = parts[i]
-            ctx.current_context = context
-
-            old_val = cells.get(coord_key, "")
-            new_val = evaluate(formula, ctx)
-            new_str = str(round(new_val, 6)) if new_val != 0 else "0"
-
-            if new_str != old_val:
-                cells[coord_key] = new_str
-                changed = True
-
-        if not changed:
-            break
-
-    # Return only cells that actually changed from their original DB values
-    computed = {}
-    for coord_key in formula_cells:
-        new_val = cells.get(coord_key, "")
-        if new_val != original_values.get(coord_key, ""):
-            computed[coord_key] = new_val
-
-    return computed
+    # ── Run lazy calculation ──
+    calc = SheetCalculator(cells, formula_cells, resolve_ref, period_order, prev_period)
+    return calc.calculate_all(ordered_analytic_ids)

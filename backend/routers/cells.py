@@ -86,18 +86,20 @@ async def save_single_cell(sheet_id: str, body: CellIn):
 
 @router.post("/calculate/{sheet_id}")
 async def calculate(sheet_id: str):
-    """Recalculate all formula cells in a sheet."""
-    from backend.formula_engine import calculate_sheet
+    """Recalculate all formula cells in the model (lazy pull, cross-sheet)."""
+    from backend.formula_engine import calculate_model
     db = get_db()
-    computed = await calculate_sheet(db, sheet_id)
-    # Save computed values back to DB
-    for coord_key, value in computed.items():
-        await db.execute(
-            "UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?",
-            (value, sheet_id, coord_key),
-        )
+    sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
+    if not sheet:
+        return {"error": "not found"}
+    result = await calculate_model(db, sheet[0]["model_id"])
+    total = 0
+    for sid, changes in result.items():
+        for ck, val in changes.items():
+            await db.execute("UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?", (val, sid, ck))
+        total += len(changes)
     await db.commit()
-    return {"computed": len(computed)}
+    return {"computed": total}
 
 
 @router.get("/history/{sheet_id}/{coord_key}")
