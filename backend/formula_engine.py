@@ -286,8 +286,21 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         sheet_name_to_id[sname] = sid
         # Aliases
         if "параметр" in sname.lower():
-            for alias in ["Параметры", "Настройки", "BaaS - Настройки"]:
+            for alias in ["Параметры", "Настройки", "BaaS - Настройки", "0"]:
                 sheet_name_to_id[alias] = sid
+        if "расход" in sname.lower() or "opex" in sname.lower():
+            for alias in ["OPEX+CAPEX", "OPEX", "CAPEX", "Операционные расходы"]:
+                sheet_name_to_id[alias] = sid
+        if "кредитован" in sname.lower():
+            sheet_name_to_id["BaaS.1"] = sid
+        if "депозит" in sname.lower():
+            sheet_name_to_id["BaaS.2"] = sid
+        if "транзакц" in sname.lower():
+            sheet_name_to_id["BaaS.3"] = sid
+        if "баланс" in sname.lower():
+            sheet_name_to_id["BS"] = sid
+        if "результат" in sname.lower():
+            sheet_name_to_id["PL"] = sid
 
         bindings = await db.execute_fetchall(
             "SELECT sa.analytic_id, sa.sort_order, a.name as analytic_name, a.is_periods "
@@ -346,6 +359,9 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             if c["rule"] == "formula" and c["formula"]:
                 global_formulas[gk] = c["formula"]
 
+    # Track which cells existed in DB originally (before computation adds new ones)
+    _original_cell_keys = set(global_cells.keys())
+
     # ── Lazy evaluator ──
     computed_set = set()
     computing_set = set()
@@ -373,6 +389,8 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
             if ref_sheet:
                 # Cross-sheet reference
+                if "потребительский" in ref["name"].lower() and "OPEX" in ref_sheet:
+                    import sys
                 target_sid = _find_sheet(ref_sheet)
                 if not target_sid:
                     return 0.0
@@ -383,21 +401,23 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 period_rid = context.get(meta["period_aid"])
                 if not period_rid:
                     return 0.0
-                target_aids = target_meta["ordered_aids"]
-                # Build target coord_key: period_rid | ind_rid
-                target_parts = []
-                for aid in target_aids:
-                    if aid == target_meta["period_aid"]:
-                        target_parts.append(period_rid)
-                    elif any(ind_rid in rids for rids in target_meta["name_to_rids"].get(aid, {}).values()):
-                        target_parts.append(ind_rid)
-                    else:
-                        target_parts.append("")
-                if any(p == "" for p in target_parts):
-                    # Simpler: just period|indicator
-                    target_ck = f"{period_rid}|{ind_rid}"
-                else:
-                    target_ck = "|".join(target_parts)
+
+                # Check if this record has cell data; if not (group), use first child
+                target_ck = f"{period_rid}|{ind_rid}"
+                # Check if this indicator has actual cell data in DB
+                gk = (target_sid, target_ck)
+                has_data = gk in _original_cell_keys
+                if "потребительский" in ref["name"].lower() and "OPEX" in (ref_sheet or ""):
+                    import sys
+                if not has_data:
+                    # Group without cell — find first child that has data
+                    for crid, crec in target_meta["record_by_id"].items():
+                        if crec.get("parent_id") == ind_rid:
+                            child_ck = f"{period_rid}|{crid}"
+                            if (target_sid, child_ck) in _original_cell_keys:
+                                return get_cell(target_sid, child_ck)
+                    return 0.0
+
                 return get_cell(target_sid, target_ck)
             else:
                 # Local reference
@@ -444,14 +464,18 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             if aid == meta["period_aid"]: continue
             rids = nmap.get(name)
             if rids: return rids[0]
-        # Fuzzy: substring
+        # Fuzzy: substring (case-insensitive)
         nl = name.lower()
+        best_score = 0; best_rid = None
         for aid, nmap in meta["name_to_rids"].items():
             if aid == meta["period_aid"]: continue
             for iname, rids in nmap.items():
                 il = iname.lower()
                 if nl in il or il in nl:
-                    return rids[0]
+                    score = len(nl) / max(len(il), 1)
+                    if score > best_score:
+                        best_score = score; best_rid = rids[0]
+        if best_rid: return best_rid
         # Word overlap with stemming
         def norm(s):
             words = set(re.sub(r'[()]', ' ', s.lower()).split())
@@ -691,14 +715,15 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
             ind_rid = xs["name_to_rid"].get(name)
             if not ind_rid:
                 nl = name.lower()
-                # Substring match — prefer longest match (most specific)
+                # Substring match — prefer the match whose name is LONGEST
+                # (most specific, e.g. "Расходы на персонал (Потребительский кредит)"
+                # over just "Потребительский кредит")
                 best_len = 0
                 for iname, irid in xs["name_to_rid"].items():
                     il = iname.lower()
                     if nl in il or il in nl:
-                        match_len = min(len(nl), len(il))
-                        if match_len > best_len:
-                            best_len = match_len; ind_rid = irid
+                        if len(il) > best_len:
+                            best_len = len(il); ind_rid = irid
             if not ind_rid:
                 def norm(s):
                     words = set(re.sub(r'[()]', ' ', s.lower()).split())
