@@ -163,7 +163,11 @@ function AppInner() {
   useEffect(() => {
     api.listUsers().then(u => {
       setUsers(u)
-      if (u.length > 0 && !currentUserId) setCurrentUserId(u[0].id)
+      if (u.length > 0) {
+        // Set first user if current is empty or no longer exists
+        const ids = new Set(u.map((x: any) => x.id))
+        setCurrentUserId(prev => (prev && ids.has(prev)) ? prev : u[0].id)
+      }
     })
   }, [showUsers])
 
