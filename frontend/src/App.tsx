@@ -4,6 +4,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, CircularProgress,
   ToggleButton, ToggleButtonGroup, Typography, Box,
 } from '@mui/material'
+import RefreshOutlined from '@mui/icons-material/RefreshOutlined'
 import SaveOutlined from '@mui/icons-material/SaveOutlined'
 import SettingsOutlined from '@mui/icons-material/SettingsOutlined'
 import TableChartOutlined from '@mui/icons-material/TableChartOutlined'
@@ -201,6 +202,11 @@ function AppInner() {
     <PendingProvider onFlushed={onRefresh}>
       <div className="app-root">
         <div className="app-toolbar">
+          <Tooltip title="Обновить">
+            <IconButton size="small" onClick={onRefresh}>
+              <RefreshOutlined fontSize="small" />
+            </IconButton>
+          </Tooltip>
           <SaveButton />
 
           {/* Mode toggle */}
@@ -272,7 +278,7 @@ function AppInner() {
             <CenterPanel selection={selection} onRefresh={onRefresh} />
           ) : isSheetSelected ? (
             <PivotGrid
-              key={selection.id}
+              key={`${selection.id}-${refreshKey}`}
               sheetId={selection.id} modelId={selection.modelId}
               currentUserId={currentUserId}
               mode={mode === 'formulas' ? 'settings' : 'data'}
