@@ -50,14 +50,25 @@ def parse_ref(token: str) -> dict:
 
     sheet = None
     if "." in name:
-        for i in range(len(name) - 1, -1, -1):
-            if name[i] == ".":
-                left = name[:i].strip()
-                right = name[i + 1:].strip()
-                if left.lower() in ABBREVS or len(left) <= 2:
-                    continue
-                if right:
-                    sheet = left; name = right; break
+        # Try each dot position LEFT-TO-RIGHT. Accept the split where:
+        # 1. Right part doesn't start with a digit (that would be "BaaS.1")
+        # 2. Right part has a space or is long enough to be an indicator name
+        # 3. Last segment before dot is not an abbreviation
+        dots = [i for i, c in enumerate(name) if c == "."]
+        for di in dots:
+            left = name[:di].strip()
+            right = name[di + 1:].strip()
+            if not right:
+                continue
+            # Skip if right starts with digit (e.g. "BaaS.1" → "1" is part of sheet name)
+            if right and right[0].isdigit():
+                continue
+            # Skip if left ends with an abbreviation
+            last_seg = left.rsplit(".", 1)[-1].strip().lower()
+            if last_seg in ABBREVS:
+                continue
+            # Accept this split
+            sheet = left; name = right; break
 
     return {"name": name, "sheet": sheet, "params": params}
 
@@ -465,7 +476,8 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             for iname, rids in nmap.items():
                 il = iname.lower()
                 if nl in il or il in nl:
-                    score = len(nl) / max(len(il), 1)
+                    # Similarity: closer lengths = better match
+                    score = min(len(nl), len(il)) / max(len(nl), len(il), 1)
                     if score > best_score:
                         best_score = score; best_rid = rids[0]
         if best_rid: return best_rid
