@@ -311,13 +311,25 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                     os_indicator_aid = ob["analytic_id"]
             if not os_period_aid or not os_indicator_aid:
                 continue
-            # Build indicator name → record_id map
-            os_recs = await db.execute_fetchall(
-                "SELECT id, data_json FROM analytic_records WHERE analytic_id = ?", (os_indicator_aid,))
+            # Build indicator name → record_id map (includes parent+child compound names)
+            os_recs = [dict(r) for r in await db.execute_fetchall(
+                "SELECT id, parent_id, data_json FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order", (os_indicator_aid,))]
             os_name_to_rid = {}
+            os_by_id = {}
             for r in os_recs:
                 d = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
-                os_name_to_rid[d.get("name", "")] = r["id"]
+                r["_name"] = d.get("name", "")
+                os_by_id[r["id"]] = r
+                os_name_to_rid[r["_name"]] = r["id"]
+            # Add compound names: "child_name (parent_name)" and "child_name parent_name"
+            for r in os_recs:
+                if r["parent_id"] and r["parent_id"] in os_by_id:
+                    pname = os_by_id[r["parent_id"]]["_name"]
+                    cname = r["_name"]
+                    os_name_to_rid[f"{cname} ({pname})"] = r["id"]
+                    os_name_to_rid[f"{cname} {pname}"] = r["id"]
+                    # Also lowercase variants
+                    os_name_to_rid[f"{cname} ({pname.lower()})"] = r["id"]
             # Load cells
             os_cells = await db.execute_fetchall(
                 "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (os["id"],))
@@ -328,6 +340,13 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                     p_rid, i_rid = parts
                     indicator_data[(p_rid, i_rid)] = c["value"] or ""
             xsheet[os["name"]] = {"name_to_rid": os_name_to_rid, "cells": indicator_data}
+            # Also register under common aliases/abbreviations
+            # "BaaS - параметры модели" → also "параметры", "настройки", "0"
+            name_lower = os["name"].lower()
+            if "параметр" in name_lower:
+                xsheet["Параметры"] = xsheet[os["name"]]
+                xsheet["Настройки"] = xsheet[os["name"]]
+                xsheet["BaaS - Настройки"] = xsheet[os["name"]]
 
     # ── Reference resolver ──
     def resolve_ref(ref: dict, context: dict) -> str | None:
@@ -338,22 +357,49 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
 
         # ── Cross-sheet reference: [Sheet.indicator] ──
         if sheet_name:
-            # Exact match first, then fuzzy (partial name match)
+            # Exact match first, then fuzzy
             xs = xsheet.get(sheet_name)
             if not xs:
+                sn_lower = sheet_name.lower()
                 for sn, sd in xsheet.items():
-                    if sheet_name.lower() in sn.lower() or sn.lower() in sheet_name.lower():
-                        xs = sd
-                        break
+                    sl = sn.lower()
+                    if sn_lower in sl or sl in sn_lower:
+                        xs = sd; break
+            if not xs:
+                # Word overlap matching
+                import re
+                sn_words = set(re.sub(r'[^а-яa-z0-9\s]', '', sheet_name.lower()).split())
+                best_score = 0
+                for sn, sd in xsheet.items():
+                    sw = set(re.sub(r'[^а-яa-z0-9\s]', '', sn.lower()).split())
+                    overlap = len(sn_words & sw)
+                    if overlap > best_score and overlap >= 1:
+                        best_score = overlap; xs = sd
             if not xs:
                 return None
-            # Find indicator: exact, then fuzzy
+            # Find indicator: exact → prefix → substring → word overlap
             ind_rid = xs["name_to_rid"].get(name)
             if not ind_rid:
+                name_lower = name.lower()
+                # Try substring match
                 for iname, irid in xs["name_to_rid"].items():
-                    if name.lower() in iname.lower() or iname.lower() in name.lower():
+                    il = iname.lower()
+                    if name_lower in il or il in name_lower:
                         ind_rid = irid
                         break
+            if not ind_rid:
+                # Normalize: remove parens and compare word sets
+                import re
+                def norm(s): return set(re.sub(r'[()]', ' ', s.lower()).split())
+                name_words = norm(name)
+                best_score = 0
+                for iname, irid in xs["name_to_rid"].items():
+                    iwords = norm(iname)
+                    overlap = len(name_words & iwords)
+                    # Require at least 2 word overlap and >50% of query words
+                    if overlap > best_score and overlap >= max(2, len(name_words) * 0.5):
+                        best_score = overlap
+                        ind_rid = irid
             if not ind_rid:
                 return None
             # Get the period from current context
