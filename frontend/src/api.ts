@@ -90,6 +90,8 @@ export const getCellHistory = (sheetId: string, coordKey: string) =>
 export const listUsers = () => fetch(`${BASE}/users`).then(r => json<any[]>(r))
 export const createUser = (username: string) =>
   fetch(`${BASE}/users`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) }).then(r => json<any>(r))
+export const updateUser = (id: string, username: string) =>
+  fetch(`${BASE}/users/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) }).then(r => json<any>(r))
 export const deleteUser = (id: string) =>
   fetch(`${BASE}/users/${id}`, { method: 'DELETE' }).then(r => json<any>(r))
 export const resetPassword = (id: string, password: string) =>
@@ -102,6 +104,8 @@ export const setSheetPermission = (sheetId: string, data: { user_id: string; can
   fetch(`${BASE}/users/permissions/by-sheet/${sheetId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => json<any>(r))
 export const getAccessibleSheets = (userId: string) =>
   fetch(`${BASE}/users/${userId}/accessible-sheets`).then(r => json<any[]>(r))
+export const getAllPermissions = (userId: string) =>
+  fetch(`${BASE}/users/${userId}/all-permissions`).then(r => json<any[]>(r))
 
 // Import model from Excel
 export const importExcelModel = (file: File, modelName: string) => {

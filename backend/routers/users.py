@@ -38,6 +38,14 @@ async def create_user(body: UserIn):
     return {"id": uid, "username": body.username}
 
 
+@router.put("/{user_id}")
+async def update_user(user_id: str, body: UserIn):
+    db = get_db()
+    await db.execute("UPDATE users SET username = ? WHERE id = ?", (body.username, user_id))
+    await db.commit()
+    return {"ok": True}
+
+
 @router.delete("/{user_id}")
 async def delete_user(user_id: str):
     db = get_db()
@@ -106,7 +114,6 @@ async def get_accessible_sheets(user_id: str):
         WHERE COALESCE(sp.can_view, 1) = 1
         ORDER BY m.name, s.name
     """, (user_id,))
-    # Group by model
     models: dict = {}
     for r in rows:
         mid = r["model_id"]
@@ -115,6 +122,32 @@ async def get_accessible_sheets(user_id: str):
         models[mid]["sheets"].append({
             "id": r["sheet_id"], "name": r["sheet_name"],
             "can_edit": bool(r["can_edit"]),
+        })
+    return list(models.values())
+
+
+@router.get("/{user_id}/all-permissions")
+async def get_all_permissions(user_id: str):
+    """Return ALL models > sheets with can_view/can_edit for this user."""
+    db = get_db()
+    rows = await db.execute_fetchall("""
+        SELECT m.id as model_id, m.name as model_name,
+               s.id as sheet_id, s.name as sheet_name,
+               COALESCE(sp.can_view, 1) as can_view,
+               COALESCE(sp.can_edit, 1) as can_edit
+        FROM sheets s
+        JOIN models m ON m.id = s.model_id
+        LEFT JOIN sheet_permissions sp ON sp.sheet_id = s.id AND sp.user_id = ?
+        ORDER BY m.name, s.name
+    """, (user_id,))
+    models: dict = {}
+    for r in rows:
+        mid = r["model_id"]
+        if mid not in models:
+            models[mid] = {"id": mid, "name": r["model_name"], "sheets": []}
+        models[mid]["sheets"].append({
+            "id": r["sheet_id"], "name": r["sheet_name"],
+            "can_view": bool(r["can_view"]), "can_edit": bool(r["can_edit"]),
         })
     return list(models.values())
 
