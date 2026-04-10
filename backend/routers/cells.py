@@ -84,6 +84,22 @@ async def save_single_cell(sheet_id: str, body: CellIn):
     return {"ok": True}
 
 
+@router.post("/calculate/{sheet_id}")
+async def calculate(sheet_id: str):
+    """Recalculate all formula cells in a sheet."""
+    from backend.formula_engine import calculate_sheet
+    db = get_db()
+    computed = await calculate_sheet(db, sheet_id)
+    # Save computed values back to DB
+    for coord_key, value in computed.items():
+        await db.execute(
+            "UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?",
+            (value, sheet_id, coord_key),
+        )
+    await db.commit()
+    return {"computed": len(computed)}
+
+
 @router.get("/history/{sheet_id}/{coord_key}")
 async def get_cell_history(sheet_id: str, coord_key: str):
     db = get_db()

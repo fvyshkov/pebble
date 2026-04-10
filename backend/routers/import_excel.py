@@ -46,8 +46,8 @@ Pebble object model:
 
 Pebble formula syntax (references by indicator NAME, not cell):
 - [indicator_name] — value of another indicator, same period, same group
-- [indicator_name]@prev — value from PREVIOUS period
-- [SheetName.indicator_name] — cross-sheet reference
+- [indicator_name](периоды="предыдущий") — value from PREVIOUS period
+- [SheetName.indicator_name] — cross-sheet reference (sheet display name)
 - Standard math: +, -, *, /, parentheses, numbers
 - SUM([a], [b], [c]) — sum of multiple indicators
 - For first-period special cases (e.g. no previous period), use "0" as value
@@ -56,14 +56,14 @@ Examples:
   Excel: =D13*D14 (where R13=количество партнеров, R14=ср. количество выдач)
   Pebble: [количество партнеров] * [среднее количество выдач на 1 партнера]
 
-  Excel: =D20/E18 (previous period's портфель / current ср.срок)
-  Pebble: [кредитный портфель]@prev / [cр. срок портфеля]
+  Excel: =D20/E18 (prev period's портфель / current ср.срок)
+  Pebble: [кредитный портфель](периоды="предыдущий") / [cр. срок портфеля]
 
   Excel: =(C20+D20)/2*D24/12 (avg of prev+current портфель * rate / 12)
-  Pebble: ([кредитный портфель]@prev + [кредитный портфель]) / 2 * [ср. % ставка портфеля] / 12
+  Pebble: ([кредитный портфель](периоды="предыдущий") + [кредитный портфель]) / 2 * [ср. % ставка портфеля] / 12
 
   Excel: =D27-C27 (delta from previous period)
-  Pebble: [РППУ на конец месяца] - [РППУ на конец месяца]@prev
+  Pebble: [РППУ на конец месяца] - [РППУ на конец месяца](периоды="предыдущий")
 
   Excel: =SUM(D28:D31) (sum of rows 28-31)
   Pebble: SUM([% доход], [трансфертный расход], [комиссия партнеру], [расходы на провизии])
@@ -99,7 +99,7 @@ Return ONLY valid JSON, no markdown:
 ]}
 
 For formulas with first-period exception:
-{"rule":"formula","formula":"[портфель]@prev / [срок]","formula_first":"0"}
+{"rule":"formula","formula":"[портфель](периоды=\"предыдущий\") / [срок]","formula_first":"0"}
 
 Sheet content:
 """
@@ -250,7 +250,7 @@ async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) 
         try:
             message = client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=8192,
+                max_tokens=16384,
                 system=PEBBLE_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": SHEET_ANALYSIS_PROMPT + sheet_text}],
             )

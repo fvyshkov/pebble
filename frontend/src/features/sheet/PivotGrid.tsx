@@ -7,6 +7,7 @@ import {
 import FormatListNumberedOutlined from '@mui/icons-material/FormatListNumberedOutlined'
 import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
+import CalculateOutlined from '@mui/icons-material/CalculateOutlined'
 import DragIndicatorOutlined from '@mui/icons-material/DragIndicatorOutlined'
 import PushPinOutlined from '@mui/icons-material/PushPinOutlined'
 import * as Icons from '@mui/icons-material'
@@ -847,6 +848,15 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
               e.target.value = ''
               load()
             }} />
+          </IconButton>
+        </Tooltip>
+
+        <Tooltip title="Рассчитать формулы">
+          <IconButton size="small" onClick={async () => {
+            await api.calculateSheet(sheetId)
+            load()
+          }}>
+            <CalculateOutlined fontSize="small" />
           </IconButton>
         </Tooltip>
 
