@@ -1061,9 +1061,11 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   const editable = rule === 'manual'
 
                   if (mode === 'settings') {
-                    const ruleLabel = rule === 'manual' ? '✎' : rule === 'sum_children' ? 'Σ' : 'ƒ'
+                    const ruleLabel = rule === 'manual' ? 'ввод' : rule === 'sum_children' ? 'сумма' : 'формула'
                     const ruleColor = rule === 'formula' ? '#1565c0' : rule === 'sum_children' ? '#2e7d32' : '#666'
-                    // Only show Select dropdown for the focused cell to avoid rendering thousands of MUI Selects
+                    const formulaText = formulas[coordKey] || ''
+                    const cellContent = rule === 'formula' && formulaText ? formulaText : ruleLabel
+
                     if (isFocused) {
                       return (
                         <td key={colRecId} onClick={cellClick} style={{ border: focusBorder, padding: 0, background: '#fafbfc' }}>
@@ -1077,31 +1079,34 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                                 setCellRules(prev => ({ ...prev, [coordKey]: newRule }))
                                 api.saveCells(sheetId, [{ coord_key: coordKey, rule: newRule }])
                               }}
-                              sx={{ fontSize: 11, px: 0.5, flex: 1, '& .MuiSelect-select': { py: 0.25 } }}
+                              sx={{ fontSize: 11, px: 0.5, minWidth: 70, '& .MuiSelect-select': { py: 0.25 } }}
                             >
                               <MenuItem value="manual" sx={{ fontSize: 12 }}>✎ Ввод</MenuItem>
                               <MenuItem value="sum_children" sx={{ fontSize: 12 }}>Σ Сумма</MenuItem>
                               <MenuItem value="formula" sx={{ fontSize: 12 }}>ƒ Формула</MenuItem>
                             </Select>
                             {rule === 'formula' && (
-                              <IconButton size="small" onClick={() => { setFormulaEditorKey(coordKey); setFormulaEditorOpen(true) }}
-                                sx={{ p: 0.25 }}>
-                                <MoreHorizOutlined sx={{ fontSize: 14 }} />
-                              </IconButton>
+                              <>
+                                <Box sx={{ flex: 1, fontSize: 11, color: '#1565c0', px: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {formulaText}
+                                </Box>
+                                <IconButton size="small" onClick={() => { setFormulaEditorKey(coordKey); setFormulaEditorOpen(true) }}
+                                  sx={{ p: 0.25 }}>
+                                  <MoreHorizOutlined sx={{ fontSize: 14 }} />
+                                </IconButton>
+                              </>
                             )}
                           </Box>
                         </td>
                       )
                     }
-                    const formulaText = formulas[coordKey] || ''
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '2px 4px', background: selBg || '#fafbfc',
                         fontSize: 11, color: ruleColor, cursor: 'pointer',
-                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                        maxWidth: 200,
-                      }} title={formulaText || ruleLabel}>
-                        {rule === 'formula' && formulaText ? formulaText : ruleLabel}
+                        wordBreak: 'break-word', minWidth: 80,
+                      }}>
+                        {cellContent}
                       </td>
                     )
                   }
