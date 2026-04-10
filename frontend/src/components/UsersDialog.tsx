@@ -7,7 +7,8 @@ import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
 import PersonAddOutlined from '@mui/icons-material/PersonAddOutlined'
 import PersonOutlined from '@mui/icons-material/PersonOutlined'
-import FolderOutlined from '@mui/icons-material/FolderOutlined'
+import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
+import ChevronRightOutlined from '@mui/icons-material/ChevronRightOutlined'
 import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
 import KeyOutlined from '@mui/icons-material/KeyOutlined'
 import * as api from '../api'
@@ -29,6 +30,7 @@ export default function UsersDialog({ open, onClose }: Props) {
   const [username, setUsername] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
   const [createdAt, setCreatedAt] = useState('')
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const loadUsers = useCallback(() => {
     api.listUsers().then(u => {
@@ -210,13 +212,21 @@ export default function UsersDialog({ open, onClose }: Props) {
                 <Box sx={{ width: 80, textAlign: 'center' }}>Ввод</Box>
               </Box>
 
-              {perms.map(model => (
+              {perms.map(model => {
+                const isOpen = expanded.has(model.id)
+                const toggle = () => setExpanded(prev => {
+                  const next = new Set(prev)
+                  if (next.has(model.id)) next.delete(model.id); else next.add(model.id)
+                  return next
+                })
+                return (
                 <Box key={model.id}>
                   {/* Model row */}
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, bgcolor: '#fafafa', '&:hover': { bgcolor: '#f0f0f0' } }}>
-                    <FolderOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.5, bgcolor: '#fafafa', '&:hover': { bgcolor: '#f0f0f0' }, cursor: 'pointer' }}
+                    onClick={toggle}>
+                    {isOpen ? <ExpandMoreOutlined sx={{ fontSize: 18, opacity: 0.5 }} /> : <ChevronRightOutlined sx={{ fontSize: 18, opacity: 0.5 }} />}
                     <Box sx={{ flex: 1, fontWeight: 600 }}>{model.name}</Box>
-                    <Box sx={{ width: 80, textAlign: 'center' }}>
+                    <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
                       <Checkbox
                         size="small"
                         checked={modelChecked(model.id, 'can_view')}
@@ -224,7 +234,7 @@ export default function UsersDialog({ open, onClose }: Props) {
                         onChange={e => handleModelPerm(model.id, 'can_view', e.target.checked)}
                       />
                     </Box>
-                    <Box sx={{ width: 80, textAlign: 'center' }}>
+                    <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
                       <Checkbox
                         size="small"
                         checked={modelChecked(model.id, 'can_edit')}
@@ -234,9 +244,9 @@ export default function UsersDialog({ open, onClose }: Props) {
                     </Box>
                   </Box>
 
-                  {/* Sheet rows */}
-                  {model.sheets.map(sheet => (
-                    <Box key={sheet.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, pl: 4, '&:hover': { bgcolor: '#f8f8f8' } }}>
+                  {/* Sheet rows (collapsible) */}
+                  {isOpen && model.sheets.map(sheet => (
+                    <Box key={sheet.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, pl: 5, '&:hover': { bgcolor: '#f8f8f8' } }}>
                       <DescriptionOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
                       <Box sx={{ flex: 1 }}>{sheet.name}</Box>
                       <Box sx={{ width: 80, textAlign: 'center' }}>
@@ -256,7 +266,8 @@ export default function UsersDialog({ open, onClose }: Props) {
                     </Box>
                   ))}
                 </Box>
-              ))}
+                )
+              })}
 
               {perms.length === 0 && (
                 <Typography sx={{ py: 2, color: '#999', textAlign: 'center' }}>Нет моделей</Typography>

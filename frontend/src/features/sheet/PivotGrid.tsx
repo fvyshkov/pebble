@@ -53,6 +53,14 @@ function flattenWithLevel(nodes: RecordNode[], lvl = 0): { node: RecordNode; lev
   for (const n of nodes) { r.push({ node: n, level: lvl }); if (n.children.length > 0) r.push(...flattenWithLevel(n.children, lvl + 1)) }
   return r
 }
+function flattenWithLevelAndParents(nodes: RecordNode[], lvl = 0, parents: string[] = []): { node: RecordNode; level: number; parentChain: string[] }[] {
+  const r: { node: RecordNode; level: number; parentChain: string[] }[] = []
+  for (const n of nodes) {
+    r.push({ node: n, level: lvl, parentChain: [...parents] })
+    if (n.children.length > 0) r.push(...flattenWithLevelAndParents(n.children, lvl + 1, [...parents, n.record.id]))
+  }
+  return r
+}
 function findNodeById(nodes: RecordNode[], id: string): RecordNode | null {
   for (const n of nodes) { if (n.record.id === id) return n; const f = findNodeById(n.children, id); if (f) return f }
   return null
@@ -248,6 +256,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [order, setOrder] = useState<string[]>([])
   const [canEdit, setCanEdit] = useState(true)
+  const [collapsedRows, setCollapsedRows] = useState<Set<string>>(new Set())
   const [pinned, setPinned] = useState<Record<string, string>>({})
   const [pickerAnchor, setPickerAnchor] = useState<HTMLElement | null>(null)
   const [pickerAnalyticId, setPickerAnalyticId] = useState<string | null>(null)
@@ -456,39 +465,63 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   interface RowEntry {
     recordIds: Record<string, string>; label: string; indent: number
     isGroup: boolean; analyticId: string; unit?: string; dragInfo?: { analyticId: string; recordId: string }
+    /** The record ID of THIS row's own record in its analytic (for collapse tracking) */
+    ownRecordId?: string
+    /** Chain of parent record IDs (for hiding when ancestor is collapsed) */
+    ancestorRecordIds: string[]
+    /** Whether this row has children that can be collapsed */
+    hasChildren: boolean
   }
   const rows = useMemo(() => {
     const result: RowEntry[] = []
     const totalAnalytics = rowAnalyticIds.length
 
-    const buildLevel = (ai: number, parentIds: Record<string, string>, baseIndent: number) => {
+    const buildLevel = (ai: number, parentIds: Record<string, string>, baseIndent: number, ancestors: string[]) => {
       if (ai >= totalAnalytics) return
       const aId = rowAnalyticIds[ai]
-      for (const { node, level } of flattenWithLevel(filteredRecordsByAnalytic[aId] || [])) {
+      for (const { node, level, parentChain } of flattenWithLevelAndParents(filteredRecordsByAnalytic[aId] || [])) {
         const ids = { ...parentIds, [aId]: node.record.id }
         const hasChildren = node.children.length > 0
         const isLastAnalytic = ai === totalAnalytics - 1
-        // Group if: has children in own hierarchy, OR not all analytics resolved yet, OR a pinned analytic is a group
         const isGroup = hasChildren || !isLastAnalytic || hasPinnedGroup
         const indent = baseIndent + level
+        const allAncestors = [...ancestors, ...parentChain]
 
         result.push({
           recordIds: ids, label: node.data.name || '', indent,
           isGroup, analyticId: aId, unit: node.data.unit,
           dragInfo: { analyticId: aId, recordId: node.record.id },
+          ownRecordId: node.record.id,
+          ancestorRecordIds: allAncestors,
+          hasChildren,
         })
 
         if (!hasChildren && !isLastAnalytic) {
-          // Leaf of this analytic — recurse into next analytic
-          buildLevel(ai + 1, ids, indent + 1)
+          buildLevel(ai + 1, ids, indent + 1, [...allAncestors, node.record.id])
         }
       }
     }
 
-    if (totalAnalytics > 0) buildLevel(0, {}, 0)
-    else result.push({ recordIds: {}, label: '', indent: 0, isGroup: false, analyticId: '' })
+    if (totalAnalytics > 0) buildLevel(0, {}, 0, [])
+    else result.push({ recordIds: {}, label: '', indent: 0, isGroup: false, analyticId: '', ancestorRecordIds: [], hasChildren: false })
     return result
   }, [rowAnalyticIds, filteredRecordsByAnalytic, hasPinnedGroup])
+
+  // Filter rows by collapse state
+  const visibleRows = useMemo(() => {
+    if (collapsedRows.size === 0) return rows
+    return rows.filter(row =>
+      !row.ancestorRecordIds.some(aid => collapsedRows.has(aid))
+    )
+  }, [rows, collapsedRows])
+
+  const toggleRowCollapse = useCallback((recordId: string) => {
+    setCollapsedRows(prev => {
+      const next = new Set(prev)
+      if (next.has(recordId)) next.delete(recordId); else next.add(recordId)
+      return next
+    })
+  }, [])
 
   // ─── Coord key ───
   const makeCoordKey = (rowIds: Record<string, string>, colId: string) => {
@@ -648,7 +681,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     for (let ri = r1; ri <= r2; ri++) {
       const vals: string[] = []
       for (let ci = c1; ci <= c2; ci++) {
-        const row = rows[ri]; const col = displayCols[ci]
+        const row = visibleRows[ri]; const col = displayCols[ci]
         if (!row || !col) { vals.push(''); continue }
         if (col.isSum) {
           // sum column — compute aggregated value
@@ -680,7 +713,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     const text = lines.join('\n')
     const cb = 'clipboardData' in e ? (e as ClipboardEvent).clipboardData : (e as React.ClipboardEvent).clipboardData
     cb?.setData('text/plain', text)
-  }, [editingCell, selRange, rows, displayCols, cells, formulas, isNumeric, computeSum, evalFormula, getAllLeafRecordCombinations, makeLeafCoordKey, makeCoordKey])
+  }, [editingCell, selRange, visibleRows, displayCols, cells, formulas, isNumeric, computeSum, evalFormula, getAllLeafRecordCombinations, makeLeafCoordKey, makeCoordKey])
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent | ClipboardEvent) => {
     if (editingCell) return // let native input handle it
@@ -695,8 +728,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     for (let dr = 0; dr < pasteRows.length; dr++) {
       for (let dc = 0; dc < pasteRows[dr].length; dc++) {
         const ri = startR + dr; const ci = startC + dc
-        if (ri >= rows.length || ci >= displayCols.length) continue
-        const row = rows[ri]; const col = displayCols[ci]
+        if (ri >= visibleRows.length || ci >= displayCols.length) continue
+        const row = visibleRows[ri]; const col = displayCols[ci]
         if (col.isSum) continue
         const coordKey = makeCoordKey(row.recordIds, col.node.record.id)
         const rule = resolveRule(coordKey, row.isGroup)
@@ -712,7 +745,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     const endR = Math.min(startR + pasteRows.length - 1, rows.length - 1)
     const endC = Math.min(startC + (Math.max(...pasteRows.map(r => r.length)) || 1) - 1, displayCols.length - 1)
     setSelAnchor([endR, endC])
-  }, [editingCell, focusCell, rows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId])
+  }, [editingCell, focusCell, visibleRows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId])
 
   const handleDelete = useCallback(async () => {
     if (editingCell) return
@@ -721,7 +754,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     const newCells = { ...cells }
     for (let ri = r1; ri <= r2; ri++) {
       for (let ci = c1; ci <= c2; ci++) {
-        const row = rows[ri]; const col = displayCols[ci]
+        const row = visibleRows[ri]; const col = displayCols[ci]
         if (!row || !col || col.isSum) continue
         const coordKey = makeCoordKey(row.recordIds, col.node.record.id)
         const rule = resolveRule(coordKey, row.isGroup)
@@ -732,7 +765,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     }
     setCells(newCells)
     if (toSave.length > 0) await api.saveCells(sheetId, toSave)
-  }, [editingCell, selRange, rows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId])
+  }, [editingCell, selRange, visibleRows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId])
 
   // ─── Context menu + history ───
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; coordKey: string } | null>(null)
@@ -858,7 +891,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         onPaste={handlePaste}
         onKeyDown={e => {
           if (editingCell || formulaEditorOpen || settingsOpen) return
-          const totalRows = rows.length
+          const totalRows = visibleRows.length
           const totalCols = displayCols.length
           const [fr, fc] = focusCell
           const shift = e.shiftKey
@@ -940,7 +973,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
             )}
           </thead>
           <tbody>
-            {rows.map((row, ri) => {
+            {visibleRows.map((row, ri) => {
               const rowDt = unitToDataType(row.unit, dataType)
               return (<tr key={ri}>
                 <td
@@ -958,7 +991,19 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     position: 'sticky', left: 0, zIndex: 1,
                     cursor: row.dragInfo ? 'grab' : 'default',
                   }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                    {row.hasChildren ? (
+                      <span
+                        style={{ display: 'inline-flex', cursor: 'pointer', opacity: 0.5, marginLeft: -2 }}
+                        onClick={e => { e.stopPropagation(); if (row.ownRecordId) toggleRowCollapse(row.ownRecordId) }}
+                      >
+                        {collapsedRows.has(row.ownRecordId || '') ?
+                          <Icons.ChevronRightOutlined sx={{ fontSize: 16 }} /> :
+                          <Icons.ExpandMoreOutlined sx={{ fontSize: 16 }} />}
+                      </span>
+                    ) : (
+                      <span style={{ width: 16, display: 'inline-block' }} />
+                    )}
                     {row.analyticId && (() => { const ic = getIcon(row.analyticId); return ic ? <span style={{ display: 'inline-flex', opacity: 0.5 }}>{ic}</span> : null })()}
                     {row.label || '—'}
                   </span>
