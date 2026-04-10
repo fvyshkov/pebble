@@ -1093,12 +1093,15 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                         </td>
                       )
                     }
+                    const formulaText = formulas[coordKey] || ''
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
-                        border: focusBorder, padding: '2px 6px', background: selBg || '#fafbfc',
-                        textAlign: 'center', fontSize: 13, color: ruleColor, cursor: 'pointer',
-                      }}>
-                        {ruleLabel}
+                        border: focusBorder, padding: '2px 4px', background: selBg || '#fafbfc',
+                        fontSize: 11, color: ruleColor, cursor: 'pointer',
+                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                        maxWidth: 200,
+                      }} title={formulaText || ruleLabel}>
+                        {rule === 'formula' && formulaText ? formulaText : ruleLabel}
                       </td>
                     )
                   }
