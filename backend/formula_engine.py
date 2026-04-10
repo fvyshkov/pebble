@@ -691,10 +691,14 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
             ind_rid = xs["name_to_rid"].get(name)
             if not ind_rid:
                 nl = name.lower()
+                # Substring match — prefer longest match (most specific)
+                best_len = 0
                 for iname, irid in xs["name_to_rid"].items():
                     il = iname.lower()
                     if nl in il or il in nl:
-                        ind_rid = irid; break
+                        match_len = min(len(nl), len(il))
+                        if match_len > best_len:
+                            best_len = match_len; ind_rid = irid
             if not ind_rid:
                 def norm(s):
                     words = set(re.sub(r'[()]', ' ', s.lower()).split())
@@ -716,12 +720,15 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
             period_rid = context.get(period_analytic_id)
             if not period_rid:
                 return None
-            val = xs["cells"].get((period_rid, ind_rid))
-            if val is not None:
-                synth = f"__xs__{sheet_name}__{name}__{period_rid}"
-                cells[synth] = val
-                return synth
-            return None
+            # Find the target sheet_id
+            target_sid = _find_sheet(sheet_name)
+            if not target_sid:
+                return None
+            # Build target coord_key and evaluate lazily through get_cell
+            target_ck = f"{period_rid}|{ind_rid}"
+            synth = f"__xsl__{target_sid}__{target_ck}"
+            # This will be resolved by get_ref_value calling get_cell
+            return synth
 
         # Local reference
         target_rid = None
