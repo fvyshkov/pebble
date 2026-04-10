@@ -389,8 +389,6 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
             if ref_sheet:
                 # Cross-sheet reference
-                if "потребительский" in ref["name"].lower() and "OPEX" in ref_sheet:
-                    import sys
                 target_sid = _find_sheet(ref_sheet)
                 if not target_sid:
                     return 0.0
@@ -402,14 +400,9 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 if not period_rid:
                     return 0.0
 
-                # Check if this record has cell data; if not (group), use first child
-                target_ck = f"{period_rid}|{ind_rid}"
                 # Check if this indicator has actual cell data in DB
-                gk = (target_sid, target_ck)
-                has_data = gk in _original_cell_keys
-                if "потребительский" in ref["name"].lower() and "OPEX" in (ref_sheet or ""):
-                    import sys
-                if not has_data:
+                target_ck = f"{period_rid}|{ind_rid}"
+                if (target_sid, target_ck) not in _original_cell_keys:
                     # Group without cell — find first child that has data
                     for crid, crec in target_meta["record_by_id"].items():
                         if crec.get("parent_id") == ind_rid:
