@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Box, Typography, TextField, List, ListItem, ListItemIcon, ListItemText,
-  IconButton, Menu, MenuItem, Tooltip, Button,
-  Table, TableHead, TableBody, TableRow, TableCell, Checkbox,
+  IconButton, Menu, MenuItem, Tooltip,
 } from '@mui/material'
 import AddOutlined from '@mui/icons-material/AddOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
@@ -176,61 +175,6 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
         </Typography>
       )}
 
-      <SheetPermissions sheetId={sheetId} />
-    </Box>
-  )
-}
-
-// ─── Inline permissions grid ───
-interface PermRow { user_id: string; username: string; can_view: number; can_edit: number }
-
-function SheetPermissions({ sheetId }: { sheetId: string }) {
-  const [perms, setPerms] = useState<PermRow[]>([])
-
-  useEffect(() => {
-    api.getSheetPermissions(sheetId).then(setPerms)
-  }, [sheetId])
-
-  const handleToggle = async (userId: string, field: 'can_view' | 'can_edit', current: number) => {
-    const row = perms.find(p => p.user_id === userId)
-    if (!row) return
-    await api.setSheetPermission(sheetId, {
-      user_id: userId,
-      can_view: field === 'can_view' ? !current : !!row.can_view,
-      can_edit: field === 'can_edit' ? !current : !!row.can_edit,
-    })
-    api.getSheetPermissions(sheetId).then(setPerms)
-  }
-
-  if (perms.length === 0) return null
-
-  return (
-    <Box sx={{ mt: 4 }}>
-      <Typography variant="subtitle1" sx={{ mb: 1 }}>Доступ к листу</Typography>
-      <Table size="small" sx={{ maxWidth: 400, '& td, & th': { py: 0.25, px: 0.5 } }}>
-        <TableHead>
-          <TableRow>
-            <TableCell>Пользователь</TableCell>
-            <TableCell align="center" sx={{ fontSize: 11 }}>Просмотр</TableCell>
-            <TableCell align="center" sx={{ fontSize: 11 }}>Редакт.</TableCell>
-          </TableRow>
-        </TableHead>
-        <TableBody>
-          {perms.map(p => (
-            <TableRow key={p.user_id}>
-              <TableCell sx={{ fontSize: 12 }}>{p.username}</TableCell>
-              <TableCell align="center">
-                <Checkbox size="small" checked={!!p.can_view}
-                  onChange={() => handleToggle(p.user_id, 'can_view', p.can_view)} sx={{ p: 0 }} />
-              </TableCell>
-              <TableCell align="center">
-                <Checkbox size="small" checked={!!p.can_edit}
-                  onChange={() => handleToggle(p.user_id, 'can_edit', p.can_edit)} sx={{ p: 0 }} />
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
     </Box>
   )
 }
