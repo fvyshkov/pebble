@@ -84,9 +84,12 @@ RULES:
 3. For each indicator: name, unit, row, rule (manual/formula), and for formulas: the Pebble formula.
 4. Convert Excel cell references to Pebble [indicator_name] references using the ROW MAPPING.
 5. If F1 and F2 differ (e.g. first period is 0, subsequent use @prev), provide TWO formulas: "formula_first" and "formula".
-6. Cross-sheet references like ='0'!D10 → [Параметры.количество партнеров] (or the indicator name on sheet 0 at that row).
+6. Cross-sheet references like ='0'!D10 → [SheetDisplayName.indicator_name] using the display_name of the referenced sheet.
 7. display_name: from A1/B1 title. data_start_col: first period column number.
 8. Skip header rows (Показатель, ЕИ, Отв.исп.) — they are not indicators.
+9. CRITICAL: Every [indicator_name] in a formula must EXACTLY match the "name" field of SOME indicator in the JSON output. If the same indicator name appears in multiple groups, append a disambiguating suffix in parentheses to BOTH the name and all formula references. Example: "портфель" in KGS group → name "портфель (KGS)", in RUB group → "портфель (RUB)".
+10. For "Итого" / summary rows that SUM across groups: use the EXACT disambiguated names. E.g. formula: "[портфель (KGS)] + [портфель (RUB)] + [портфель (USD)]". NEVER write [портфель] + [портфель] + [портфель] — that's a self-reference!
+11. Rows like "ВСЕГО АКТИВЫ", "ИТОГО ОБЯЗАТЕЛЬСТВА" are NOT separate indicators — they are the group header itself. The group header row IS the aggregation row.
 
 Return ONLY valid JSON, no markdown:
 {"excel_name":"Tab","display_name":"Title","data_start_col":4,"indicators":[

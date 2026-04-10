@@ -453,9 +453,10 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
                     return None  # no previous period
             else:
                 # Look up by record name
-                nmap = name_to_rid.get(param_aid, {})
-                if param_value in nmap:
-                    parts[param_aid] = nmap[param_value]
+                nmap = name_to_rids.get(param_aid, {})
+                rids_list = nmap.get(param_value, [])
+                if rids_list:
+                    parts[param_aid] = rids_list[0]
                 else:
                     return None
 
@@ -463,7 +464,14 @@ async def calculate_sheet(db, sheet_id: str) -> dict[str, str]:
         coord_parts = [parts.get(aid, "") for aid in ordered_analytic_ids]
         if any(p == "" for p in coord_parts):
             return None
-        return "|".join(coord_parts)
+        result_key = "|".join(coord_parts)
+
+        # Guard: self-reference detection (formula referencing its own cell)
+        current_key = "|".join(context.get(aid, "") for aid in ordered_analytic_ids)
+        if result_key == current_key:
+            return None  # prevent infinite recursion
+
+        return result_key
 
     # ── Evaluate all formula cells ──
     ctx = FormulaContext(cells, resolve_ref)
