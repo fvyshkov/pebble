@@ -90,6 +90,10 @@ export const calculateSheet = (sheetId: string) =>
 export const getCellHistory = (sheetId: string, coordKey: string) =>
   fetch(`${BASE}/cells/history/${sheetId}/${encodeURIComponent(coordKey)}`).then(r => json<any[]>(r))
 
+// Export
+export const exportModel = (modelId: string) =>
+  `${BASE}/excel/models/${modelId}/export`
+
 // Users
 export const listUsers = () => fetch(`${BASE}/users`).then(r => json<any[]>(r))
 export const createUser = (username: string) =>

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { TextField, Typography, Box } from '@mui/material'
+import { TextField, Typography, Box, Button } from '@mui/material'
+import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
 import * as api from '../../api'
 import type { Model } from '../../types'
 import { usePending } from '../../store/PendingContext'
@@ -50,6 +51,13 @@ export default function ModelSettings({ modelId, onRefresh }: Props) {
         label="Описание" fullWidth multiline rows={3} value={model.description}
         onChange={e => change('description', e.target.value)}
       />
+      <Button
+        variant="outlined" startIcon={<FileDownloadOutlined />}
+        sx={{ mt: 3 }}
+        onClick={() => window.open(api.exportModel(modelId), '_blank')}
+      >
+        Выгрузить в Excel
+      </Button>
     </Box>
   )
 }
