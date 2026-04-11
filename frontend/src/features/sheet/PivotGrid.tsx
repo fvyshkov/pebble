@@ -312,7 +312,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       setOrder(defaultOrder)
     }
 
-    const cellData = await api.getCells(sheetId)
+    const cellData = await api.getCells(sheetId, currentUserId)
     const cellMap: Record<string, string> = {}
     const ruleMap: Record<string, CellRule> = {}
     const formulaMap: Record<string, string> = {}

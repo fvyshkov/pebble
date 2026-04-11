@@ -81,8 +81,8 @@ export const saveViewSettings = (sheetId: string, settings: any) =>
   fetch(`${BASE}/sheets/${sheetId}/view-settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings }) }).then(r => json<any>(r))
 
 // Cells
-export const getCells = (sheetId: string) =>
-  fetch(`${BASE}/cells/by-sheet/${sheetId}`).then(r => json<CellData[]>(r))
+export const getCells = (sheetId: string, userId?: string) =>
+  fetch(`${BASE}/cells/by-sheet/${sheetId}${userId ? `?user_id=${userId}` : ''}`).then(r => json<CellData[]>(r))
 export const saveCells = (sheetId: string, cells: { coord_key: string; value?: string | null; data_type?: string; user_id?: string; rule?: string; formula?: string }[]) =>
   fetch(`${BASE}/cells/by-sheet/${sheetId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cells }) }).then(r => json<any>(r))
 export const calculateSheet = (sheetId: string) =>

@@ -1,9 +1,61 @@
 import uuid
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from backend.db import get_db
 
 router = APIRouter(prefix="/api/cells", tags=["cells"])
+
+
+async def _get_allowed_records(db, user_id: str | None, sheet_id: str) -> dict[str, set[str]] | None:
+    """Return {analytic_id: set(record_ids)} for restricted analytics, or None if no restrictions."""
+    if not user_id:
+        return None
+    bindings = await db.execute_fetchall(
+        "SELECT sa.analytic_id FROM sheet_analytics sa WHERE sa.sheet_id = ? ORDER BY sa.sort_order",
+        (sheet_id,),
+    )
+    restrictions: dict[str, set[str]] = {}
+    for b in bindings:
+        aid = b["analytic_id"]
+        perms = await db.execute_fetchall(
+            "SELECT record_id FROM analytic_record_permissions WHERE user_id = ? AND analytic_id = ? AND can_view = 1",
+            (user_id, aid),
+        )
+        if perms:
+            restrictions[aid] = {p["record_id"] for p in perms}
+    return restrictions if restrictions else None
+
+
+async def _get_editable_records(db, user_id: str | None, sheet_id: str) -> dict[str, set[str]] | None:
+    """Return {analytic_id: set(record_ids)} where user can_edit, or None if no restrictions."""
+    if not user_id:
+        return None
+    bindings = await db.execute_fetchall(
+        "SELECT sa.analytic_id FROM sheet_analytics sa WHERE sa.sheet_id = ? ORDER BY sa.sort_order",
+        (sheet_id,),
+    )
+    restrictions: dict[str, set[str]] = {}
+    for b in bindings:
+        aid = b["analytic_id"]
+        perms = await db.execute_fetchall(
+            "SELECT record_id FROM analytic_record_permissions WHERE user_id = ? AND analytic_id = ? AND can_edit = 1",
+            (user_id, aid),
+        )
+        if perms:
+            restrictions[aid] = {p["record_id"] for p in perms}
+    return restrictions if restrictions else None
+
+
+def _coord_allowed(coord_key: str, restrictions: dict[str, set[str]], order: list[str]) -> bool:
+    """Check if a coord_key is allowed given restrictions.
+    coord_key = "rid1|rid2|..." matching order of analytics.
+    """
+    parts = coord_key.split("|")
+    for i, aid in enumerate(order):
+        if aid in restrictions and i < len(parts):
+            if parts[i] not in restrictions[aid]:
+                return False
+    return True
 
 
 class CellIn(BaseModel):
@@ -20,12 +72,20 @@ class BulkCellsIn(BaseModel):
 
 
 @router.get("/by-sheet/{sheet_id}")
-async def get_cells(sheet_id: str):
+async def get_cells(sheet_id: str, user_id: str | None = Query(None)):
     db = get_db()
     rows = await db.execute_fetchall(
         "SELECT * FROM cell_data WHERE sheet_id = ?", (sheet_id,)
     )
-    return [dict(r) for r in rows]
+    restrictions = await _get_allowed_records(db, user_id, sheet_id)
+    if not restrictions:
+        return [dict(r) for r in rows]
+
+    # Get analytic order for coord_key parsing
+    order = [b["analytic_id"] for b in await db.execute_fetchall(
+        "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
+    )]
+    return [dict(r) for r in rows if _coord_allowed(r["coord_key"], restrictions, order)]
 
 
 async def _save_cell(db, sheet_id: str, cell: CellIn):
@@ -85,6 +145,16 @@ async def _recalc_model(db, sheet_id: str) -> int:
 @router.put("/by-sheet/{sheet_id}")
 async def save_cells(sheet_id: str, body: BulkCellsIn):
     db = get_db()
+    # Check edit permissions if user_id provided
+    user_id = body.cells[0].user_id if body.cells else None
+    edit_restrictions = await _get_editable_records(db, user_id, sheet_id)
+    if edit_restrictions:
+        order = [b["analytic_id"] for b in await db.execute_fetchall(
+            "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
+        )]
+        for cell in body.cells:
+            if not _coord_allowed(cell.coord_key, edit_restrictions, order):
+                return {"error": f"No edit permission for {cell.coord_key}"}
     for cell in body.cells:
         await _save_cell(db, sheet_id, cell)
     computed = await _recalc_model(db, sheet_id)
@@ -95,6 +165,13 @@ async def save_cells(sheet_id: str, body: BulkCellsIn):
 @router.put("/by-sheet/{sheet_id}/single")
 async def save_single_cell(sheet_id: str, body: CellIn):
     db = get_db()
+    edit_restrictions = await _get_editable_records(db, body.user_id, sheet_id)
+    if edit_restrictions:
+        order = [b["analytic_id"] for b in await db.execute_fetchall(
+            "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
+        )]
+        if not _coord_allowed(body.coord_key, edit_restrictions, order):
+            return {"error": "No edit permission"}
     await _save_cell(db, sheet_id, body)
     computed = await _recalc_model(db, sheet_id)
     await db.commit()
