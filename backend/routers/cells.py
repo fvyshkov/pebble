@@ -67,39 +67,47 @@ async def _save_cell(db, sheet_id: str, cell: CellIn):
         )
 
 
-@router.put("/by-sheet/{sheet_id}")
-async def save_cells(sheet_id: str, body: BulkCellsIn):
-    db = get_db()
-    for cell in body.cells:
-        await _save_cell(db, sheet_id, cell)
-    await db.commit()
-    return {"ok": True}
-
-
-@router.put("/by-sheet/{sheet_id}/single")
-async def save_single_cell(sheet_id: str, body: CellIn):
-    db = get_db()
-    await _save_cell(db, sheet_id, body)
-    await db.commit()
-    return {"ok": True}
-
-
-@router.post("/calculate/{sheet_id}")
-async def calculate(sheet_id: str):
-    """Recalculate all formula cells in the model (lazy pull, cross-sheet)."""
+async def _recalc_model(db, sheet_id: str) -> int:
+    """Recalculate all formula cells in the model containing this sheet."""
     from backend.formula_engine import calculate_model
-    db = get_db()
     sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
     if not sheet:
-        return {"error": "not found"}
+        return 0
     result = await calculate_model(db, sheet[0]["model_id"])
     total = 0
     for sid, changes in result.items():
         for ck, val in changes.items():
             await db.execute("UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?", (val, sid, ck))
         total += len(changes)
+    return total
+
+
+@router.put("/by-sheet/{sheet_id}")
+async def save_cells(sheet_id: str, body: BulkCellsIn):
+    db = get_db()
+    for cell in body.cells:
+        await _save_cell(db, sheet_id, cell)
+    computed = await _recalc_model(db, sheet_id)
     await db.commit()
-    return {"computed": total}
+    return {"ok": True, "computed": computed}
+
+
+@router.put("/by-sheet/{sheet_id}/single")
+async def save_single_cell(sheet_id: str, body: CellIn):
+    db = get_db()
+    await _save_cell(db, sheet_id, body)
+    computed = await _recalc_model(db, sheet_id)
+    await db.commit()
+    return {"ok": True, "computed": computed}
+
+
+@router.post("/calculate/{sheet_id}")
+async def calculate(sheet_id: str):
+    """Recalculate all formula cells in the model (lazy pull, cross-sheet)."""
+    db = get_db()
+    computed = await _recalc_model(db, sheet_id)
+    await db.commit()
+    return {"computed": computed}
 
 
 @router.get("/history/{sheet_id}/{coord_key}")
