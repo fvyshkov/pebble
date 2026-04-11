@@ -10,6 +10,8 @@ import PersonOutlined from '@mui/icons-material/PersonOutlined'
 import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
 import ChevronRightOutlined from '@mui/icons-material/ChevronRightOutlined'
 import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
+import FolderOutlined from '@mui/icons-material/FolderOutlined'
+import CategoryOutlined from '@mui/icons-material/CategoryOutlined'
 import KeyOutlined from '@mui/icons-material/KeyOutlined'
 import * as api from '../api'
 
@@ -44,8 +46,10 @@ export default function UsersDialog({ open, onClose }: Props) {
 
   const loadPerms = useCallback(() => {
     if (!selectedId) return
-    api.getAllPermissions(selectedId).then(setPerms)
-    api.getAnalyticPermissions(selectedId).then(setAnalyticPerms)
+    api.getAllPermissions(selectedId).then(data => {
+      setPerms(data)
+      setAnalyticPerms([]) // unified in perms now
+    })
   }, [selectedId])
 
   useEffect(() => {
@@ -203,70 +207,155 @@ export default function UsersDialog({ open, onClose }: Props) {
 
             <Divider sx={{ mb: 2 }} />
 
-            {/* Permissions tree */}
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>Доступ к листам</Typography>
+            {/* Unified permissions tree */}
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>Доступ</Typography>
 
             <Box sx={{ fontSize: 13 }}>
-              {/* Header */}
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: '1px solid #e0e0e0', fontWeight: 600, color: '#666' }}>
-                <Box sx={{ flex: 1 }}>Модель / Лист</Box>
+                <Box sx={{ flex: 1 }}>Модель / Лист / Аналитика</Box>
                 <Box sx={{ width: 80, textAlign: 'center' }}>Просмотр</Box>
                 <Box sx={{ width: 80, textAlign: 'center' }}>Ввод</Box>
               </Box>
 
-              {perms.map(model => {
+              {perms.map((model: any) => {
                 const isOpen = expanded.has(model.id)
-                const toggle = () => setExpanded(prev => {
-                  const next = new Set(prev)
-                  if (next.has(model.id)) next.delete(model.id); else next.add(model.id)
-                  return next
-                })
+                const toggle = () => setExpanded(prev => { const n = new Set(prev); n.has(model.id) ? n.delete(model.id) : n.add(model.id); return n })
+
+                // Analytic record helpers
+                const handleRecordPerm = (analyticId: string, recordId: string, field: string, value: boolean, rec: any) => {
+                  const data = {
+                    user_id: selectedId!, analytic_id: analyticId, record_id: recordId,
+                    can_view: field === 'can_view' ? value : rec.can_view || value,
+                    can_edit: field === 'can_edit' ? value : rec.can_edit,
+                  }
+                  api.setAnalyticPermission(data).then(loadPerms)
+                }
+                const setRecordTreePerm = (analyticId: string, records: any[], field: string, value: boolean) => {
+                  const flat = (recs: any[]): any[] => recs.flatMap(r => [r, ...flat(r.children || [])])
+                  Promise.all(flat(records).map(r => api.setAnalyticPermission({
+                    user_id: selectedId!, analytic_id: analyticId, record_id: r.id,
+                    can_view: field === 'can_view' ? value : r.can_view || value,
+                    can_edit: field === 'can_edit' ? value : r.can_edit,
+                  }))).then(loadPerms)
+                }
+
+                const renderRecords = (analyticId: string, records: any[], depth: number): any => {
+                  return records.map((rec: any) => {
+                    const hasChildren = rec.children && rec.children.length > 0
+                    const rKey = `rec-${rec.id}`
+                    const rOpen = expanded.has(rKey)
+                    const toggleR = () => setExpanded(prev => { const n = new Set(prev); n.has(rKey) ? n.delete(rKey) : n.add(rKey); return n })
+                    return (
+                      <Box key={rec.id}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.25, pl: depth, '&:hover': { bgcolor: '#f8f8f8' }, cursor: hasChildren ? 'pointer' : 'default' }}
+                          onClick={hasChildren ? toggleR : undefined}>
+                          {hasChildren
+                            ? (rOpen ? <ExpandMoreOutlined sx={{ fontSize: 14, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 14, opacity: 0.4 }} />)
+                            : <Box sx={{ width: 18 }} />}
+                          <Box sx={{ flex: 1, fontWeight: hasChildren ? 500 : 400 }}>{rec.name}</Box>
+                          <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                            <Checkbox size="small" checked={rec.can_view}
+                              onChange={e => {
+                                if (hasChildren) setRecordTreePerm(analyticId, [rec], 'can_view', e.target.checked)
+                                else handleRecordPerm(analyticId, rec.id, 'can_view', e.target.checked, rec)
+                              }} />
+                          </Box>
+                          <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                            <Checkbox size="small" checked={rec.can_edit}
+                              onChange={e => {
+                                if (hasChildren) setRecordTreePerm(analyticId, [rec], 'can_edit', e.target.checked)
+                                else handleRecordPerm(analyticId, rec.id, 'can_edit', e.target.checked, rec)
+                              }} />
+                          </Box>
+                        </Box>
+                        {hasChildren && rOpen && renderRecords(analyticId, rec.children, depth + 3)}
+                      </Box>
+                    )
+                  })
+                }
+
                 return (
                 <Box key={model.id}>
-                  {/* Model row */}
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.5, bgcolor: '#fafafa', '&:hover': { bgcolor: '#f0f0f0' }, cursor: 'pointer' }}
                     onClick={toggle}>
                     {isOpen ? <ExpandMoreOutlined sx={{ fontSize: 18, opacity: 0.5 }} /> : <ChevronRightOutlined sx={{ fontSize: 18, opacity: 0.5 }} />}
                     <Box sx={{ flex: 1, fontWeight: 600 }}>{model.name}</Box>
                     <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
-                      <Checkbox
-                        size="small"
+                      <Checkbox size="small"
                         checked={modelChecked(model.id, 'can_view')}
                         indeterminate={modelIndeterminate(model.id, 'can_view')}
-                        onChange={e => handleModelPerm(model.id, 'can_view', e.target.checked)}
-                      />
+                        onChange={e => handleModelPerm(model.id, 'can_view', e.target.checked)} />
                     </Box>
                     <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
-                      <Checkbox
-                        size="small"
+                      <Checkbox size="small"
                         checked={modelChecked(model.id, 'can_edit')}
                         indeterminate={modelIndeterminate(model.id, 'can_edit')}
-                        onChange={e => handleModelPerm(model.id, 'can_edit', e.target.checked)}
-                      />
+                        onChange={e => handleModelPerm(model.id, 'can_edit', e.target.checked)} />
                     </Box>
                   </Box>
 
-                  {/* Sheet rows (collapsible) */}
-                  {isOpen && model.sheets.map(sheet => (
-                    <Box key={sheet.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, pl: 5, '&:hover': { bgcolor: '#f8f8f8' } }}>
-                      <DescriptionOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
-                      <Box sx={{ flex: 1 }}>{sheet.name}</Box>
-                      <Box sx={{ width: 80, textAlign: 'center' }}>
-                        <Checkbox
-                          size="small"
-                          checked={sheet.can_view}
-                          onChange={e => handleSheetPerm(sheet.id, 'can_view', e.target.checked)}
-                        />
-                      </Box>
-                      <Box sx={{ width: 80, textAlign: 'center' }}>
-                        <Checkbox
-                          size="small"
-                          checked={sheet.can_edit}
-                          onChange={e => handleSheetPerm(sheet.id, 'can_edit', e.target.checked)}
-                        />
-                      </Box>
-                    </Box>
-                  ))}
+                  {isOpen && <>
+                    {/* Sheets folder */}
+                    {model.sheets?.length > 0 && (() => {
+                      const sfKey = `sf-${model.id}`
+                      const sfOpen = expanded.has(sfKey)
+                      return (
+                        <Box>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.25, pl: 4, cursor: 'pointer', '&:hover': { bgcolor: '#f8f8f8' } }}
+                            onClick={() => setExpanded(prev => { const n = new Set(prev); n.has(sfKey) ? n.delete(sfKey) : n.add(sfKey); return n })}>
+                            {sfOpen ? <ExpandMoreOutlined sx={{ fontSize: 16, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 16, opacity: 0.4 }} />}
+                            <FolderOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
+                            <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>Листы</Box>
+                          </Box>
+                          {sfOpen && model.sheets.map((sheet: any) => (
+                            <Box key={sheet.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, pl: 7, '&:hover': { bgcolor: '#f8f8f8' } }}>
+                              <DescriptionOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
+                              <Box sx={{ flex: 1 }}>{sheet.name}</Box>
+                              <Box sx={{ width: 80, textAlign: 'center' }}>
+                                <Checkbox size="small" checked={sheet.can_view}
+                                  onChange={e => handleSheetPerm(sheet.id, 'can_view', e.target.checked)} />
+                              </Box>
+                              <Box sx={{ width: 80, textAlign: 'center' }}>
+                                <Checkbox size="small" checked={sheet.can_edit}
+                                  onChange={e => handleSheetPerm(sheet.id, 'can_edit', e.target.checked)} />
+                              </Box>
+                            </Box>
+                          ))}
+                        </Box>
+                      )
+                    })()}
+
+                    {/* Analytics folder */}
+                    {model.analytics?.length > 0 && (() => {
+                      const afKey = `af-${model.id}`
+                      const afOpen = expanded.has(afKey)
+                      return (
+                        <Box>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.25, pl: 4, cursor: 'pointer', '&:hover': { bgcolor: '#f8f8f8' } }}
+                            onClick={() => setExpanded(prev => { const n = new Set(prev); n.has(afKey) ? n.delete(afKey) : n.add(afKey); return n })}>
+                            {afOpen ? <ExpandMoreOutlined sx={{ fontSize: 16, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 16, opacity: 0.4 }} />}
+                            <FolderOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
+                            <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>Аналитики</Box>
+                          </Box>
+                          {afOpen && model.analytics.map((analytic: any) => {
+                            const aKey = `a-${analytic.id}`
+                            const aOpen = expanded.has(aKey)
+                            return (
+                              <Box key={analytic.id}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.25, pl: 7, cursor: 'pointer', '&:hover': { bgcolor: '#f8f8f8' } }}
+                                  onClick={() => setExpanded(prev => { const n = new Set(prev); n.has(aKey) ? n.delete(aKey) : n.add(aKey); return n })}>
+                                  {aOpen ? <ExpandMoreOutlined sx={{ fontSize: 14, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 14, opacity: 0.4 }} />}
+                                  <CategoryOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
+                                  <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>{analytic.name}</Box>
+                                </Box>
+                                {aOpen && renderRecords(analytic.id, analytic.records, 10)}
+                              </Box>
+                            )
+                          })}
+                        </Box>
+                      )
+                    })()}
+                  </>}
                 </Box>
                 )
               })}
@@ -274,81 +363,6 @@ export default function UsersDialog({ open, onClose }: Props) {
               {perms.length === 0 && (
                 <Typography sx={{ py: 2, color: '#999', textAlign: 'center' }}>Нет моделей</Typography>
               )}
-            </Box>
-
-            <Divider sx={{ my: 2 }} />
-
-            {/* Analytic record permissions */}
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>Доступ к аналитикам (подразделения)</Typography>
-
-            <Box sx={{ fontSize: 13 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: '1px solid #e0e0e0', fontWeight: 600, color: '#666' }}>
-                <Box sx={{ flex: 1 }}>Модель / Аналитика / Подразделение</Box>
-                <Box sx={{ width: 80, textAlign: 'center' }}>Просмотр</Box>
-                <Box sx={{ width: 80, textAlign: 'center' }}>Ввод</Box>
-              </Box>
-
-              {analyticPerms.map(model => {
-                const mKey = `ap-${model.id}`
-                const mOpen = expanded.has(mKey)
-                const toggleM = () => setExpanded(prev => {
-                  const next = new Set(prev)
-                  if (next.has(mKey)) next.delete(mKey); else next.add(mKey)
-                  return next
-                })
-                return (
-                  <Box key={mKey}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.5, bgcolor: '#fafafa', cursor: 'pointer', '&:hover': { bgcolor: '#f0f0f0' } }}
-                      onClick={toggleM}>
-                      {mOpen ? <ExpandMoreOutlined sx={{ fontSize: 18, opacity: 0.5 }} /> : <ChevronRightOutlined sx={{ fontSize: 18, opacity: 0.5 }} />}
-                      <Box sx={{ flex: 1, fontWeight: 600 }}>{model.name}</Box>
-                    </Box>
-                    {mOpen && model.analytics.map((analytic: any) => {
-                      const aKey = `ap-a-${analytic.id}`
-                      const aOpen = expanded.has(aKey)
-                      const toggleA = () => setExpanded(prev => {
-                        const next = new Set(prev)
-                        if (next.has(aKey)) next.delete(aKey); else next.add(aKey)
-                        return next
-                      })
-                      return (
-                        <Box key={aKey}>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.25, pl: 4, cursor: 'pointer', '&:hover': { bgcolor: '#f8f8f8' } }}
-                            onClick={toggleA}>
-                            {aOpen ? <ExpandMoreOutlined sx={{ fontSize: 16, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 16, opacity: 0.4 }} />}
-                            <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>{analytic.name}</Box>
-                          </Box>
-                          {aOpen && analytic.records.map((rec: any) => (
-                            <Box key={rec.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, pl: 7, '&:hover': { bgcolor: '#f8f8f8' } }}>
-                              <Box sx={{ flex: 1 }}>{rec.name}</Box>
-                              <Box sx={{ width: 80, textAlign: 'center' }}>
-                                <Checkbox size="small" checked={rec.can_view}
-                                  onChange={e => {
-                                    api.setAnalyticPermission({
-                                      user_id: selectedId!, analytic_id: analytic.id,
-                                      record_id: rec.id, can_view: e.target.checked, can_edit: rec.can_edit,
-                                    }).then(loadPerms)
-                                  }}
-                                />
-                              </Box>
-                              <Box sx={{ width: 80, textAlign: 'center' }}>
-                                <Checkbox size="small" checked={rec.can_edit}
-                                  onChange={e => {
-                                    api.setAnalyticPermission({
-                                      user_id: selectedId!, analytic_id: analytic.id,
-                                      record_id: rec.id, can_view: rec.can_view || e.target.checked, can_edit: e.target.checked,
-                                    }).then(loadPerms)
-                                  }}
-                                />
-                              </Box>
-                            </Box>
-                          ))}
-                        </Box>
-                      )
-                    })}
-                  </Box>
-                )
-              })}
             </Box>
           </Box>
         ) : (

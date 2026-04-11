@@ -128,28 +128,69 @@ async def get_accessible_sheets(user_id: str):
 
 @router.get("/{user_id}/all-permissions")
 async def get_all_permissions(user_id: str):
-    """Return ALL models > sheets with can_view/can_edit for this user."""
+    """Return unified tree: models > sheets + analytics > records with permissions."""
     db = get_db()
-    rows = await db.execute_fetchall("""
-        SELECT m.id as model_id, m.name as model_name,
-               s.id as sheet_id, s.name as sheet_name,
-               COALESCE(sp.can_view, 1) as can_view,
-               COALESCE(sp.can_edit, 1) as can_edit
-        FROM sheets s
-        JOIN models m ON m.id = s.model_id
-        LEFT JOIN sheet_permissions sp ON sp.sheet_id = s.id AND sp.user_id = ?
-        ORDER BY m.name, s.name
-    """, (user_id,))
-    models: dict = {}
-    for r in rows:
-        mid = r["model_id"]
-        if mid not in models:
-            models[mid] = {"id": mid, "name": r["model_name"], "sheets": []}
-        models[mid]["sheets"].append({
-            "id": r["sheet_id"], "name": r["sheet_name"],
-            "can_view": bool(r["can_view"]), "can_edit": bool(r["can_edit"]),
-        })
-    return list(models.values())
+    import json as _json
+
+    all_models = await db.execute_fetchall("SELECT id, name FROM models ORDER BY name")
+    result = []
+    for m in all_models:
+        mid = m["id"]
+
+        # Sheets
+        sheets_rows = await db.execute_fetchall("""
+            SELECT s.id, s.name,
+                   COALESCE(sp.can_view, 1) as can_view,
+                   COALESCE(sp.can_edit, 1) as can_edit
+            FROM sheets s
+            LEFT JOIN sheet_permissions sp ON sp.sheet_id = s.id AND sp.user_id = ?
+            WHERE s.model_id = ?
+            ORDER BY s.sort_order, s.created_at
+        """, (user_id, mid))
+        sheets = [{"id": r["id"], "name": r["name"],
+                    "can_view": bool(r["can_view"]), "can_edit": bool(r["can_edit"])} for r in sheets_rows]
+
+        # Analytics with top-level records (parent_id IS NULL)
+        analytics_rows = await db.execute_fetchall(
+            "SELECT id, name FROM analytics WHERE model_id = ? AND is_periods = 0 ORDER BY sort_order", (mid,))
+        analytics = []
+        for a in analytics_rows:
+            recs = await db.execute_fetchall("""
+                SELECT ar.id, ar.parent_id, json_extract(ar.data_json, '$.name') as name,
+                       COALESCE(arp.can_view, 0) as can_view,
+                       COALESCE(arp.can_edit, 0) as can_edit
+                FROM analytic_records ar
+                LEFT JOIN analytic_record_permissions arp
+                    ON arp.record_id = ar.id AND arp.user_id = ?
+                WHERE ar.analytic_id = ?
+                ORDER BY ar.sort_order
+            """, (user_id, a["id"]))
+
+            # Build tree
+            by_parent: dict[str, list] = {}
+            for r in recs:
+                pid = r["parent_id"] or "__root__"
+                by_parent.setdefault(pid, [])
+                by_parent[pid].append(r)
+
+            def build_tree(parent_id: str) -> list:
+                nodes = []
+                for r in by_parent.get(parent_id, []):
+                    children = build_tree(r["id"])
+                    nodes.append({
+                        "id": r["id"], "name": r["name"],
+                        "can_view": bool(r["can_view"]), "can_edit": bool(r["can_edit"]),
+                        "children": children,
+                    })
+                return nodes
+
+            records = build_tree("__root__")
+            if records:
+                analytics.append({"id": a["id"], "name": a["name"], "records": records})
+
+        result.append({"id": mid, "name": m["name"], "sheets": sheets, "analytics": analytics})
+
+    return result
 
 
 @router.get("/{user_id}/allowed-records/{sheet_id}")
