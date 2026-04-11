@@ -692,6 +692,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
 
 @router.post("/excel-stream")
 async def import_excel_stream(file: UploadFile = File(...), model_name: str = Form("Imported Model")):
+    import asyncio
     content = await file.read()
 
     async def generate():
@@ -700,6 +701,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             return f"data: {payload}\n\n"
 
         db = get_db()
+        loop = asyncio.get_event_loop()
 
         # Unique name
         existing = await db.execute_fetchall("SELECT id FROM models WHERE name = ?", (model_name,))
@@ -710,8 +712,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
         yield event(f"Загрузка файла Excel...")
 
-        wb_formulas = load_workbook(io.BytesIO(content))
-        wb_data = load_workbook(io.BytesIO(content), data_only=True)
+        # Run blocking openpyxl in executor to not block event loop
+        wb_formulas = await loop.run_in_executor(None, lambda: load_workbook(io.BytesIO(content)))
+        wb_data = await loop.run_in_executor(None, lambda: load_workbook(io.BytesIO(content), data_only=True))
         sheet_names = wb_formulas.sheetnames
 
         yield event(f"Найдено {len(sheet_names)} листов: {', '.join(sheet_names)}")
