@@ -22,7 +22,7 @@ from typing import Any
 # ── Tokenizer ──────────────────────────────────────────────────────────────
 
 TOKEN_RE = re.compile(r"""
-    (\[(?:[^\[\]]+)\](?:\([^)]*\))?)  |  # [ref](params) or [ref]
+    (\[(?:[^\[\]]+)\](?:\((?:[^()]*|\([^()]*\))*\))?)  |  # [ref](params) — one nesting level
     (SUM)\s*\(                         |  # SUM function
     (\d+(?:\.\d+)?)                    |  # number
     ([+\-*/(),])                       |  # operators and parens
@@ -30,11 +30,14 @@ TOKEN_RE = re.compile(r"""
 """, re.VERBOSE)
 
 REF_RE = re.compile(r"""
-    \[([^\]]+)\]              # indicator name
-    (?:\(([^)]*)\))?          # optional (key="value", ...) params
+    \[([^\]]+)\]                          # indicator name
+    (?:\(((?:[^()]*|\([^()]*\))*)\))?     # optional params — one nesting level
 """, re.VERBOSE)
 
 PARAM_RE = re.compile(r'([\w\s]+?)\s*=\s*"([^"]*)"')
+# Matches: период=период.назад(N) or период=период
+PERIOD_FUNC_RE = re.compile(r'(\w+)\s*=\s*\1\.назад\((\d+)\)')
+PERIOD_IDENTITY_RE = re.compile(r'(\w+)\s*=\s*\1(?:\s*$|\s*,)')
 
 
 def parse_ref(token: str) -> dict:
@@ -44,8 +47,20 @@ def parse_ref(token: str) -> dict:
     name = m.group(1)
     params_str = m.group(2) or ""
     params = {}
-    for pm in PARAM_RE.finditer(params_str):
-        params[pm.group(1)] = pm.group(2)
+
+    # Check for период=период.назад(N) syntax first
+    pm = PERIOD_FUNC_RE.search(params_str)
+    if pm:
+        params[pm.group(1)] = f"назад({pm.group(2)})"
+    else:
+        # Check for период=период (identity, no-op)
+        pm = PERIOD_IDENTITY_RE.search(params_str)
+        if pm:
+            pass  # Identity — don't add any param (same as no modifier)
+        else:
+            # Legacy: key="value" pairs
+            for pm in PARAM_RE.finditer(params_str):
+                params[pm.group(1)] = pm.group(2)
 
     # Cross-sheet separator is "::"
     sheet = None
@@ -369,12 +384,28 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                         param_aid = aid; break
             if not param_aid: continue
 
-            if param_value == "предыдущий" and param_aid == period_aid:
+            # Handle period back-references
+            is_period_back = False
+            back_n = 0
+            if param_aid == period_aid:
+                if param_value == "предыдущий":
+                    is_period_back = True
+                    back_n = 1
+                elif param_value.startswith("назад("):
+                    is_period_back = True
+                    try:
+                        back_n = int(param_value[6:-1])
+                    except ValueError:
+                        return None
+
+            if is_period_back:
                 cur = parts.get(param_aid)
-                if cur and cur in prev_period:
-                    parts[param_aid] = prev_period[cur]
-                else:
-                    return None
+                for _ in range(back_n):
+                    if cur and cur in prev_period:
+                        cur = prev_period[cur]
+                    else:
+                        return None
+                parts[param_aid] = cur
             else:
                 nmap = name_to_rids.get(param_aid, {})
                 rids = nmap.get(param_value.lower(), [])

@@ -341,14 +341,19 @@ def write_manual_formulas(db, sheet_name, formulas_dict):
 
         formula = info["formula"]
         formula_first = info.get("formula_first")
+        formula_second = info.get("formula_second")
+        second_period_rid = leaf_periods[1]["id"] if len(leaf_periods) > 1 else None
 
         for lp in leaf_periods:
             period_rid = lp["id"]
             coord_key = f"{period_rid}|{rid}"
             is_first = (period_rid == first_period_rid)
+            is_second = (period_rid == second_period_rid)
 
             if is_first and formula_first is not None:
                 f_text = formula_first
+            elif is_second and formula_second is not None:
+                f_text = formula_second
             else:
                 f_text = formula
 
@@ -433,11 +438,10 @@ BAAS2_FORMULAS = {
     "комиссия партнеру": {
         "formula": "[комиссия партнеру (KGS, сом)] + [комиссия партнеру (RUB, сом)] + [комиссия партнеру (USD, сом)]",
     },
-    # NOTE: Excel uses avg(prev_prev, prev) which can't be expressed in Pebble.
-    # Using just prev/12 as approximation (exact for m2, close for others)
     "начисление расходов в ФЗД": {
-        "formula": '-0.002 * [портфель](периоды="предыдущий") / 12',
+        "formula": '-0.002 * ([портфель](период=период.назад(2)) + [портфель](периоды="предыдущий")) / 2 / 12',
         "formula_first": "0",
+        "formula_second": '-0.002 * [портфель](периоды="предыдущий") / 12',
     },
     "чистый операционный доход": {
         "formula": "[чистый операционный доход (KGS)] + [чистый операционный доход (RUB, сом)] + [чистый операционный доход (USD, сом)] + [начисление расходов в ФЗД]",
