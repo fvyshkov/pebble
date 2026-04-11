@@ -107,6 +107,21 @@ For formulas with first-period exception:
 Sheet content:
 """
 
+FORMULA_FIX_PROMPT = """\
+You have a Pebble model with these sheets and indicator names.
+For each formula cell, the formula must reference EXACT indicator names from this list.
+Cross-sheet references use :: separator: [SheetDisplayName::indicator_name]
+
+AVAILABLE INDICATORS PER SHEET:
+{indicators_context}
+
+FORMULA CELLS TO FIX (current formula → expected behavior based on Excel formula):
+{formula_fixes}
+
+Return ONLY a JSON array of fixes:
+[{{"coord_key": "...", "formula": "corrected formula", "formula_first": "optional first-period formula"}}]
+"""
+
 
 # ── Excel text extraction ──────────────────────────────────────────────────
 
