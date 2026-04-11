@@ -1,0 +1,342 @@
+"""Excel → Pebble formula translator.
+
+Pure function: translates Excel cell-reference formulas into Pebble
+[indicator_name] formulas using row→record name mappings.
+
+Key concepts:
+- base_col: the column where this formula lives (e.g. 5 for col E = m2)
+- If a cell reference points to a column LEFT of base_col → previous period
+- If same column → current period
+- Cross-sheet: ='SheetName'!E19 → [SheetDisplayName::indicator_name]
+- First period (m1) refs to col before data_start → replace with 0
+"""
+
+import re
+from openpyxl.utils import column_index_from_string
+
+
+# ── Excel cell reference parser ────────────────────────────────────────────
+
+# Matches: 'Sheet Name'!E19, Sheet!E19, E19, $E$19, E$19, $E19
+CELL_REF_RE = re.compile(
+    r"(?:'([^']+)'|([A-Za-z0-9_.\+\- ]+))!"  # optional sheet prefix
+    r"(\$?[A-Z]{1,3})(\$?\d+)"                # column + row
+    r"|"                                        # OR
+    r"(\$?[A-Z]{1,3})(\$?\d+)"                # bare column + row
+)
+
+# Matches Excel range like E19:E25 or 'Sheet'!E19:E25
+RANGE_RE = re.compile(
+    r"(?:(?:'([^']+)'|([A-Za-z0-9_.\+\- ]+))!)?"
+    r"(\$?[A-Z]{1,3})(\$?\d+)"
+    r":"
+    r"(\$?[A-Z]{1,3})(\$?\d+)"
+)
+
+# SUM(range) pattern
+SUM_RE = re.compile(r"SUM\s*\(([^)]+)\)", re.IGNORECASE)
+
+
+def _col_num(col_str: str) -> int:
+    """Convert column letter (possibly with $) to 1-based number."""
+    return column_index_from_string(col_str.replace("$", ""))
+
+
+def _row_num(row_str: str) -> int:
+    """Convert row string (possibly with $) to number."""
+    return int(row_str.replace("$", ""))
+
+
+# ── Core translator ───────────────────────────────────────────────────────
+
+def translate_excel_formula(
+    excel_formula: str,
+    base_col: int,
+    data_start_col: int,
+    row_to_name: dict[int, str],
+    sheet_row_maps: dict[str, dict[int, str]] | None = None,
+    sheet_display_names: dict[str, str] | None = None,
+    is_first_period: bool = False,
+    sheet_data_starts: dict[str, int] | None = None,
+) -> str:
+    """Translate an Excel formula to Pebble formula syntax.
+
+    Args:
+        excel_formula: Excel formula string (with leading =)
+        base_col: Column number where this formula lives (1-based)
+        data_start_col: First data column number (1-based)
+        row_to_name: {excel_row_number: pebble_indicator_name} for current sheet
+        sheet_row_maps: {excel_sheet_name: {row: name}} for cross-sheet refs
+        sheet_display_names: {excel_sheet_name: pebble_display_name} for cross-sheet refs
+        is_first_period: True if this is the first period column
+        sheet_data_starts: {excel_sheet_name: data_start_col} for cross-sheet period alignment
+
+    Returns:
+        Pebble formula string (without =)
+    """
+    if not excel_formula:
+        return ""
+
+    formula = excel_formula.lstrip("=").strip()
+    if not formula:
+        return ""
+
+    sheet_row_maps = sheet_row_maps or {}
+    sheet_display_names = sheet_display_names or {}
+    sheet_data_starts = sheet_data_starts or {}
+
+    # Step 1: Expand SUM(range) into SUM(cell, cell, ...)
+    formula = _expand_sum_ranges(formula, row_to_name, sheet_row_maps)
+
+    # Step 2: Replace each cell reference with [indicator_name]
+    result = _replace_cell_refs(
+        formula, base_col, data_start_col, row_to_name,
+        sheet_row_maps, sheet_display_names, is_first_period,
+        sheet_data_starts,
+    )
+
+    return result
+
+
+def _expand_sum_ranges(
+    formula: str,
+    row_to_name: dict[int, str],
+    sheet_row_maps: dict[str, dict[int, str]],
+) -> str:
+    """Expand SUM(E19:E25) into SUM(E19,E20,...,E25) using row map to skip missing rows."""
+
+    def expand_match(m):
+        inner = m.group(1)
+        rm = RANGE_RE.match(inner.strip())
+        if not rm:
+            return m.group(0)
+
+        sheet1 = rm.group(1) or rm.group(2) or None
+        col1 = rm.group(3)
+        row1 = _row_num(rm.group(4))
+        col2 = rm.group(5)
+        row2 = _row_num(rm.group(6))
+
+        if col1.replace("$", "") != col2.replace("$", ""):
+            return m.group(0)  # Multi-column range — don't expand
+
+        rmap = row_to_name
+        if sheet1:
+            rmap = sheet_row_maps.get(sheet1, row_to_name)
+
+        prefix = f"'{sheet1}'!" if sheet1 else ""
+        refs = []
+        for r in range(row1, row2 + 1):
+            if r in rmap:
+                refs.append(f"{prefix}{col1}{r}")
+
+        if refs:
+            return f"SUM({','.join(refs)})"
+        return m.group(0)
+
+    return SUM_RE.sub(expand_match, formula)
+
+
+def _replace_cell_refs(
+    formula: str,
+    base_col: int,
+    data_start_col: int,
+    row_to_name: dict[int, str],
+    sheet_row_maps: dict[str, dict[int, str]],
+    sheet_display_names: dict[str, str],
+    is_first_period: bool,
+    sheet_data_starts: dict[str, int] | None = None,
+) -> str:
+    """Replace all cell references in formula with [name] or [Sheet::name] tokens."""
+
+    # We need to process references from right to left to preserve positions
+    # First, find all references
+    refs = []
+
+    for m in CELL_REF_RE.finditer(formula):
+        if m.group(1) is not None or m.group(2) is not None:
+            # Sheet-prefixed reference
+            sheet_name = m.group(1) or m.group(2)
+            col_str = m.group(3)
+            row_str = m.group(4)
+        elif m.group(5) is not None:
+            # Bare reference
+            sheet_name = None
+            col_str = m.group(5)
+            row_str = m.group(6)
+        else:
+            continue
+
+        refs.append({
+            "start": m.start(),
+            "end": m.end(),
+            "sheet": sheet_name,
+            "col": _col_num(col_str),
+            "row": _row_num(row_str),
+            "original": m.group(0),
+        })
+
+    # Process from right to left
+    result = formula
+    for ref in reversed(refs):
+        replacement = _translate_ref(
+            ref, base_col, data_start_col, row_to_name,
+            sheet_row_maps, sheet_display_names, is_first_period,
+            sheet_data_starts,
+        )
+        result = result[:ref["start"]] + replacement + result[ref["end"]:]
+
+    return result
+
+
+def _translate_ref(
+    ref: dict,
+    base_col: int,
+    data_start_col: int,
+    row_to_name: dict[int, str],
+    sheet_row_maps: dict[str, dict[int, str]],
+    sheet_display_names: dict[str, str],
+    is_first_period: bool,
+    sheet_data_starts: dict[str, int] | None = None,
+) -> str:
+    """Translate a single cell reference to Pebble [name] token."""
+    sheet_name = ref["sheet"]
+    col = ref["col"]
+    row = ref["row"]
+    sheet_data_starts = sheet_data_starts or {}
+
+    # Determine indicator name
+    if sheet_name:
+        rmap = sheet_row_maps.get(sheet_name, {})
+        display = sheet_display_names.get(sheet_name, sheet_name)
+    else:
+        rmap = row_to_name
+        display = None
+
+    name = rmap.get(row)
+    if name is None:
+        return ref["original"]  # Can't resolve — keep original
+
+    # Determine period modifier using period index alignment
+    # Period index = col - data_start for that sheet
+    source_period_idx = base_col - data_start_col
+
+    if sheet_name and sheet_name in sheet_data_starts:
+        # Cross-sheet: use target sheet's data_start for alignment
+        target_data_start = sheet_data_starts[sheet_name]
+        ref_period_idx = col - target_data_start
+    else:
+        # Same sheet
+        ref_period_idx = col - data_start_col
+
+    period_diff = ref_period_idx - source_period_idx
+
+    if period_diff < 0:
+        # Reference to a previous period
+        if is_first_period and ref_period_idx < 0:
+            # Before first data column — no previous period exists
+            return "0"
+        if display:
+            return f'[{display}::{name}](периоды="предыдущий")'
+        return f'[{name}](периоды="предыдущий")'
+    else:
+        # Same period or future (current period)
+        if display:
+            return f"[{display}::{name}]"
+        return f"[{name}]"
+
+
+# ── Batch translation ─────────────────────────────────────────────────────
+
+def translate_sheet_formulas(
+    ws_formulas,
+    data_start_col: int,
+    row_to_name: dict[int, str],
+    sheet_row_maps: dict[str, dict[int, str]] | None = None,
+    sheet_display_names: dict[str, str] | None = None,
+    max_col: int | None = None,
+) -> dict[int, dict]:
+    """Translate all formulas on a sheet.
+
+    Args:
+        ws_formulas: openpyxl worksheet (with formulas, not data_only)
+        data_start_col: first data column
+        row_to_name: {row: indicator_name} for this sheet
+        sheet_row_maps: {sheet_name: {row: name}} for cross-sheet
+        sheet_display_names: {excel_name: display_name}
+        max_col: max column to scan
+
+    Returns:
+        {row: {"formula": str, "formula_first": str or None}}
+        formula = formula for m2+ periods
+        formula_first = formula for m1 (if different), or None
+    """
+    if max_col is None:
+        max_col = min(ws_formulas.max_column or 1, 200)
+
+    results = {}
+
+    for row in row_to_name:
+        # Find m1 (first formula in data columns) and m2 (second formula)
+        m1_formula = None
+        m1_col = None
+        m2_formula = None
+        m2_col = None
+
+        for c in range(data_start_col, max_col + 1):
+            cell = ws_formulas.cell(row, c)
+            val = cell.value
+            if val is not None and isinstance(val, str) and val.startswith("="):
+                if m1_formula is None:
+                    m1_formula = val
+                    m1_col = c
+                elif m2_formula is None:
+                    m2_formula = val
+                    m2_col = c
+                    break
+            elif val is not None and m1_formula is None:
+                # First period is a constant (manual input)
+                m1_formula = str(val)
+                m1_col = c
+                continue
+
+        if m1_formula is None:
+            continue
+
+        # Translate m2 (the "general" formula)
+        if m2_formula and m2_col:
+            formula = translate_excel_formula(
+                m2_formula, m2_col, data_start_col, row_to_name,
+                sheet_row_maps, sheet_display_names, is_first_period=False,
+            )
+        elif m1_formula.startswith("="):
+            formula = translate_excel_formula(
+                m1_formula, m1_col, data_start_col, row_to_name,
+                sheet_row_maps, sheet_display_names, is_first_period=False,
+            )
+        else:
+            continue  # Manual input only
+
+        # Translate m1 if it's a formula and different from m2
+        formula_first = None
+        if m1_formula and m1_formula.startswith("="):
+            pebble_m1 = translate_excel_formula(
+                m1_formula, m1_col, data_start_col, row_to_name,
+                sheet_row_maps, sheet_display_names, is_first_period=True,
+            )
+            if pebble_m1 != formula:
+                formula_first = pebble_m1
+        elif m1_formula and not m1_formula.startswith("="):
+            # First period is a constant
+            try:
+                float(m1_formula)
+                formula_first = m1_formula
+            except ValueError:
+                formula_first = "0"
+
+        results[row] = {
+            "formula": formula,
+            "formula_first": formula_first,
+        }
+
+    return results
