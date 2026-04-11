@@ -153,13 +153,20 @@ def match_excel_rows_to_db(excel_labels, db_records, excel_sheet_name):
 
         label_lower = label.lower().strip()
 
+        # Normalize "ИТОГО X" / "ВСЕГО X" → "X" for matching
+        label_norm = label_lower
+        for prefix in ["итого ", "всего "]:
+            if label_norm.startswith(prefix):
+                label_norm = label_norm[len(prefix):]
+                break
+
         # Try matching current DB record or lookahead up to 5 positions
         max_look = min(6, len(db_records) - db_idx)
         for offset in range(max_look):
             rec = db_records[db_idx + offset]
             rec_base = _strip_suffix(rec["name"]).lower().strip()
             rec_exact = rec["name"].lower().strip()
-            if label_lower == rec_exact or label_lower == rec_base:
+            if label_lower == rec_exact or label_lower == rec_base or label_norm == rec_exact or label_norm == rec_base:
                 row_to_name[row_num] = rec["name"]
                 row_to_rid[row_num] = rec["id"]
                 used_rids.add(rec["id"])
@@ -188,11 +195,19 @@ def match_excel_rows_to_db(excel_labels, db_records, excel_sheet_name):
         if row_num in row_to_name:
             continue
         label_lower = label.lower().strip()
+        label_norm = label_lower
+        for prefix in ["итого ", "всего "]:
+            if label_norm.startswith(prefix):
+                label_norm = label_norm[len(prefix):]
+                break
         picked = None
-        for source in [db_by_label.get(label_lower, []), db_by_base.get(label_lower, [])]:
-            for c in source:
-                if c["id"] not in used_rids:
-                    picked = c
+        for lbl in [label_lower, label_norm]:
+            for source in [db_by_label.get(lbl, []), db_by_base.get(lbl, [])]:
+                for c in source:
+                    if c["id"] not in used_rids:
+                        picked = c
+                        break
+                if picked:
                     break
             if picked:
                 break
