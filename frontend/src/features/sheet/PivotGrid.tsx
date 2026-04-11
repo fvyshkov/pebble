@@ -82,7 +82,7 @@ function fmtDisplay(val: string | undefined, dt: string): string {
   const num = parseFloat(val)
   if (isNaN(num)) return val
   if (dt === 'sum') return num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-  if (dt === 'percent') return num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%'
+  if (dt === 'percent') return (num * 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%'
   if (dt === 'quantity') return Math.round(num).toLocaleString('ru-RU')
   return val
 }
