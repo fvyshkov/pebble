@@ -324,6 +324,14 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     setCells(cellMap); setCellRules(ruleMap); setFormulas(formulaMap); setLoading(false)
   }, [sheetId])
 
+  // Light reload: only cell values (no structure rebuild, no scroll reset)
+  const reloadCells = useCallback(async () => {
+    const cellData = await api.getCells(sheetId, currentUserId)
+    const cellMap: Record<string, string> = {}
+    for (const c of cellData) cellMap[c.coord_key] = c.value ?? ''
+    setCells(cellMap)
+  }, [sheetId, currentUserId])
+
   useEffect(() => { load() }, [load])
 
   // Check edit permission for current sheet
@@ -722,7 +730,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       }
     }
     setCells(newCells)
-    if (toSave.length > 0) { await api.saveCells(sheetId, toSave); load() }
+    if (toSave.length > 0) { await api.saveCells(sheetId, toSave); reloadCells() }
     // Expand selection to pasted area
     const endR = Math.min(startR + pasteRows.length - 1, rows.length - 1)
     const endC = Math.min(startC + (Math.max(...pasteRows.map(r => r.length)) || 1) - 1, displayCols.length - 1)
@@ -746,8 +754,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       }
     }
     setCells(newCells)
-    if (toSave.length > 0) { await api.saveCells(sheetId, toSave); load() }
-  }, [editingCell, selRange, visibleRows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId, load])
+    if (toSave.length > 0) { await api.saveCells(sheetId, toSave); reloadCells() }
+  }, [editingCell, selRange, visibleRows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId, reloadCells])
 
   // ─── Context menu + history ───
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; coordKey: string } | null>(null)
@@ -773,7 +781,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const handleCellSave = async (coordKey: string, value: string) => {
     setCells(prev => ({ ...prev, [coordKey]: value }))
     await api.saveCells(sheetId, [{ coord_key: coordKey, value, data_type: dataType, user_id: currentUserId }])
-    load() // reload to show recalculated formula values
+    reloadCells() // reload only values, keep scroll/focus
   }
 
   const handleReorder = (newOrder: string[]) => {
@@ -1060,7 +1068,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                                 const newRule = e.target.value as CellRule
                                 setCellRules(prev => ({ ...prev, [coordKey]: newRule }))
                                 await api.saveCells(sheetId, [{ coord_key: coordKey, rule: newRule }])
-                                load()
+                                reloadCells()
                               }}
                               sx={{ fontSize: 11, px: 0.5, minWidth: 70, '& .MuiSelect-select': { py: 0.25 } }}
                             >
@@ -1172,7 +1180,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         onSave={async text => {
           setFormulas(prev => ({ ...prev, [formulaEditorKey]: text }))
           await api.saveCells(sheetId, [{ coord_key: formulaEditorKey, formula: text, rule: 'formula' }])
-          load()
+          reloadCells()
         }}
         onClose={() => setFormulaEditorOpen(false)}
         modelId={modelId}
