@@ -701,9 +701,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
             const agg = computeSum(row, col.node.record.id)
             vals.push(agg !== null ? String(agg) : '')
           } else if (rule === 'formula') {
-            const fText = formulas[coordKey] || ''
-            const result = fText ? evalFormula(fText, coordKey) : null
-            vals.push(result !== null ? String(result) : '')
+            const serverVal = cells[coordKey] ?? ''
+            vals.push(serverVal !== '' ? serverVal : '')
           } else {
             vals.push(cells[coordKey] ?? '')
           }
@@ -1112,16 +1111,18 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   }
 
                   // Data mode
-                  // Formula cell
+                  // Formula cell — use server-computed value from cells[]
                   if (rule === 'formula') {
                     const fText = formulas[coordKey] || ''
-                    const result = fText ? evalFormula(fText, coordKey) : null
+                    const serverVal = cells[coordKey] ?? ''
+                    const displayVal = serverVal !== '' && serverVal !== '0' ? serverVal : (fText ? evalFormula(fText, coordKey) : null)
+                    const result = displayVal !== null && displayVal !== '' ? (typeof displayVal === 'string' ? parseFloat(displayVal) : displayVal) : null
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
                         textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
                       }} title={fText ? `ƒ ${fText}` : 'Формула не задана'}>
-                        {result !== null ? fmtDisplay(String(result), rowDt) : ''}
+                        {result !== null && !isNaN(result) ? fmtDisplay(String(result), rowDt) : ''}
                       </td>
                     )
                   }
