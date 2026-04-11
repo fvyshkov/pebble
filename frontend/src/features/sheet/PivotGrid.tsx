@@ -15,7 +15,7 @@ import MoreHorizOutlined from '@mui/icons-material/MoreHorizOutlined'
 import * as api from '../../api'
 import type { SheetAnalytic, Analytic, AnalyticRecord } from '../../types'
 import FormulaEditor from './FormulaEditor'
-import { evaluateFormula } from '../../utils/formulaEngine'
+// Formula evaluation is now fully server-side
 
 // ─── Tree helpers ───
 interface RecordNode {
@@ -627,42 +627,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     return m
   }, [analyticsMap])
 
-  // For now: resolve references within current sheet
-  // [SheetName].[AnalyticName].[RecordName] → find cell by replacing one analytic's record in current coordKey
-  const evalFormula = useCallback((formulaText: string, baseCoordKey: string): number | null => {
-    const ctx = {
-      resolveRef: (sheetName: string, analyticName: string, recordName: string): number | null => {
-        // Find analytic by name
-        const aId = analyticNameToId[analyticName]
-        if (!aId) return null
-        // Find record by name
-        const rId = recordNameToId[aId]?.[recordName]
-        if (!rId) return null
-        // Build coord key: replace the matching analytic's record in the base coord
-        const baseParts = baseCoordKey.split('|')
-        const orderIdx = order.indexOf(aId)
-        if (orderIdx === -1) return null
-        // Build a new coord key with this record substituted
-        const newParts = [...baseParts]
-        // The coord key has parts for each analytic in order (minus pinned which are already set)
-        // We need to figure out which position in the coord corresponds to this analytic
-        let partIdx = 0
-        for (let oi = 0; oi < order.length; oi++) {
-          if (order[oi] === aId) {
-            if (partIdx < newParts.length) newParts[partIdx] = rId
-            break
-          }
-          partIdx++
-        }
-        const newKey = newParts.join('|')
-        const val = cells[newKey]
-        if (val === undefined || val === '') return 0
-        const num = parseFloat(val)
-        return isNaN(num) ? 0 : num
-      }
-    }
-    return evaluateFormula(formulaText, ctx)
-  }, [cells, analyticNameToId, recordNameToId, order])
+  // Formula evaluation is fully server-side — no client-side eval needed
 
   // ─── Selection helpers ───
   const selRange = useMemo(() => {
@@ -713,7 +678,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     const text = lines.join('\n')
     const cb = 'clipboardData' in e ? (e as ClipboardEvent).clipboardData : (e as React.ClipboardEvent).clipboardData
     cb?.setData('text/plain', text)
-  }, [editingCell, selRange, visibleRows, displayCols, cells, formulas, isNumeric, computeSum, evalFormula, getAllLeafRecordCombinations, makeLeafCoordKey, makeCoordKey])
+  }, [editingCell, selRange, visibleRows, displayCols, cells, formulas, isNumeric, computeSum, getAllLeafRecordCombinations, makeLeafCoordKey, makeCoordKey])
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent | ClipboardEvent) => {
     if (editingCell) return // let native input handle it
@@ -1117,8 +1082,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   if (rule === 'formula') {
                     const fText = formulas[coordKey] || ''
                     const serverVal = cells[coordKey] ?? ''
-                    const displayVal = serverVal !== '' && serverVal !== '0' ? serverVal : (fText ? evalFormula(fText, coordKey) : null)
-                    const result = displayVal !== null && displayVal !== '' ? (typeof displayVal === 'string' ? parseFloat(displayVal) : displayVal) : null
+                    const num = serverVal !== '' ? parseFloat(serverVal) : null
+                    const result = num !== null && !isNaN(num) ? num : null
                     return (
                       <td key={colRecId} onClick={cellClick} style={{
                         border: focusBorder, padding: '4px 6px',
