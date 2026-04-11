@@ -342,6 +342,7 @@ def write_manual_formulas(db, sheet_name, formulas_dict):
         formula = info["formula"]
         formula_first = info.get("formula_first")
         formula_second = info.get("formula_second")
+        january_reset = info.get("january_reset", False)
         second_period_rid = leaf_periods[1]["id"] if len(leaf_periods) > 1 else None
 
         for lp in leaf_periods:
@@ -350,8 +351,16 @@ def write_manual_formulas(db, sheet_name, formulas_dict):
             is_first = (period_rid == first_period_rid)
             is_second = (period_rid == second_period_rid)
 
+            # Check if this period is January (for YTD reset)
+            is_january = False
+            if january_reset and not is_first:
+                pdata = json.loads(lp["data_json"])
+                is_january = "Январь" in pdata.get("name", "")
+
             if is_first and formula_first is not None:
                 f_text = formula_first
+            elif is_january and formula_first is not None:
+                f_text = formula_first  # Reset YTD in January
             elif is_second and formula_second is not None:
                 f_text = formula_second
             else:
@@ -845,10 +854,11 @@ PL_FORMULAS = {
     "(ИЭ) Переход в МП DCB + платежи из него": {"formula": "[(ИЭ) Переход в МП DCB + платежи из него (комиссия от клиентов)] + [(ИЭ) Переход в МП DCB + платежи из него (персонал)]"},
     "Продажа страховых полисов": {"formula": "[Продажа страховых полисов (комиссия от клиентов)] + [Продажа страховых полисов (комиссия партнерам)] + [Продажа страховых полисов (персонал)]"},
 
-    # ── YTD ──
+    # ── YTD (resets every January — handled specially via "january_reset") ──
     "ТЕКУЩАЯ ПРИБЫЛЬ (YTD)": {
         "formula": '[ТЕКУЩАЯ ПРИБЫЛЬ (YTD)](периоды="предыдущий") + [ЧИСТАЯ ПРИБЫЛЬ]',
         "formula_first": "[ЧИСТАЯ ПРИБЫЛЬ]",
+        "january_reset": True,  # Reset to [ЧИСТАЯ ПРИБЫЛЬ] every January
     },
 }
 
