@@ -28,9 +28,21 @@ class ReorderIn(BaseModel):
 async def list_sheets(model_id: str):
     db = get_db()
     rows = await db.execute_fetchall(
-        "SELECT * FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,)
+        "SELECT * FROM sheets WHERE model_id = ? ORDER BY sort_order, created_at", (model_id,)
     )
     return [dict(r) for r in rows]
+
+
+@router.put("/reorder/{model_id}")
+async def reorder_sheets(model_id: str, body: ReorderIn):
+    db = get_db()
+    for i, sheet_id in enumerate(body.ordered_ids):
+        await db.execute(
+            "UPDATE sheets SET sort_order=? WHERE id=? AND model_id=?",
+            (i, sheet_id, model_id),
+        )
+    await db.commit()
+    return {"ok": True}
 
 
 @router.post("")

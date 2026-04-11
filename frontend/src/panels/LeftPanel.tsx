@@ -32,6 +32,8 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
   const [trees, setTrees] = useState<ModelTree[]>([])
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string[]>([])
+  const [dragSheet, setDragSheet] = useState<{ modelId: string; sheetId: string } | null>(null)
+  const [dragOverSheet, setDragOverSheet] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     if (sheetsOnly && currentUserId) {
@@ -130,6 +132,20 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
 
   const handleExpandChange = (_e: React.SyntheticEvent, ids: string[]) => {
     setExpanded(ids)
+  }
+
+  const handleSheetDrop = async (modelId: string, targetSheetId: string) => {
+    if (!dragSheet || dragSheet.modelId !== modelId || dragSheet.sheetId === targetSheetId) return
+    const tree = trees.find(t => t.model.id === modelId)
+    if (!tree) return
+    const ids = tree.sheets.map(s => s.id)
+    const fromIdx = ids.indexOf(dragSheet.sheetId)
+    const toIdx = ids.indexOf(targetSheetId)
+    if (fromIdx === -1 || toIdx === -1) return
+    ids.splice(fromIdx, 1)
+    ids.splice(toIdx, 0, dragSheet.sheetId)
+    await api.reorderSheets(modelId, ids)
+    load()
   }
 
   const getIcon = (iconName: string) => {
@@ -243,7 +259,19 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                       key={s.id}
                       itemId={`sheet:${s.id}:${model.id}`}
                       label={
-                        <div className="tree-item-label">
+                        <div
+                          className="tree-item-label"
+                          draggable
+                          onDragStart={e => { e.stopPropagation(); setDragSheet({ modelId: model.id, sheetId: s.id }) }}
+                          onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDragOverSheet(s.id) }}
+                          onDragLeave={() => setDragOverSheet(null)}
+                          onDrop={e => { e.preventDefault(); e.stopPropagation(); handleSheetDrop(model.id, s.id); setDragSheet(null); setDragOverSheet(null) }}
+                          onDragEnd={() => { setDragSheet(null); setDragOverSheet(null) }}
+                          style={{
+                            opacity: dragSheet?.sheetId === s.id ? 0.4 : 1,
+                            borderTop: dragOverSheet === s.id && dragSheet?.sheetId !== s.id ? '2px solid #1976d2' : '2px solid transparent',
+                          }}
+                        >
                           <DescriptionOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
                           <span>{s.name || 'Без названия'}</span>
                           <span className="actions">

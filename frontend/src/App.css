@@ -99,12 +99,13 @@
 
 .tree-item-label .actions {
   margin-left: auto;
-  display: none;
+  display: flex;
   gap: 2px;
+  visibility: hidden;
 }
 
 .tree-item-label:hover .actions {
-  display: flex;
+  visibility: visible;
 }
 
 .empty-state {

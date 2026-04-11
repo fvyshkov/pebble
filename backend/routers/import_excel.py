@@ -551,6 +551,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     # ── Step 5: Process each sheet ──
     created_sheets = []
     analytic_sort = 1  # 0 is periods
+    sheet_sort = 0
 
     for sheet_cfg in sheets_config:
         excel_name = sheet_cfg["excel_name"]
@@ -597,9 +598,10 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         # Create Pebble sheet
         pebble_sheet_id = str(uuid.uuid4())
         await db.execute(
-            "INSERT INTO sheets (id, model_id, name) VALUES (?,?,?)",
-            (pebble_sheet_id, model_id, sheet_display),
+            "INSERT INTO sheets (id, model_id, name, sort_order) VALUES (?,?,?,?)",
+            (pebble_sheet_id, model_id, sheet_display, sheet_sort),
         )
+        sheet_sort += 1
 
         # Bind analytics: periods first (columns), then indicators (rows)
         for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
@@ -804,6 +806,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         # Process sheets
         created_sheets = []
         analytic_sort = 1
+        sheet_sort = 0
         total_cells = 0
 
         for sheet_cfg in sheets_config:
@@ -842,8 +845,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             row_to_rid, rid_to_formula = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
-            await db.execute("INSERT INTO sheets (id, model_id, name) VALUES (?,?,?)",
-                             (pebble_sheet_id, model_id, sheet_display))
+            await db.execute("INSERT INTO sheets (id, model_id, name, sort_order) VALUES (?,?,?,?)",
+                             (pebble_sheet_id, model_id, sheet_display, sheet_sort))
+            sheet_sort += 1
 
             for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
                 await db.execute(

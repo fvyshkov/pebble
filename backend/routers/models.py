@@ -59,7 +59,7 @@ async def get_model_tree(model_id: str):
         return {"error": "not found"}
     model = dict(model_rows[0])
     sheets = await db.execute_fetchall(
-        "SELECT * FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,)
+        "SELECT * FROM sheets WHERE model_id = ? ORDER BY sort_order, created_at", (model_id,)
     )
     analytics = await db.execute_fetchall(
         "SELECT * FROM analytics WHERE model_id = ? ORDER BY sort_order", (model_id,)
