@@ -158,6 +158,76 @@ class PermissionIn(BaseModel):
     can_edit: bool = True
 
 
+# ── Analytic record permissions ──
+
+@router.get("/{user_id}/analytic-permissions")
+async def get_analytic_permissions(user_id: str):
+    """Return all analytic record permissions for a user, grouped by model > analytic."""
+    db = get_db()
+    rows = await db.execute_fetchall("""
+        SELECT m.id as model_id, m.name as model_name,
+               a.id as analytic_id, a.name as analytic_name,
+               ar.id as record_id, ar.parent_id,
+               json_extract(ar.data_json, '$.name') as record_name,
+               COALESCE(arp.can_view, 0) as can_view,
+               COALESCE(arp.can_edit, 0) as can_edit
+        FROM analytic_records ar
+        JOIN analytics a ON a.id = ar.analytic_id
+        JOIN models m ON m.id = a.model_id
+        LEFT JOIN analytic_record_permissions arp
+            ON arp.record_id = ar.id AND arp.user_id = ?
+        WHERE ar.parent_id IS NULL
+        ORDER BY m.name, a.sort_order, ar.sort_order
+    """, (user_id,))
+    models: dict = {}
+    for r in rows:
+        mid = r["model_id"]
+        if mid not in models:
+            models[mid] = {"id": mid, "name": r["model_name"], "analytics": {}}
+        aid = r["analytic_id"]
+        if aid not in models[mid]["analytics"]:
+            models[mid]["analytics"][aid] = {"id": aid, "name": r["analytic_name"], "records": []}
+        models[mid]["analytics"][aid]["records"].append({
+            "id": r["record_id"], "name": r["record_name"],
+            "can_view": bool(r["can_view"]), "can_edit": bool(r["can_edit"]),
+        })
+    result = []
+    for m in models.values():
+        m["analytics"] = list(m["analytics"].values())
+        result.append(m)
+    return result
+
+
+class AnalyticPermissionIn(BaseModel):
+    user_id: str
+    analytic_id: str
+    record_id: str
+    can_view: bool = True
+    can_edit: bool = False
+
+
+@router.put("/analytic-permissions")
+async def set_analytic_permission(body: AnalyticPermissionIn):
+    db = get_db()
+    existing = await db.execute_fetchall(
+        "SELECT id FROM analytic_record_permissions WHERE user_id = ? AND record_id = ?",
+        (body.user_id, body.record_id),
+    )
+    if existing:
+        await db.execute(
+            "UPDATE analytic_record_permissions SET can_view=?, can_edit=? WHERE user_id=? AND record_id=?",
+            (int(body.can_view), int(body.can_edit), body.user_id, body.record_id),
+        )
+    else:
+        pid = str(uuid.uuid4())
+        await db.execute(
+            "INSERT INTO analytic_record_permissions (id, user_id, analytic_id, record_id, can_view, can_edit) VALUES (?,?,?,?,?,?)",
+            (pid, body.user_id, body.analytic_id, body.record_id, int(body.can_view), int(body.can_edit)),
+        )
+    await db.commit()
+    return {"ok": True}
+
+
 @router.put("/permissions/by-sheet/{sheet_id}")
 async def set_sheet_permission(sheet_id: str, body: PermissionIn):
     db = get_db()

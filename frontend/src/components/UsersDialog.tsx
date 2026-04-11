@@ -27,6 +27,7 @@ export default function UsersDialog({ open, onClose }: Props) {
   const [users, setUsers] = useState<any[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [perms, setPerms] = useState<PermModel[]>([])
+  const [analyticPerms, setAnalyticPerms] = useState<any[]>([])
   const [username, setUsername] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
   const [createdAt, setCreatedAt] = useState('')
@@ -44,6 +45,7 @@ export default function UsersDialog({ open, onClose }: Props) {
   const loadPerms = useCallback(() => {
     if (!selectedId) return
     api.getAllPermissions(selectedId).then(setPerms)
+    api.getAnalyticPermissions(selectedId).then(setAnalyticPerms)
   }, [selectedId])
 
   useEffect(() => {
@@ -272,6 +274,81 @@ export default function UsersDialog({ open, onClose }: Props) {
               {perms.length === 0 && (
                 <Typography sx={{ py: 2, color: '#999', textAlign: 'center' }}>Нет моделей</Typography>
               )}
+            </Box>
+
+            <Divider sx={{ my: 2 }} />
+
+            {/* Analytic record permissions */}
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>Доступ к аналитикам (подразделения)</Typography>
+
+            <Box sx={{ fontSize: 13 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: '1px solid #e0e0e0', fontWeight: 600, color: '#666' }}>
+                <Box sx={{ flex: 1 }}>Модель / Аналитика / Подразделение</Box>
+                <Box sx={{ width: 80, textAlign: 'center' }}>Просмотр</Box>
+                <Box sx={{ width: 80, textAlign: 'center' }}>Ввод</Box>
+              </Box>
+
+              {analyticPerms.map(model => {
+                const mKey = `ap-${model.id}`
+                const mOpen = expanded.has(mKey)
+                const toggleM = () => setExpanded(prev => {
+                  const next = new Set(prev)
+                  if (next.has(mKey)) next.delete(mKey); else next.add(mKey)
+                  return next
+                })
+                return (
+                  <Box key={mKey}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.5, bgcolor: '#fafafa', cursor: 'pointer', '&:hover': { bgcolor: '#f0f0f0' } }}
+                      onClick={toggleM}>
+                      {mOpen ? <ExpandMoreOutlined sx={{ fontSize: 18, opacity: 0.5 }} /> : <ChevronRightOutlined sx={{ fontSize: 18, opacity: 0.5 }} />}
+                      <Box sx={{ flex: 1, fontWeight: 600 }}>{model.name}</Box>
+                    </Box>
+                    {mOpen && model.analytics.map((analytic: any) => {
+                      const aKey = `ap-a-${analytic.id}`
+                      const aOpen = expanded.has(aKey)
+                      const toggleA = () => setExpanded(prev => {
+                        const next = new Set(prev)
+                        if (next.has(aKey)) next.delete(aKey); else next.add(aKey)
+                        return next
+                      })
+                      return (
+                        <Box key={aKey}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, px: 1, py: 0.25, pl: 4, cursor: 'pointer', '&:hover': { bgcolor: '#f8f8f8' } }}
+                            onClick={toggleA}>
+                            {aOpen ? <ExpandMoreOutlined sx={{ fontSize: 16, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 16, opacity: 0.4 }} />}
+                            <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>{analytic.name}</Box>
+                          </Box>
+                          {aOpen && analytic.records.map((rec: any) => (
+                            <Box key={rec.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, pl: 7, '&:hover': { bgcolor: '#f8f8f8' } }}>
+                              <Box sx={{ flex: 1 }}>{rec.name}</Box>
+                              <Box sx={{ width: 80, textAlign: 'center' }}>
+                                <Checkbox size="small" checked={rec.can_view}
+                                  onChange={e => {
+                                    api.setAnalyticPermission({
+                                      user_id: selectedId!, analytic_id: analytic.id,
+                                      record_id: rec.id, can_view: e.target.checked, can_edit: rec.can_edit,
+                                    }).then(loadPerms)
+                                  }}
+                                />
+                              </Box>
+                              <Box sx={{ width: 80, textAlign: 'center' }}>
+                                <Checkbox size="small" checked={rec.can_edit}
+                                  onChange={e => {
+                                    api.setAnalyticPermission({
+                                      user_id: selectedId!, analytic_id: analytic.id,
+                                      record_id: rec.id, can_view: rec.can_view || e.target.checked, can_edit: e.target.checked,
+                                    }).then(loadPerms)
+                                  }}
+                                />
+                              </Box>
+                            </Box>
+                          ))}
+                        </Box>
+                      )
+                    })}
+                  </Box>
+                )
+              })}
             </Box>
           </Box>
         ) : (

@@ -90,6 +90,12 @@ export const calculateSheet = (sheetId: string) =>
 export const getCellHistory = (sheetId: string, coordKey: string) =>
   fetch(`${BASE}/cells/history/${sheetId}/${encodeURIComponent(coordKey)}`).then(r => json<any[]>(r))
 
+// Analytic record permissions
+export const getAnalyticPermissions = (userId: string) =>
+  fetch(`${BASE}/users/${userId}/analytic-permissions`).then(r => json<any[]>(r))
+export const setAnalyticPermission = (data: { user_id: string; analytic_id: string; record_id: string; can_view: boolean; can_edit: boolean }) =>
+  fetch(`${BASE}/users/analytic-permissions`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => json<any>(r))
+
 // Export
 export const exportModel = (modelId: string) =>
   `${BASE}/excel/models/${modelId}/export`

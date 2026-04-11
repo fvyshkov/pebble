@@ -116,6 +116,17 @@ CREATE TABLE IF NOT EXISTS sheet_view_settings (
     sheet_id    TEXT PRIMARY KEY REFERENCES sheets(id) ON DELETE CASCADE,
     settings    TEXT NOT NULL DEFAULT '{}'
 );
+
+-- ── Analytic Record Permissions ─────────────────────────────
+CREATE TABLE IF NOT EXISTS analytic_record_permissions (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    analytic_id TEXT NOT NULL REFERENCES analytics(id) ON DELETE CASCADE,
+    record_id   TEXT NOT NULL REFERENCES analytic_records(id) ON DELETE CASCADE,
+    can_view    INTEGER DEFAULT 1,
+    can_edit    INTEGER DEFAULT 0,
+    UNIQUE(user_id, analytic_id, record_id)
+);
 """
 
 
