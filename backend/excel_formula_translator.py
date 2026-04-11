@@ -85,6 +85,9 @@ def translate_excel_formula(
     sheet_display_names = sheet_display_names or {}
     sheet_data_starts = sheet_data_starts or {}
 
+    # Step 0: Convert Excel percent literals (0.2% → 0.002)
+    formula = re.sub(r'(\d+(?:\.\d+)?)%', lambda m: str(float(m.group(1)) / 100), formula)
+
     # Step 1: Expand SUM(range) into SUM(cell, cell, ...)
     formula = _expand_sum_ranges(formula, row_to_name, sheet_row_maps)
 
@@ -232,13 +235,16 @@ def _translate_ref(
     period_diff = ref_period_idx - source_period_idx
 
     if period_diff < 0:
+        n_back = abs(period_diff)
         # Reference to a previous period
         if is_first_period and ref_period_idx < 0:
             # Before first data column — no previous period exists
             return "0"
-        if display:
-            return f'[{display}::{name}](периоды="предыдущий")'
-        return f'[{name}](периоды="предыдущий")'
+        ref_name = f"[{display}::{name}]" if display else f"[{name}]"
+        if n_back == 1:
+            return f'{ref_name}(периоды="предыдущий")'
+        else:
+            return f'{ref_name}(период=период.назад({n_back}))'
     else:
         # Same period or future (current period)
         if display:
