@@ -106,66 +106,88 @@ def build_db_record_names(db, sheet_name):
     return records
 
 
+def _strip_suffix(s: str) -> str:
+    """Remove ONE trailing disambiguating suffix: #N, — ..., or (balanced parens)."""
+    import re
+    s = re.sub(r'\s*#\d+\s*$', '', s)
+    s = re.sub(r'\s*—\s*[^—]+$', '', s)
+    # Remove ONE trailing balanced parenthetical group
+    if s.endswith(')'):
+        depth = 0
+        for i in range(len(s) - 1, -1, -1):
+            if s[i] == ')': depth += 1
+            elif s[i] == '(': depth -= 1
+            if depth == 0:
+                candidate = s[:i].rstrip()
+                if candidate:
+                    return candidate
+                break
+    return s
+
+
 def match_excel_rows_to_db(excel_labels, db_records, excel_sheet_name):
     """Match Excel row numbers to DB record names.
 
-    Strategy: match by Excel label → DB name (case-insensitive, strip).
-    DB names may have disambiguating suffixes like "(потребительский кредит)"
-    that don't appear in Excel. We match by checking if the Excel label
-    is a prefix of the DB name, or an exact match.
-
-    For sheets with duplicate names across groups, we use positional order
-    within matched candidates.
+    Hybrid approach:
+    1. POSITIONAL pass: walk both lists in parallel with lookahead
+    2. NAME-BASED fallback: for any remaining unmatched records
     """
     row_to_name = {}
     row_to_rid = {}
 
-    # Build lookup: lowercase_label → list of DB records
-    db_by_label = {}
-    for r in db_records:
-        key = r["name"].lower().strip()
-        db_by_label.setdefault(key, []).append(r)
+    skip_labels = {"ЕИ", "Показатель", "Отв.исп.", "(тыс. сом)", "(тыс сом)", ""}
 
-    # Also index by base name (without parenthetical suffixes and #N markers)
-    db_by_base = {}
-    import re as _re
-
-    def _strip_suffix(s: str) -> str:
-        """Remove trailing disambiguating suffix: #N, — ..., (balanced parens)."""
-        s = _re.sub(r'\s*#\d+\s*$', '', s)
-        s = _re.sub(r'\s*—\s*[^—]+$', '', s)
-        # Remove trailing balanced parenthetical group (handles nested parens)
-        while s.endswith(')'):
-            depth = 0
-            start = -1
-            for i in range(len(s) - 1, -1, -1):
-                if s[i] == ')': depth += 1
-                elif s[i] == '(': depth -= 1
-                if depth == 0:
-                    start = i
-                    break
-            if start <= 0:
-                break  # Can't strip further (no prefix left or unbalanced)
-            s = s[:start].rstrip()
-        return s
-
-    for r in db_records:
-        name = r["name"].strip()
-        base = _strip_suffix(name)
-        base = base.lower().strip()
-        if base != name.lower().strip():
-            db_by_base.setdefault(base, []).append(r)
+    excel_rows = []
+    for row_num in sorted(excel_labels.keys()):
+        label = excel_labels[row_num].strip()
+        if label and label not in skip_labels:
+            excel_rows.append((row_num, label))
 
     used_rids = set()
 
-    # Process Excel rows in order
-    for row_num in sorted(excel_labels.keys()):
-        label = excel_labels[row_num].strip()
-        if not label:
-            continue
-        label_lower = label.lower()
+    # ── Pass 1: Positional matching ──
+    db_idx = 0
+    for row_num, label in excel_rows:
+        if db_idx >= len(db_records):
+            break
 
-        # Try exact match first, then base name match
+        label_lower = label.lower().strip()
+
+        # Try matching current DB record or lookahead up to 5 positions
+        max_look = min(6, len(db_records) - db_idx)
+        for offset in range(max_look):
+            rec = db_records[db_idx + offset]
+            rec_base = _strip_suffix(rec["name"]).lower().strip()
+            rec_exact = rec["name"].lower().strip()
+            if label_lower == rec_exact or label_lower == rec_base:
+                row_to_name[row_num] = rec["name"]
+                row_to_rid[row_num] = rec["id"]
+                used_rids.add(rec["id"])
+                db_idx += offset + 1
+                break
+
+    # ── Pass 2: Name-based fallback for unmatched ──
+    db_by_label = {}
+    db_by_base = {}
+    for r in db_records:
+        if r["id"] in used_rids:
+            continue
+        key = r["name"].lower().strip()
+        db_by_label.setdefault(key, []).append(r)
+        # Index by ALL levels of suffix stripping
+        name = r["name"]
+        while True:
+            stripped = _strip_suffix(name).lower().strip()
+            if stripped != name.lower().strip() and stripped:
+                db_by_base.setdefault(stripped, []).append(r)
+                name = _strip_suffix(name)
+            else:
+                break
+
+    for row_num, label in excel_rows:
+        if row_num in row_to_name:
+            continue
+        label_lower = label.lower().strip()
         picked = None
         for source in [db_by_label.get(label_lower, []), db_by_base.get(label_lower, [])]:
             for c in source:
@@ -174,7 +196,6 @@ def match_excel_rows_to_db(excel_labels, db_records, excel_sheet_name):
                     break
             if picked:
                 break
-
         if picked:
             used_rids.add(picked["id"])
             row_to_name[row_num] = picked["name"]
