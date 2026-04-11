@@ -555,6 +555,8 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     for sheet_cfg in sheets_config:
         excel_name = sheet_cfg["excel_name"]
         display_name = sheet_cfg.get("display_name", excel_name)
+        # Sheet name: "ExcelTab. Title" (e.g. "BS. Баланс BaaS")
+        sheet_display = f"{excel_name}. {display_name}" if display_name != excel_name else excel_name
         indicators = sheet_cfg.get("indicators", [])
         data_start_col = sheet_cfg.get("data_start_col", 4)
 
@@ -596,7 +598,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         pebble_sheet_id = str(uuid.uuid4())
         await db.execute(
             "INSERT INTO sheets (id, model_id, name) VALUES (?,?,?)",
-            (pebble_sheet_id, model_id, display_name),
+            (pebble_sheet_id, model_id, sheet_display),
         )
 
         # Bind analytics: periods first (columns), then indicators (rows)
@@ -670,7 +672,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 except Exception:
                     pass  # Skip duplicates
 
-        created_sheets.append({"name": display_name, "id": pebble_sheet_id, "cells": cell_count})
+        created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
 
     await db.commit()
 
@@ -807,6 +809,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         for sheet_cfg in sheets_config:
             excel_name = sheet_cfg["excel_name"]
             display_name = sheet_cfg.get("display_name", excel_name)
+            sheet_display = f"{excel_name}. {display_name}" if display_name != excel_name else excel_name
             indicators = sheet_cfg.get("indicators", [])
 
             if excel_name not in wb_formulas.sheetnames or not indicators:
@@ -815,7 +818,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             ws_f = wb_formulas[excel_name]
             ws_d = wb_data[excel_name]
 
-            yield event(f"📋 Создаю лист «{display_name}»...")
+            yield event(f"📋 Создаю лист «{sheet_display}»...")
 
             indicator_analytic_id = str(uuid.uuid4())
             await db.execute(
@@ -840,7 +843,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
             pebble_sheet_id = str(uuid.uuid4())
             await db.execute("INSERT INTO sheets (id, model_id, name) VALUES (?,?,?)",
-                             (pebble_sheet_id, model_id, display_name))
+                             (pebble_sheet_id, model_id, sheet_display))
 
             for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
                 await db.execute(
@@ -898,8 +901,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         pass
 
             total_cells += cell_count
-            created_sheets.append({"name": display_name, "id": pebble_sheet_id, "cells": cell_count})
-            yield event(f"   ✓ «{display_name}»: {len(row_to_rid)} показателей, {cell_count} ячеек")
+            created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
+            yield event(f"   ✓ «{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек")
 
         await db.commit()
         yield event(f"✅ Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
