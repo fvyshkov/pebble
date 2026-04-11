@@ -5,6 +5,7 @@ import {
   ToggleButton, ToggleButtonGroup, Typography, Box,
 } from '@mui/material'
 import RefreshOutlined from '@mui/icons-material/RefreshOutlined'
+import MenuOutlined from '@mui/icons-material/MenuOutlined'
 import SaveOutlined from '@mui/icons-material/SaveOutlined'
 import SettingsOutlined from '@mui/icons-material/SettingsOutlined'
 import TableChartOutlined from '@mui/icons-material/TableChartOutlined'
@@ -153,6 +154,7 @@ function AppInner() {
   const [mode, setMode] = useState<AppMode>('settings')
   const [selection, setSelection] = useState<TreeSelection | null>(null)
   const [leftWidth, setLeftWidth] = useState(280)
+  const [leftOpen, setLeftOpen] = useState(true)
   const [refreshKey, setRefreshKey] = useState(0)
   const [showUsers, setShowUsers] = useState(false)
   const [showImport, setShowImport] = useState(false)
@@ -206,6 +208,11 @@ function AppInner() {
     <PendingProvider onFlushed={onRefresh}>
       <div className="app-root">
         <div className="app-toolbar">
+          <Tooltip title={leftOpen ? "Скрыть панель" : "Показать панель"}>
+            <IconButton size="small" onClick={() => setLeftOpen(v => !v)}>
+              <MenuOutlined fontSize="small" />
+            </IconButton>
+          </Tooltip>
           <Tooltip title="Обновить">
             <IconButton size="small" onClick={onRefresh}>
               <RefreshOutlined fontSize="small" />
@@ -268,14 +275,16 @@ function AppInner() {
         </div>
 
         <div className="app-body">
-          <div style={{ width: leftWidth, minWidth: 180, flexShrink: 0 }}>
-            <LeftPanel
-              selection={selection} onSelect={handleSelect}
-              refreshKey={refreshKey} expandAfterCreate={expandAfterCreate} onCreated={onCreated}
-              sheetsOnly={isDataMode} currentUserId={isDataMode ? currentUserId : undefined}
-            />
-          </div>
-          <Splitter onResize={d => setLeftWidth(w => Math.max(180, w + d))} />
+          {leftOpen && <>
+            <div style={{ width: leftWidth, minWidth: 180, flexShrink: 0 }}>
+              <LeftPanel
+                selection={selection} onSelect={handleSelect}
+                refreshKey={refreshKey} expandAfterCreate={expandAfterCreate} onCreated={onCreated}
+                sheetsOnly={isDataMode} currentUserId={isDataMode ? currentUserId : undefined}
+              />
+            </div>
+            <Splitter onResize={d => setLeftWidth(w => Math.max(180, w + d))} />
+          </>}
 
           {/* Center area: settings or pivot grid */}
           {mode === 'settings' ? (
