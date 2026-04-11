@@ -129,13 +129,29 @@ def match_excel_rows_to_db(excel_labels, db_records, excel_sheet_name):
     # Also index by base name (without parenthetical suffixes and #N markers)
     db_by_base = {}
     import re as _re
+
+    def _strip_suffix(s: str) -> str:
+        """Remove trailing disambiguating suffix: #N, — ..., (balanced parens)."""
+        s = _re.sub(r'\s*#\d+\s*$', '', s)
+        s = _re.sub(r'\s*—\s*[^—]+$', '', s)
+        # Remove trailing balanced parenthetical group (handles nested parens)
+        while s.endswith(')'):
+            depth = 0
+            start = -1
+            for i in range(len(s) - 1, -1, -1):
+                if s[i] == ')': depth += 1
+                elif s[i] == '(': depth -= 1
+                if depth == 0:
+                    start = i
+                    break
+            if start <= 0:
+                break  # Can't strip further (no prefix left or unbalanced)
+            s = s[:start].rstrip()
+        return s
+
     for r in db_records:
         name = r["name"].strip()
-        # Remove trailing " #N", " — suffix", and " (suffix)" iteratively
-        base = name
-        base = _re.sub(r'\s*#\d+\s*$', '', base)       # remove #2, #3 etc
-        base = _re.sub(r'\s*—\s*[^—]+$', '', base)     # remove — suffix
-        base = _re.sub(r'\s*\([^)]*\)\s*$', '', base)   # remove last (suffix)
+        base = _strip_suffix(name)
         base = base.lower().strip()
         if base != name.lower().strip():
             db_by_base.setdefault(base, []).append(r)
