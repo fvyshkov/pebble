@@ -335,6 +335,23 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     })
   }, [currentUserId, sheetId])
 
+  // Auto-pin analytics where user has access to only 1 record
+  useEffect(() => {
+    if (!currentUserId) return
+    api.getAllowedRecords(currentUserId, sheetId).then(allowed => {
+      if (!allowed || Object.keys(allowed).length === 0) return
+      setPinned(prev => {
+        const next = { ...prev }
+        for (const [aId, recordIds] of Object.entries(allowed)) {
+          if (recordIds.length === 1) {
+            next[aId] = recordIds[0]
+          }
+        }
+        return next
+      })
+    })
+  }, [currentUserId, sheetId])
+
   // Auto-save view settings on changes
   const saveSettingsTimer = useRef<ReturnType<typeof setTimeout>>()
   useEffect(() => {

@@ -152,6 +152,32 @@ async def get_all_permissions(user_id: str):
     return list(models.values())
 
 
+@router.get("/{user_id}/allowed-records/{sheet_id}")
+async def get_allowed_records(user_id: str, sheet_id: str):
+    """Return analytic_id → list of allowed record_ids for this user on this sheet.
+    Only includes analytics that have explicit permissions set.
+    If an analytic has no permissions → user sees all (no restriction).
+    """
+    db = get_db()
+    # Get analytics bound to this sheet
+    bindings = await db.execute_fetchall(
+        "SELECT sa.analytic_id FROM sheet_analytics sa WHERE sa.sheet_id = ? ORDER BY sa.sort_order",
+        (sheet_id,),
+    )
+    result = {}
+    for b in bindings:
+        aid = b["analytic_id"]
+        perms = await db.execute_fetchall(
+            "SELECT record_id, can_view FROM analytic_record_permissions WHERE user_id = ? AND analytic_id = ? AND can_view = 1",
+            (user_id, aid),
+        )
+        if perms:
+            # User has explicit permissions → restrict to these records
+            result[aid] = [p["record_id"] for p in perms]
+        # If no permissions set → no restriction (user sees all)
+    return result
+
+
 class PermissionIn(BaseModel):
     user_id: str
     can_view: bool = True
