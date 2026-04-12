@@ -272,6 +272,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [selAnchor, setSelAnchor] = useState<[number, number] | null>(null) // selection anchor for shift+arrows
   const [editingCell, setEditingCell] = useState(false)
   const gridRef = useRef<HTMLTableElement>(null)
+  const [colWidths, setColWidths] = useState<Record<number, number>>({})
+  const resizingCol = useRef<{ idx: number; startX: number; startW: number } | null>(null)
   const gridBoxRef = useRef<HTMLDivElement>(null)
   // Auto-focus grid on mount
   useEffect(() => { if (!loading) gridBoxRef.current?.focus() }, [loading])
@@ -359,6 +361,55 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       })
     })
   }, [currentUserId, sheetId])
+
+  // Auto-scroll to keep focused cell visible
+  useEffect(() => {
+    const box = gridBoxRef.current
+    const table = gridRef.current
+    if (!box || !table) return
+    const [fr, fc] = focusCell
+    // Find the cell element: row fr+headerRowCount, col fc+1 (first col is row label)
+    const headerRowCount = table.tHead?.rows.length || 1
+    const row = table.rows[fr + headerRowCount]
+    if (!row) return
+    const cell = row.cells[fc + 1] as HTMLTableCellElement | undefined
+    if (!cell) return
+    // Get sticky column width (first col)
+    const stickyWidth = row.cells[0]?.getBoundingClientRect().width || 200
+    const cellRect = cell.getBoundingClientRect()
+    const boxRect = box.getBoundingClientRect()
+    // Horizontal scroll: don't let cell hide under sticky column
+    if (cellRect.left < boxRect.left + stickyWidth) {
+      box.scrollLeft -= (boxRect.left + stickyWidth - cellRect.left + 4)
+    } else if (cellRect.right > boxRect.right) {
+      box.scrollLeft += (cellRect.right - boxRect.right + 4)
+    }
+    // Vertical scroll
+    const headerHeight = (table.tHead?.getBoundingClientRect().height || 30)
+    if (cellRect.top < boxRect.top + headerHeight) {
+      box.scrollTop -= (boxRect.top + headerHeight - cellRect.top + 4)
+    } else if (cellRect.bottom > boxRect.bottom) {
+      box.scrollTop += (cellRect.bottom - boxRect.bottom + 4)
+    }
+  }, [focusCell])
+
+  // Column resize handlers
+  const handleColResizeStart = (ci: number, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const th = (e.target as HTMLElement).closest('th')
+    const startW = th?.getBoundingClientRect().width || 90
+    resizingCol.current = { idx: ci, startX: e.clientX, startW }
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingCol.current) return
+      const diff = ev.clientX - resizingCol.current.startX
+      const newW = Math.max(50, resizingCol.current.startW + diff)
+      setColWidths(prev => ({ ...prev, [resizingCol.current!.idx]: newW }))
+    }
+    const onUp = () => { resizingCol.current = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
 
   // Auto-save view settings on changes
   const saveSettingsTimer = useRef<ReturnType<typeof setTimeout>>()
@@ -935,7 +986,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
               <tr>
                 <th style={{
                   border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                  minWidth: 200, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2,
+                  minWidth: 200, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, borderRight: '2px solid #bdbdbd',
                 }}>
                   {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
                 </th>
@@ -943,10 +994,16 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   <th key={`${dc.node.record.id}-${dc.isSum ? 's' : 'l'}`} style={{
                     border: '1px solid #e0e0e0', padding: '4px 8px',
                     background: dc.isSum ? '#f5f5f5' : '#f5f5f5',
-                    textAlign: 'center', whiteSpace: 'nowrap', minWidth: 90,
+                    textAlign: 'center', whiteSpace: 'nowrap',
+                    width: colWidths[ci] || 90, minWidth: 50,
                     fontWeight: dc.isSum ? 700 : 400,
+                    position: 'relative',
                   }}>
                     {dc.isSum ? `Σ ${dc.node.data.name || ''}` : (dc.node.data.name || '')}
+                    <span
+                      style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 4, cursor: 'col-resize' }}
+                      onMouseDown={e => handleColResizeStart(ci, e)}
+                    />
                   </th>
                 ))}
               </tr>
@@ -957,7 +1014,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     <th rowSpan={headerRows.length} style={{
                       border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
                       minWidth: 200, textAlign: 'left', verticalAlign: 'bottom',
-                      position: 'sticky', left: 0, zIndex: 2,
+                      position: 'sticky', left: 0, zIndex: 2, borderRight: '2px solid #bdbdbd',
                     }}>
                       {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
                     </th>
@@ -988,7 +1045,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     border: '1px solid #e0e0e0', padding: '2px 8px', paddingLeft: 8 + row.indent * 16,
                     whiteSpace: 'nowrap', fontWeight: row.isGroup ? 600 : 400,
                     background: row.isGroup ? '#fafafa' : '#fff',
-                    position: 'sticky', left: 0, zIndex: 1,
+                    position: 'sticky', left: 0, zIndex: 1, borderRight: '2px solid #bdbdbd',
                     cursor: row.dragInfo ? 'grab' : 'default',
                   }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
