@@ -23,6 +23,7 @@ interface Props {
 interface PermModel {
   id: string; name: string
   sheets: { id: string; name: string; can_view: boolean; can_edit: boolean }[]
+  analytics?: { id: string; name: string; records: any[] }[]
 }
 
 export default function UsersDialog({ open, onClose }: Props) {
@@ -114,27 +115,45 @@ export default function UsersDialog({ open, onClose }: Props) {
 
   const handleModelPerm = async (modelId: string, field: 'can_view' | 'can_edit', value: boolean) => {
     if (!selectedId) return
-    const model = perms.find(m => m.id === modelId)
+    const model = perms.find((m: any) => m.id === modelId)
     if (!model) return
+    // Sheets
     for (const s of model.sheets) {
       const canView = field === 'can_view' ? value : s.can_view
       const canEdit = field === 'can_edit' ? value : s.can_edit
       await api.setSheetPermission(s.id, { user_id: selectedId, can_view: canView, can_edit: canEdit })
     }
+    // Analytics — all records in all analytics
+    const flat = (recs: any[]): any[] => recs.flatMap((r: any) => [r, ...flat(r.children || [])])
+    if (model.analytics) {
+      for (const a of model.analytics) {
+        for (const r of flat(a.records)) {
+          await api.setAnalyticPermission({
+            user_id: selectedId, analytic_id: a.id, record_id: r.id,
+            can_view: field === 'can_view' ? value : r.can_view || value,
+            can_edit: field === 'can_edit' ? value : r.can_edit,
+          })
+        }
+      }
+    }
     loadPerms()
   }
 
   const modelChecked = (modelId: string, field: 'can_view' | 'can_edit') => {
-    const model = perms.find(m => m.id === modelId)
-    if (!model || model.sheets.length === 0) return false
-    return model.sheets.every(s => s[field])
+    const model = perms.find((m: any) => m.id === modelId)
+    if (!model) return false
+    const flat = (recs: any[]): any[] => recs.flatMap((r: any) => [r, ...flat(r.children || [])])
+    const allItems = [...model.sheets, ...(model.analytics || []).flatMap((a: any) => flat(a.records))]
+    return allItems.length > 0 && allItems.every((s: any) => s[field])
   }
 
   const modelIndeterminate = (modelId: string, field: 'can_view' | 'can_edit') => {
-    const model = perms.find(m => m.id === modelId)
-    if (!model || model.sheets.length === 0) return false
-    const on = model.sheets.filter(s => s[field]).length
-    return on > 0 && on < model.sheets.length
+    const model = perms.find((m: any) => m.id === modelId)
+    if (!model) return false
+    const flat = (recs: any[]): any[] => recs.flatMap((r: any) => [r, ...flat(r.children || [])])
+    const allItems = [...model.sheets, ...(model.analytics || []).flatMap((a: any) => flat(a.records))]
+    const on = allItems.filter((s: any) => s[field]).length
+    return on > 0 && on < allItems.length
   }
 
   return (
