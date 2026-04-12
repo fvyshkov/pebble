@@ -273,7 +273,7 @@ class AnalyticPermissionIn(BaseModel):
     can_edit: bool = False
 
 
-@router.put("/analytic-permissions")
+@router.put("/analytic-permissions/set")
 async def set_analytic_permission(body: AnalyticPermissionIn):
     db = get_db()
     existing = await db.execute_fetchall(

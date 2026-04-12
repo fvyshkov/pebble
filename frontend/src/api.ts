@@ -96,7 +96,7 @@ export const getAnalyticPermissions = (userId: string) =>
 export const getAllowedRecords = (userId: string, sheetId: string) =>
   fetch(`${BASE}/users/${userId}/allowed-records/${sheetId}`).then(r => json<Record<string, string[]>>(r))
 export const setAnalyticPermission = (data: { user_id: string; analytic_id: string; record_id: string; can_view: boolean; can_edit: boolean }) =>
-  fetch(`${BASE}/users/analytic-permissions`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => json<any>(r))
+  fetch(`${BASE}/users/analytic-permissions/set`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => json<any>(r))
 
 // Export
 export const exportModel = (modelId: string) =>

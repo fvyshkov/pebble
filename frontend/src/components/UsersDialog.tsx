@@ -306,6 +306,18 @@ export default function UsersDialog({ open, onClose }: Props) {
                             {sfOpen ? <ExpandMoreOutlined sx={{ fontSize: 16, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 16, opacity: 0.4 }} />}
                             <FolderOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
                             <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>Листы</Box>
+                            <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                              <Checkbox size="small"
+                                checked={model.sheets.every((s: any) => s.can_view)}
+                                indeterminate={model.sheets.some((s: any) => s.can_view) && !model.sheets.every((s: any) => s.can_view)}
+                                onChange={e => { model.sheets.forEach((s: any) => handleSheetPerm(s.id, 'can_view', e.target.checked)) }} />
+                            </Box>
+                            <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                              <Checkbox size="small"
+                                checked={model.sheets.every((s: any) => s.can_edit)}
+                                indeterminate={model.sheets.some((s: any) => s.can_edit) && !model.sheets.every((s: any) => s.can_edit)}
+                                onChange={e => { model.sheets.forEach((s: any) => handleSheetPerm(s.id, 'can_edit', e.target.checked)) }} />
+                            </Box>
                           </Box>
                           {sfOpen && model.sheets.map((sheet: any) => (
                             <Box key={sheet.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, pl: 7, '&:hover': { bgcolor: '#f8f8f8' } }}>
@@ -336,6 +348,14 @@ export default function UsersDialog({ open, onClose }: Props) {
                             {afOpen ? <ExpandMoreOutlined sx={{ fontSize: 16, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 16, opacity: 0.4 }} />}
                             <FolderOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
                             <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>Аналитики</Box>
+                            <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                              <Checkbox size="small"
+                                onChange={e => { model.analytics.forEach((a: any) => setRecordTreePerm(a.id, a.records, 'can_view', e.target.checked)) }} />
+                            </Box>
+                            <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                              <Checkbox size="small"
+                                onChange={e => { model.analytics.forEach((a: any) => setRecordTreePerm(a.id, a.records, 'can_edit', e.target.checked)) }} />
+                            </Box>
                           </Box>
                           {afOpen && model.analytics.map((analytic: any) => {
                             const aKey = `a-${analytic.id}`
@@ -347,6 +367,14 @@ export default function UsersDialog({ open, onClose }: Props) {
                                   {aOpen ? <ExpandMoreOutlined sx={{ fontSize: 14, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 14, opacity: 0.4 }} />}
                                   <CategoryOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
                                   <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>{analytic.name}</Box>
+                                  <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                                    <Checkbox size="small"
+                                      onChange={e => setRecordTreePerm(analytic.id, analytic.records, 'can_view', e.target.checked)} />
+                                  </Box>
+                                  <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                                    <Checkbox size="small"
+                                      onChange={e => setRecordTreePerm(analytic.id, analytic.records, 'can_edit', e.target.checked)} />
+                                  </Box>
                                 </Box>
                                 {aOpen && renderRecords(analytic.id, analytic.records, 10)}
                               </Box>
