@@ -263,19 +263,20 @@ def _parse_claude_json(response_text: str) -> dict:
 
 async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) -> dict:
     """Analyze one sheet with Claude API. Returns sheet config dict."""
-    import time
+    import time, asyncio
+    loop = asyncio.get_event_loop()
     for attempt in range(retries):
         try:
-            message = client.messages.create(
+            message = await loop.run_in_executor(None, lambda: client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=16384,
                 system=PEBBLE_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": SHEET_ANALYSIS_PROMPT + sheet_text}],
-            )
+            ))
             return _parse_claude_json(message.content[0].text)
         except Exception as e:
             if attempt < retries - 1 and ("overloaded" in str(e).lower() or "529" in str(e)):
-                time.sleep(2 ** attempt)
+                await asyncio.sleep(2 ** attempt)
                 continue
             raise
 

@@ -52,6 +52,8 @@ function ImportDialog({ open, onClose, onImported }: {
   const [loading, setLoading] = useState(false)
   const [log, setLog] = useState<string[]>([])
   const [done, setDone] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
+  const elapsedRef = useRef<ReturnType<typeof setInterval>>()
   const fileRef = useRef<HTMLInputElement>(null)
   const logRef = useRef<HTMLDivElement>(null)
 
@@ -68,6 +70,8 @@ function ImportDialog({ open, onClose, onImported }: {
     setLoading(true)
     setLog([])
     setDone(false)
+    setElapsed(0)
+    elapsedRef.current = setInterval(() => setElapsed(t => t + 1), 1000)
     try {
       const result = await api.importExcelModelStream(file, modelName, (msg, data) => {
         setLog(prev => [...prev, msg])
@@ -81,6 +85,7 @@ function ImportDialog({ open, onClose, onImported }: {
       setLog(prev => [...prev, `❌ Ошибка: ${(err as Error).message}`])
     } finally {
       setLoading(false)
+      clearInterval(elapsedRef.current)
     }
   }
 
@@ -125,7 +130,7 @@ function ImportDialog({ open, onClose, onImported }: {
             ))}
             {loading && !done && (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, color: '#1976d2' }}>
-                <CircularProgress size={12} /> <span>работаю...</span>
+                <CircularProgress size={12} /> <span>работаю... {elapsed > 0 ? `${Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}` : ''}</span>
               </Box>
             )}
           </Box>
