@@ -46,6 +46,21 @@ async def update_model(model_id: str, body: ModelIn):
 @router.delete("/{model_id}")
 async def delete_model(model_id: str):
     db = get_db()
+    # Cascade delete: cells → sheets, records → analytics, then model
+    sheets = await db.execute_fetchall("SELECT id FROM sheets WHERE model_id = ?", (model_id,))
+    for s in sheets:
+        await db.execute("DELETE FROM cell_data WHERE sheet_id = ?", (s["id"],))
+        await db.execute("DELETE FROM cell_history WHERE sheet_id = ?", (s["id"],))
+        await db.execute("DELETE FROM sheet_analytics WHERE sheet_id = ?", (s["id"],))
+        await db.execute("DELETE FROM sheet_permissions WHERE sheet_id = ?", (s["id"],))
+        await db.execute("DELETE FROM sheet_view_settings WHERE sheet_id = ?", (s["id"],))
+    await db.execute("DELETE FROM sheets WHERE model_id = ?", (model_id,))
+    analytics = await db.execute_fetchall("SELECT id FROM analytics WHERE model_id = ?", (model_id,))
+    for a in analytics:
+        await db.execute("DELETE FROM analytic_record_permissions WHERE analytic_id = ?", (a["id"],))
+        await db.execute("DELETE FROM analytic_records WHERE analytic_id = ?", (a["id"],))
+        await db.execute("DELETE FROM analytic_fields WHERE analytic_id = ?", (a["id"],))
+    await db.execute("DELETE FROM analytics WHERE model_id = ?", (model_id,))
     await db.execute("DELETE FROM models WHERE id = ?", (model_id,))
     await db.commit()
     return {"ok": True}
