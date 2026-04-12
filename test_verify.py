@@ -67,11 +67,19 @@ for s in sheets:
     
     db_cells = {c['coord_key']: c['value'] for c in db.execute("SELECT coord_key, value FROM cell_data WHERE sheet_id=?", (s['id'],)).fetchall()}
     
-    # Get records with excel_row
+    # Get records with excel_row (prefer records that have cells when duplicate rows exist)
     ind_aids = [r['analytic_id'] for r in db.execute("SELECT sa.analytic_id FROM sheet_analytics sa JOIN analytics a ON a.id=sa.analytic_id WHERE sa.sheet_id=? AND a.is_periods=0", (s['id'],)).fetchall()]
-    recs = []
+    recs_raw = []
     for ia in ind_aids:
-        recs.extend(db.execute("SELECT id, excel_row, data_json FROM analytic_records WHERE analytic_id=?", (ia,)).fetchall())
+        recs_raw.extend(db.execute("SELECT id, excel_row, data_json FROM analytic_records WHERE analytic_id=?", (ia,)).fetchall())
+    seen = {}
+    for rec in recs_raw:
+        erow = rec['excel_row']
+        if not erow: continue
+        has_cells = db.execute("SELECT COUNT(*) as c FROM cell_data WHERE sheet_id=? AND coord_key LIKE ?", (s['id'], f'%|{rec["id"]}')).fetchone()['c']
+        if erow not in seen or has_cells > seen[erow][1]:
+            seen[erow] = (rec, has_cells)
+    recs = [v[0] for v in seen.values()]
     
     sheet_total = 0; sheet_match = 0; sheet_mismatch = 0
     
