@@ -135,6 +135,8 @@ MIGRATIONS = [
     "ALTER TABLE cell_data ADD COLUMN rule TEXT NOT NULL DEFAULT 'manual'",
     "ALTER TABLE cell_data ADD COLUMN formula TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE users ADD COLUMN can_admin INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE sheets ADD COLUMN excel_code TEXT DEFAULT ''",
+    "ALTER TABLE sheets ADD COLUMN sort_order INTEGER DEFAULT 0",
 ]
 
 

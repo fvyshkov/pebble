@@ -273,6 +273,11 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                           }}
                         >
                           <DescriptionOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
+                          {(s as any).excel_code && (
+                            <span style={{ fontSize: 10, background: '#e3f2fd', color: '#1565c0', padding: '1px 4px', borderRadius: 3, fontWeight: 600, flexShrink: 0 }}>
+                              {(s as any).excel_code}
+                            </span>
+                          )}
                           <span>{s.name || 'Без названия'}</span>
                           <span className="actions">
                             <IconButton size="small" onClick={e => handleDeleteSheet(e, s.id)}>

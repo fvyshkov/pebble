@@ -264,9 +264,36 @@ def _parse_claude_json(response_text: str) -> dict:
     return json.loads(text)
 
 
+_LLM_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".llm_cache")
+
+def _llm_cache_get(key: str):
+    import hashlib
+    h = hashlib.sha256(key.encode()).hexdigest()[:16]
+    path = os.path.join(_LLM_CACHE_DIR, f"{h}.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return None
+
+def _llm_cache_set(key: str, value):
+    import hashlib
+    os.makedirs(_LLM_CACHE_DIR, exist_ok=True)
+    h = hashlib.sha256(key.encode()).hexdigest()[:16]
+    path = os.path.join(_LLM_CACHE_DIR, f"{h}.json")
+    with open(path, "w") as f:
+        json.dump(value, f, ensure_ascii=False)
+
+
 async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) -> dict:
-    """Analyze one sheet with Claude API. Returns sheet config dict."""
+    """Analyze one sheet with Claude API. Returns sheet config dict (cached)."""
     import time, asyncio
+
+    # Check cache first
+    cached = _llm_cache_get(sheet_text)
+    if cached:
+        log.info("Cache hit for sheet analysis")
+        return cached
+
     loop = asyncio.get_event_loop()
     for attempt in range(retries):
         try:
@@ -279,8 +306,9 @@ async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) 
                     {"role": "assistant", "content": "{"},  # prefill to force JSON
                 ],
             ))
-            # Prepend the prefilled "{" back
-            return _parse_claude_json("{" + message.content[0].text)
+            result = _parse_claude_json("{" + message.content[0].text)
+            _llm_cache_set(sheet_text, result)  # cache for next time
+            return result
         except Exception as e:
             if attempt < retries - 1 and ("overloaded" in str(e).lower() or "529" in str(e)):
                 await asyncio.sleep(2 ** attempt)
@@ -606,8 +634,8 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         # Create Pebble sheet
         pebble_sheet_id = str(uuid.uuid4())
         await db.execute(
-            "INSERT INTO sheets (id, model_id, name, sort_order) VALUES (?,?,?,?)",
-            (pebble_sheet_id, model_id, sheet_display, sheet_sort),
+            "INSERT INTO sheets (id, model_id, name, sort_order, excel_code) VALUES (?,?,?,?,?)",
+            (pebble_sheet_id, model_id, sheet_display, sheet_sort, excel_name),
         )
         sheet_sort += 1
 
@@ -891,8 +919,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             row_to_rid, rid_to_formula = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
-            await db.execute("INSERT INTO sheets (id, model_id, name, sort_order) VALUES (?,?,?,?)",
-                             (pebble_sheet_id, model_id, sheet_display, sheet_sort))
+            await db.execute("INSERT INTO sheets (id, model_id, name, sort_order, excel_code) VALUES (?,?,?,?,?)",
+                             (pebble_sheet_id, model_id, sheet_display, sheet_sort, excel_name))
             sheet_sort += 1
 
             for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
