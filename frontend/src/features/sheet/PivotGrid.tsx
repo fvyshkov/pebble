@@ -273,7 +273,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [editingCell, setEditingCell] = useState(false)
   const gridRef = useRef<HTMLTableElement>(null)
   const [colWidths, setColWidths] = useState<Record<number, number>>({})
-  const [firstColWidth, setFirstColWidth] = useState(350)
+  const [firstColWidth, setFirstColWidth] = useState(500)
   const resizingCol = useRef<{ idx: number; startX: number; startW: number } | null>(null)
   const gridBoxRef = useRef<HTMLDivElement>(null)
   // Auto-focus grid on mount
@@ -310,9 +310,11 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         setOrder(defaultOrder)
       }
       if (vs.colLevelToggles) setColLevelToggles(vs.colLevelToggles)
+      else setColLevelToggles({ 0: true, 1: true, 2: true, 3: true }) // all levels on by default
       if (vs.pinned) setPinned(vs.pinned)
     } catch {
       setOrder(defaultOrder)
+      setColLevelToggles({ 0: true, 1: true, 2: true, 3: true })
     }
 
     const cellData = await api.getCells(sheetId, currentUserId)
@@ -992,24 +994,24 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
               <tr>
                 <th style={{
                   border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                  width: firstColWidth, minWidth: 80, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e', overflow: 'hidden',
+                  width: firstColWidth, minWidth: 80, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e',
                 }}>
                   {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
-                  <span style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 5, cursor: 'col-resize' }}
+                  <div style={{ position: 'absolute', right: -2, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
                     onMouseDown={e => handleColResizeStart(-1, e)} />
                 </th>
                 {displayCols.map((dc, ci) => (
                   <th key={`${dc.node.record.id}-${dc.isSum ? 's' : 'l'}`} style={{
                     border: '1px solid #e0e0e0', padding: '4px 8px',
-                    background: dc.isSum ? '#f5f5f5' : '#f5f5f5',
+                    background: '#f5f5f5',
                     textAlign: 'center', whiteSpace: 'nowrap',
-                    width: colWidths[ci] || 90, minWidth: 50,
+                    width: colWidths[ci] || 110, minWidth: 50,
                     fontWeight: dc.isSum ? 700 : 400,
                     position: 'relative',
                   }}>
                     {dc.isSum ? `Σ ${dc.node.data.name || ''}` : (dc.node.data.name || '')}
-                    <span
-                      style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 4, cursor: 'col-resize' }}
+                    <div
+                      style={{ position: 'absolute', right: -2, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
                       onMouseDown={e => handleColResizeStart(ci, e)}
                     />
                   </th>
@@ -1022,16 +1024,22 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     <th rowSpan={headerRows.length} style={{
                       border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
                       width: firstColWidth, minWidth: 80, textAlign: 'left', verticalAlign: 'bottom',
-                      position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e', overflow: 'hidden',
+                      position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e',
                     }}>
                       {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
+                      <div style={{ position: 'absolute', right: -2, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
+                        onMouseDown={e => handleColResizeStart(-1, e)} />
                     </th>
                   )}
                   {row.map(({ node, colspan, rowspan }) => (
                     <th key={node.record.id} colSpan={colspan} rowSpan={rowspan} style={{
                       border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                      textAlign: 'center', whiteSpace: 'nowrap', minWidth: 90,
-                    }}>{node.data.name || ''}</th>
+                      textAlign: 'center', whiteSpace: 'nowrap', minWidth: 90, position: 'relative',
+                    }}>
+                      {node.data.name || ''}
+                      {rowspan === 1 && <div style={{ position: 'absolute', right: -2, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
+                        onMouseDown={e => { /* multi-row header resize - find leaf column index */ }} />}
+                    </th>
                   ))}
                 </tr>
               ))
