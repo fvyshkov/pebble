@@ -841,6 +841,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         month_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
         yield event(f"Создана иерархия периодов: {period_start} — {period_end} ({len(month_record_ids)} месяцев)")
 
+        # Count total indicators across all sheets for progress
+        def _count_indicators(items):
+            return sum(1 + _count_indicators(it.get("children", [])) for it in items)
+        total_indicators = sum(_count_indicators(sc.get("indicators", [])) for sc in sheets_config)
+        done_indicators = 0
+        yield event(f"📊 Всего {total_indicators} показателей в {len(sheets_config)} листах")
+
         # Process sheets
         created_sheets = []
         analytic_sort = 1
@@ -859,7 +866,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             ws_f = wb_formulas[excel_name]
             ws_d = wb_data[excel_name]
 
-            yield event(f"📋 Создаю лист «{sheet_display}»...")
+            sheet_indicators = _count_indicators(indicators)
+            yield event(f"📋 Создаю лист «{sheet_display}» ({done_indicators}/{total_indicators})...")
 
             indicator_analytic_id = str(uuid.uuid4())
             await db.execute(
@@ -943,8 +951,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         pass
 
             total_cells += cell_count
+            done_indicators += sheet_indicators
             created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
-            yield event(f"   ✓ «{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек")
+            yield event(f"   ✓ «{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек ({done_indicators}/{total_indicators})")
 
         await db.commit()
 
