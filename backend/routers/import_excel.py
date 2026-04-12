@@ -557,7 +557,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         excel_name = sheet_cfg["excel_name"]
         display_name = sheet_cfg.get("display_name", excel_name)
         # Sheet name: "ExcelTab. Title" (e.g. "BS. Баланс BaaS")
-        sheet_display = f"{excel_name}. {display_name}" if display_name != excel_name else excel_name
+        sheet_display = display_name if display_name != excel_name else excel_name
         indicators = sheet_cfg.get("indicators", [])
         data_start_col = sheet_cfg.get("data_start_col", 4)
 
@@ -752,15 +752,40 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
             for i, sn in enumerate(sheet_names):
                 yield event(f"🔍 Анализ листа «{sn}» ({i+1}/{len(sheet_names)})...")
-                try:
-                    sheet_cfg = await _analyze_sheet_with_claude(client, sheet_texts[sn])
-                    sheet_cfg["excel_name"] = sn
+                sheet_cfg = None
+                # Try Claude (with 1 retry)
+                for attempt in range(2):
+                    try:
+                        cfg = await _analyze_sheet_with_claude(client, sheet_texts[sn])
+                        cfg["excel_name"] = sn
+                        ind_count = len(cfg.get("indicators", []))
+                        if ind_count > 0:
+                            sheet_cfg = cfg
+                            break
+                        elif attempt == 0:
+                            yield event(f"   ⚠ «{sn}»: Claude вернул 0 показателей, повтор...")
+                    except Exception as e:
+                        if attempt == 0:
+                            yield event(f"   ⚠ «{sn}»: ошибка ({e}), повтор...")
+                        else:
+                            yield event(f"   ⚠ «{sn}»: ошибка анализа — {e}")
+
+                # Fallback to heuristic if Claude failed
+                if not sheet_cfg or len(sheet_cfg.get("indicators", [])) == 0:
+                    yield event(f"   ↻ «{sn}»: используем эвристики...")
+                    fb = _fallback_heuristic_analysis(wb_formulas)
+                    for fb_sheet in fb.get("sheets", []):
+                        if fb_sheet["excel_name"] == sn:
+                            sheet_cfg = fb_sheet
+                            break
+
+                if sheet_cfg and len(sheet_cfg.get("indicators", [])) > 0:
                     ind_count = len(sheet_cfg.get("indicators", []))
                     ch_count = sum(len(x.get("children", [])) for x in sheet_cfg.get("indicators", []))
                     yield event(f"   ✓ «{sn}»: {ind_count} групп, {ch_count} показателей")
                     sheets_config.append(sheet_cfg)
-                except Exception as e:
-                    yield event(f"   ⚠ «{sn}»: ошибка анализа — {e}")
+                else:
+                    yield event(f"   ✗ «{sn}»: не удалось разобрать лист")
 
             analysis = {"period_config": period_config, "sheets": sheets_config}
         except Exception as e:
@@ -815,7 +840,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         for sheet_cfg in sheets_config:
             excel_name = sheet_cfg["excel_name"]
             display_name = sheet_cfg.get("display_name", excel_name)
-            sheet_display = f"{excel_name}. {display_name}" if display_name != excel_name else excel_name
+            sheet_display = display_name if display_name != excel_name else excel_name
             indicators = sheet_cfg.get("indicators", [])
 
             if excel_name not in wb_formulas.sheetnames or not indicators:
@@ -912,6 +937,34 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             yield event(f"   ✓ «{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек")
 
         await db.commit()
+
+        # ── Post-import validation ──
+        expected_sheets = len(sheet_names)
+        actual_sheets = len(created_sheets)
+        if actual_sheets < expected_sheets:
+            missing = set(sheet_names) - {sc["excel_name"] for sc in sheets_config}
+            yield event(f"⚠ Импортировано {actual_sheets}/{expected_sheets} листов. Пропущены: {', '.join(missing)}")
+
+        # Validate cell counts against Excel
+        for cs in created_sheets:
+            excel_name = None
+            for sc in sheets_config:
+                if sc.get("display_name", sc["excel_name"]) == cs["name"].split(". ", 1)[-1] or sc["excel_name"] in cs["name"]:
+                    excel_name = sc["excel_name"]
+                    break
+            if excel_name and excel_name in wb_data.sheetnames:
+                ws_check = wb_data[excel_name]
+                dsc = next((sc.get("data_start_col", 4) for sc in sheets_config if sc["excel_name"] == excel_name), 4)
+                # Count non-empty data cells in Excel
+                excel_cells = 0
+                for r in range(1, min(ws_check.max_row or 1, 500) + 1):
+                    for c in range(dsc, min((ws_check.max_column or 1) + 1, 50)):
+                        if ws_check.cell(r, c).value is not None:
+                            excel_cells += 1
+                ratio = cs["cells"] / excel_cells * 100 if excel_cells > 0 else 0
+                if ratio < 80:
+                    yield event(f"⚠ «{cs['name']}»: импортировано {cs['cells']}/{excel_cells} ячеек ({ratio:.0f}%)")
+
         yield event(f"✅ Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
                      {"done": True, "model_id": model_id, "model_name": model_name_final})
 

@@ -986,7 +986,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
               <tr>
                 <th style={{
                   border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                  minWidth: 200, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, borderRight: '2px solid #bdbdbd',
+                  width: 180, minWidth: 100, maxWidth: 300, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, borderRight: '3px solid #9e9e9e',
                 }}>
                   {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
                 </th>
@@ -1013,8 +1013,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   {ri === 0 && (
                     <th rowSpan={headerRows.length} style={{
                       border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                      minWidth: 200, textAlign: 'left', verticalAlign: 'bottom',
-                      position: 'sticky', left: 0, zIndex: 2, borderRight: '2px solid #bdbdbd',
+                      width: 180, minWidth: 100, maxWidth: 300, textAlign: 'left', verticalAlign: 'bottom',
+                      position: 'sticky', left: 0, zIndex: 2, borderRight: '3px solid #9e9e9e',
                     }}>
                       {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
                     </th>
@@ -1042,10 +1042,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     }
                   }}
                   style={{
-                    border: '1px solid #e0e0e0', padding: '2px 8px', paddingLeft: 8 + row.indent * 16,
-                    whiteSpace: 'nowrap', fontWeight: row.isGroup ? 600 : 400,
-                    background: row.isGroup ? '#fafafa' : '#fff',
-                    position: 'sticky', left: 0, zIndex: 1, borderRight: '2px solid #bdbdbd',
+                    border: '1px solid #e0e0e0', padding: '2px 6px', paddingLeft: 6 + row.indent * 14,
+                    whiteSpace: 'normal', wordBreak: 'break-word', fontWeight: row.isGroup ? 600 : 400,
+                    background: row.isGroup ? '#fafafa' : '#fff', fontSize: 12,
+                    position: 'sticky', left: 0, zIndex: 1, borderRight: '3px solid #9e9e9e',
                     cursor: row.dragInfo ? 'grab' : 'default',
                   }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
