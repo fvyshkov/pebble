@@ -988,7 +988,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           }
         }}
       >
-        <table ref={gridRef} style={{ borderCollapse: 'collapse', fontSize: 13, minWidth: '100%' }}>
+        <table ref={gridRef} style={{
+          borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed',
+          width: firstColWidth + displayCols.reduce((s, _, i) => s + (colWidths[i] || 110), 0),
+        }}>
           <thead>
             {useSimpleHeader ? (
               <tr>
