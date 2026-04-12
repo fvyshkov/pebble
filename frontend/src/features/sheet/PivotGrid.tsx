@@ -396,27 +396,41 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     }
   }, [focusCell])
 
-  // Column resize handlers (ci = -1 for first/label column)
-  const handleColResizeStart = (ci: number, e: React.MouseEvent) => {
+  // Column resize: detect mousedown near right edge of any <th>/<td> header
+  const handleHeaderMouseDown = (e: React.MouseEvent) => {
+    const cell = (e.target as HTMLElement).closest('th') as HTMLTableCellElement | null
+    if (!cell) return
+    const rect = cell.getBoundingClientRect()
+    if (e.clientX < rect.right - 8) return // not near right edge
     e.preventDefault()
     e.stopPropagation()
-    const th = (e.target as HTMLElement).closest('th, td')
-    const startW = th?.getBoundingClientRect().width || (ci === -1 ? 350 : 90)
-    resizingCol.current = { idx: ci, startX: e.clientX, startW }
+
+    // Determine column index
+    const row = cell.closest('tr')!
+    const cellIdx = Array.from(row.cells).indexOf(cell)
+    const isFirstCol = cell.style.position === 'sticky'
+    const ci = isFirstCol ? -1 : cellIdx - 1 // -1 = first/label column
+
+    const startX = e.clientX
+    const startW = rect.width
     const onMove = (ev: MouseEvent) => {
-      const rc = resizingCol.current
-      if (!rc) return
-      const diff = ev.clientX - rc.startX
-      const newW = Math.max(80, rc.startW + diff)
-      if (rc.idx === -1) {
-        setFirstColWidth(newW)
-      } else {
-        setColWidths(prev => ({ ...prev, [rc.idx]: newW }))
-      }
+      const diff = ev.clientX - startX
+      const newW = Math.max(80, startW + diff)
+      if (ci === -1) setFirstColWidth(newW)
+      else setColWidths(prev => ({ ...prev, [ci]: newW }))
     }
-    const onUp = () => { resizingCol.current = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.cursor = '' }
+    document.body.style.cursor = 'col-resize'
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
+  }
+
+  // Show col-resize cursor near right edge of headers
+  const handleHeaderMouseMove = (e: React.MouseEvent) => {
+    const cell = (e.target as HTMLElement).closest('th') as HTMLTableCellElement | null
+    if (!cell) return
+    const rect = cell.getBoundingClientRect()
+    cell.style.cursor = e.clientX > rect.right - 8 ? 'col-resize' : ''
   }
 
   // Auto-save view settings on changes
@@ -992,7 +1006,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed',
           width: firstColWidth + displayCols.reduce((s, _, i) => s + (colWidths[i] || 110), 0),
         }}>
-          <thead>
+          <thead onMouseDown={handleHeaderMouseDown} onMouseMove={handleHeaderMouseMove}>
             {useSimpleHeader ? (
               <tr>
                 <th style={{
@@ -1000,8 +1014,6 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   width: firstColWidth, minWidth: 80, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e',
                 }}>
                   {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
-                  <div style={{ position: 'absolute', right: -2, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
-                    onMouseDown={e => handleColResizeStart(-1, e)} />
                 </th>
                 {displayCols.map((dc, ci) => (
                   <th key={`${dc.node.record.id}-${dc.isSum ? 's' : 'l'}`} style={{
@@ -1013,10 +1025,6 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     position: 'relative',
                   }}>
                     {dc.isSum ? `Σ ${dc.node.data.name || ''}` : (dc.node.data.name || '')}
-                    <div
-                      style={{ position: 'absolute', right: -2, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
-                      onMouseDown={e => handleColResizeStart(ci, e)}
-                    />
                   </th>
                 ))}
               </tr>
@@ -1030,18 +1038,14 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                       position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e',
                     }}>
                       {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
-                      <div style={{ position: 'absolute', right: -2, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
-                        onMouseDown={e => handleColResizeStart(-1, e)} />
                     </th>
                   )}
                   {row.map(({ node, colspan, rowspan }) => (
                     <th key={node.record.id} colSpan={colspan} rowSpan={rowspan} style={{
                       border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                      textAlign: 'center', whiteSpace: 'nowrap', minWidth: 90, position: 'relative',
+                      textAlign: 'center', whiteSpace: 'normal', wordBreak: 'break-word', minWidth: 90,
                     }}>
                       {node.data.name || ''}
-                      {rowspan === 1 && <div style={{ position: 'absolute', right: -2, top: 0, bottom: 0, width: 6, cursor: 'col-resize', zIndex: 3 }}
-                        onMouseDown={e => { /* multi-row header resize - find leaf column index */ }} />}
                     </th>
                   ))}
                 </tr>
