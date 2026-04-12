@@ -310,8 +310,11 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         setOrder(defaultOrder)
       }
       if (vs.colLevelToggles) setColLevelToggles(vs.colLevelToggles)
-      else setColLevelToggles({ 0: true, 1: true, 2: true, 3: true }) // all levels on by default
+      else setColLevelToggles({ 0: true, 1: true, 2: true, 3: true })
       if (vs.pinned) setPinned(vs.pinned)
+      if (vs.colWidths) setColWidths(vs.colWidths)
+      if (vs.firstColWidth) setFirstColWidth(vs.firstColWidth)
+      if (vs.collapsedRows) setCollapsedRows(new Set(vs.collapsedRows))
     } catch {
       setOrder(defaultOrder)
       setColLevelToggles({ 0: true, 1: true, 2: true, 3: true })
@@ -455,9 +458,13 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     if (loading) return
     clearTimeout(saveSettingsTimer.current)
     saveSettingsTimer.current = setTimeout(() => {
-      api.saveViewSettings(sheetId, { order, colLevelToggles, pinned })
+      api.saveViewSettings(sheetId, {
+        order, colLevelToggles, pinned,
+        colWidths, firstColWidth,
+        collapsedRows: Array.from(collapsedRows),
+      })
     }, 500)
-  }, [order, colLevelToggles, pinned, sheetId, loading])
+  }, [order, colLevelToggles, pinned, colWidths, firstColWidth, collapsedRows, sheetId, loading])
 
   const analyticNames = useMemo(() => {
     const m: Record<string, string> = {}; for (const [id, a] of Object.entries(analyticsMap)) m[id] = a.name; return m
