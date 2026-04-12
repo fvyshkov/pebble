@@ -484,9 +484,10 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
             if item.get("unit"):
                 data["unit"] = item["unit"]
 
+            excel_row = item.get("row")
             await db.execute(
-                "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
-                (rid, analytic_id, parent_id, sort_idx, json.dumps(data, ensure_ascii=False)),
+                "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json, excel_row) VALUES (?,?,?,?,?,?)",
+                (rid, analytic_id, parent_id, sort_idx, json.dumps(data, ensure_ascii=False), excel_row),
             )
             row_to_rid[item["row"]] = rid
 
