@@ -402,13 +402,14 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     const startW = th?.getBoundingClientRect().width || (ci === -1 ? 350 : 90)
     resizingCol.current = { idx: ci, startX: e.clientX, startW }
     const onMove = (ev: MouseEvent) => {
-      if (!resizingCol.current) return
-      const diff = ev.clientX - resizingCol.current.startX
-      const newW = Math.max(80, resizingCol.current.startW + diff)
-      if (resizingCol.current.idx === -1) {
+      const rc = resizingCol.current
+      if (!rc) return
+      const diff = ev.clientX - rc.startX
+      const newW = Math.max(80, rc.startW + diff)
+      if (rc.idx === -1) {
         setFirstColWidth(newW)
       } else {
-        setColWidths(prev => ({ ...prev, [resizingCol.current!.idx]: newW }))
+        setColWidths(prev => ({ ...prev, [rc.idx]: newW }))
       }
     }
     const onUp = () => { resizingCol.current = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
