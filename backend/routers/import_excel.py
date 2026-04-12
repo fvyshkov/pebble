@@ -299,7 +299,7 @@ async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) 
         try:
             message = await loop.run_in_executor(None, lambda: client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=8192,
+                max_tokens=16384,
                 system=PEBBLE_SYSTEM_PROMPT + "\n\nIMPORTANT: Return ONLY valid JSON. No markdown fences, no comments, no trailing commas.",
                 messages=[
                     {"role": "user", "content": SHEET_ANALYSIS_PROMPT + sheet_text},
@@ -795,7 +795,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             yield event(f"🔍 Анализ {len(sheet_names)} листов параллельно...")
 
             async def analyze_one(sn):
-                """Analyze one sheet with retry + fallback."""
+                """Analyze one sheet: Claude (with cache+retry) → heuristic fallback."""
                 for attempt in range(2):
                     try:
                         cfg = await _analyze_sheet_with_claude(client, sheet_texts[sn])
@@ -804,10 +804,11 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             return cfg
                     except Exception:
                         pass
-                # Fallback
+                # Fallback — and cache the result
                 fb = await loop.run_in_executor(None, lambda: _fallback_heuristic_analysis(wb_formulas))
                 for fb_sheet in fb.get("sheets", []):
                     if fb_sheet["excel_name"] == sn:
+                        _llm_cache_set(sheet_texts[sn], fb_sheet)
                         return fb_sheet
                 return None
 
