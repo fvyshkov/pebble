@@ -405,19 +405,35 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     e.preventDefault()
     e.stopPropagation()
 
-    // Determine column index
-    const row = cell.closest('tr')!
-    const cellIdx = Array.from(row.cells).indexOf(cell)
     const isFirstCol = cell.style.position === 'sticky'
-    const ci = isFirstCol ? -1 : cellIdx - 1 // -1 = first/label column
+    if (isFirstCol) {
+      // Resize first (label) column
+      const startX = e.clientX
+      const startW = rect.width
+      const onMove = (ev: MouseEvent) => setFirstColWidth(Math.max(80, startW + ev.clientX - startX))
+      const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.cursor = '' }
+      document.body.style.cursor = 'col-resize'
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+      return
+    }
+
+    // For data columns: find the LAST display column index covered by this cell
+    // by summing colspans of preceding cells (skip first sticky cell)
+    const row = cell.closest('tr')!
+    let colStart = 0
+    for (const c of Array.from(row.cells)) {
+      if (c === cell) break
+      if (c.style.position !== 'sticky') colStart += c.colSpan || 1
+    }
+    const colspan = cell.colSpan || 1
+    const lastColIdx = colStart + colspan - 1 // rightmost display column
 
     const startX = e.clientX
-    const startW = rect.width
+    const startW = colWidths[lastColIdx] || 110
     const onMove = (ev: MouseEvent) => {
-      const diff = ev.clientX - startX
-      const newW = Math.max(80, startW + diff)
-      if (ci === -1) setFirstColWidth(newW)
-      else setColWidths(prev => ({ ...prev, [ci]: newW }))
+      const newW = Math.max(50, startW + ev.clientX - startX)
+      setColWidths(prev => ({ ...prev, [lastColIdx]: newW }))
     }
     const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.cursor = '' }
     document.body.style.cursor = 'col-resize'
