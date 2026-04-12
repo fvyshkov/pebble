@@ -421,8 +421,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       return
     }
 
-    // For data columns: find the LAST display column index covered by this cell
-    // by summing colspans of preceding cells (skip first sticky cell)
+    // Find all display column indices covered by this header cell
     const row = cell.closest('tr')!
     let colStart = 0
     for (const c of Array.from(row.cells)) {
@@ -430,13 +429,24 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       if (c.style.position !== 'sticky') colStart += c.colSpan || 1
     }
     const colspan = cell.colSpan || 1
-    const lastColIdx = colStart + colspan - 1 // rightmost display column
+    const colIndices = Array.from({ length: colspan }, (_, i) => colStart + i)
 
+    // Sum current widths of all covered columns
     const startX = e.clientX
-    const startW = colWidths[lastColIdx] || 110
+    const startWidths = colIndices.map(ci => colWidths[ci] || 110)
+    const totalStartW = startWidths.reduce((a, b) => a + b, 0)
+
     const onMove = (ev: MouseEvent) => {
-      const newW = Math.max(50, startW + ev.clientX - startX)
-      setColWidths(prev => ({ ...prev, [lastColIdx]: newW }))
+      const diff = ev.clientX - startX
+      const newTotal = Math.max(colspan * 40, totalStartW + diff)
+      const scale = newTotal / totalStartW
+      setColWidths(prev => {
+        const next = { ...prev }
+        for (let i = 0; i < colIndices.length; i++) {
+          next[colIndices[i]] = Math.max(40, Math.round(startWidths[i] * scale))
+        }
+        return next
+      })
     }
     const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.cursor = '' }
     document.body.style.cursor = 'col-resize'
@@ -1256,10 +1266,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
 
                   // Manual input cell
                   const shouldEdit = isFocused && editingCell && canEdit
-                  const readOnlyBg = !canEdit ? '#fff5f5' : undefined
+                  const manualBg = !canEdit ? '#fff5f5' : selBg || '#fdf8e8'
                   return (
                     <td key={colRecId} onClick={cellClick}
-                      style={{ border: focusBorder, padding: 0, background: readOnlyBg }}
+                      style={{ border: focusBorder, padding: 0, background: manualBg }}
                       onContextMenu={e => handleContextMenu(e, coordKey, rule)}>
                       <PivotCell
                         value={cells[coordKey] ?? ''}
