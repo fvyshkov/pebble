@@ -623,9 +623,12 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   }, [])
 
   // ─── Coord key ───
+  // coord_key always uses DB binding order (not display order) for consistency
+  const dbOrder = useMemo(() => bindings.map(b => b.analytic_id), [bindings])
+
   const makeCoordKey = (rowIds: Record<string, string>, colId: string) => {
     const parts: string[] = []
-    for (const aId of order) {
+    for (const aId of dbOrder) {
       if (aId === colAnalyticId) parts.push(colId)
       else if (pinned[aId]) parts.push(pinned[aId])
       else if (rowIds[aId]) parts.push(rowIds[aId])
@@ -675,13 +678,13 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   // Coord key using fully expanded combo (not relying on pinned map)
   const makeLeafCoordKey = useCallback((comboIds: Record<string, string>, colId: string) => {
     const parts: string[] = []
-    for (const aId of order) {
+    for (const aId of dbOrder) {
       if (aId === colAnalyticId) parts.push(colId)
       else if (comboIds[aId]) parts.push(comboIds[aId])
       else if (pinned[aId]) parts.push(pinned[aId])
     }
     return parts.join('|')
-  }, [order, colAnalyticId, pinned])
+  }, [dbOrder, colAnalyticId, pinned])
 
   const computeSum = useCallback((row: RowEntry, colId: string): number | null => {
     const colNode = findNodeById(colTree, colId)
