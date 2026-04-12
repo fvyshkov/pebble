@@ -7,3 +7,7 @@ frontend/dist/
 .DS_Store
 *.db-wal
 *.db-shm
+*.db
+.llm_cache/
+models.xlsx
+.venv/
