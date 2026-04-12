@@ -189,6 +189,11 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                       label={
                         <div className="tree-item-label">
                           <DescriptionOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
+                          {(s as any).excel_code && (
+                            <span style={{ fontSize: 10, background: '#e3f2fd', color: '#1565c0', padding: '1px 4px', borderRadius: 3, fontWeight: 600, flexShrink: 0 }}>
+                              {(s as any).excel_code}
+                            </span>
+                          )}
                           <span style={{ color: s.can_edit === false ? '#999' : undefined }}>{s.name || 'Без названия'}</span>
                           {s.can_edit === false && <LockOutlined sx={{ fontSize: 12, color: '#ccc', ml: 'auto' }} />}
                         </div>
