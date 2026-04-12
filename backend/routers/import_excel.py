@@ -697,8 +697,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
     content = await file.read()
 
     async def generate():
+        import time as _time
+        _t0 = _time.time()
+
         def event(msg: str, data: dict | None = None):
-            payload = json.dumps({"message": msg, **(data or {})}, ensure_ascii=False)
+            elapsed = _time.time() - _t0
+            ts = f"[{int(elapsed)}с]"
+            payload = json.dumps({"message": f"{ts} {msg}", **(data or {})}, ensure_ascii=False)
             return f"data: {payload}\n\n"
 
         db = get_db()

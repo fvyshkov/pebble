@@ -128,11 +128,15 @@ function ImportDialog({ open, onClose, onImported }: {
                 {line}
               </div>
             ))}
-            {loading && !done && (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, color: '#1976d2' }}>
-                <CircularProgress size={12} /> <span>работаю... {elapsed > 0 ? `${Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}` : ''}</span>
-              </Box>
-            )}
+            {loading && !done && (() => {
+              const mins = Math.floor(elapsed / 60)
+              const secs = String(elapsed % 60).padStart(2, '0')
+              return (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, color: '#1976d2' }}>
+                  <CircularProgress size={12} /> <span>работаю... {elapsed > 0 ? `${mins}:${secs}` : ''}</span>
+                </Box>
+              )
+            })()}
           </Box>
         )}
       </DialogContent>
