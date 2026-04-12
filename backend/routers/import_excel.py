@@ -763,42 +763,39 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             period_config = {"period_types": ["year", "quarter", "month"], "start": p_start, "end": p_end}
             sheets_config = []
 
-            for i, sn in enumerate(sheet_names):
-                yield event(f"🔍 Анализ листа «{sn}» ({i+1}/{len(sheet_names)})...")
-                sheet_cfg = None
-                # Try Claude (with 1 retry)
+            # Launch ALL sheets in parallel for speed
+            yield event(f"🔍 Анализ {len(sheet_names)} листов параллельно...")
+
+            async def analyze_one(sn):
+                """Analyze one sheet with retry + fallback."""
                 for attempt in range(2):
                     try:
                         cfg = await _analyze_sheet_with_claude(client, sheet_texts[sn])
                         cfg["excel_name"] = sn
-                        ind_count = len(cfg.get("indicators", []))
-                        if ind_count > 0:
-                            sheet_cfg = cfg
-                            break
-                        elif attempt == 0:
-                            yield event(f"   ⚠ «{sn}»: Claude вернул 0 показателей, повтор...")
-                    except Exception as e:
-                        if attempt == 0:
-                            yield event(f"   ⚠ «{sn}»: ошибка ({e}), повтор...")
-                        else:
-                            yield event(f"   ⚠ «{sn}»: ошибка анализа — {e}")
+                        if len(cfg.get("indicators", [])) > 0:
+                            return cfg
+                    except Exception:
+                        pass
+                # Fallback
+                fb = await loop.run_in_executor(None, lambda: _fallback_heuristic_analysis(wb_formulas))
+                for fb_sheet in fb.get("sheets", []):
+                    if fb_sheet["excel_name"] == sn:
+                        return fb_sheet
+                return None
 
-                # Fallback to heuristic if Claude failed
-                if not sheet_cfg or len(sheet_cfg.get("indicators", [])) == 0:
-                    yield event(f"   ↻ «{sn}»: используем эвристики...")
-                    fb = _fallback_heuristic_analysis(wb_formulas)
-                    for fb_sheet in fb.get("sheets", []):
-                        if fb_sheet["excel_name"] == sn:
-                            sheet_cfg = fb_sheet
-                            break
+            tasks = [analyze_one(sn) for sn in sheet_names]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                if sheet_cfg and len(sheet_cfg.get("indicators", [])) > 0:
-                    ind_count = len(sheet_cfg.get("indicators", []))
-                    ch_count = sum(len(x.get("children", [])) for x in sheet_cfg.get("indicators", []))
-                    yield event(f"   ✓ «{sn}»: {ind_count} групп, {ch_count} показателей")
-                    sheets_config.append(sheet_cfg)
+            for i, (sn, result) in enumerate(zip(sheet_names, results)):
+                if isinstance(result, Exception):
+                    yield event(f"   ✗ «{sn}»: ошибка — {result}")
+                elif result and len(result.get("indicators", [])) > 0:
+                    ind_count = len(result.get("indicators", []))
+                    ch_count = sum(len(x.get("children", [])) for x in result.get("indicators", []))
+                    yield event(f"   ✓ «{sn}» ({i+1}/{len(sheet_names)}): {ind_count} групп, {ch_count} показателей")
+                    sheets_config.append(result)
                 else:
-                    yield event(f"   ✗ «{sn}»: не удалось разобрать лист")
+                    yield event(f"   ✗ «{sn}»: не удалось разобрать")
 
             analysis = {"period_config": period_config, "sheets": sheets_config}
         except Exception as e:
