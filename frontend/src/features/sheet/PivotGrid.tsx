@@ -273,6 +273,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [editingCell, setEditingCell] = useState(false)
   const gridRef = useRef<HTMLTableElement>(null)
   const [colWidths, setColWidths] = useState<Record<number, number>>({})
+  const [firstColWidth, setFirstColWidth] = useState(350)
   const resizingCol = useRef<{ idx: number; startX: number; startW: number } | null>(null)
   const gridBoxRef = useRef<HTMLDivElement>(null)
   // Auto-focus grid on mount
@@ -393,18 +394,22 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     }
   }, [focusCell])
 
-  // Column resize handlers
+  // Column resize handlers (ci = -1 for first/label column)
   const handleColResizeStart = (ci: number, e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    const th = (e.target as HTMLElement).closest('th')
-    const startW = th?.getBoundingClientRect().width || 90
+    const th = (e.target as HTMLElement).closest('th, td')
+    const startW = th?.getBoundingClientRect().width || (ci === -1 ? 350 : 90)
     resizingCol.current = { idx: ci, startX: e.clientX, startW }
     const onMove = (ev: MouseEvent) => {
       if (!resizingCol.current) return
       const diff = ev.clientX - resizingCol.current.startX
-      const newW = Math.max(50, resizingCol.current.startW + diff)
-      setColWidths(prev => ({ ...prev, [resizingCol.current!.idx]: newW }))
+      const newW = Math.max(80, resizingCol.current.startW + diff)
+      if (resizingCol.current.idx === -1) {
+        setFirstColWidth(newW)
+      } else {
+        setColWidths(prev => ({ ...prev, [resizingCol.current!.idx]: newW }))
+      }
     }
     const onUp = () => { resizingCol.current = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
     document.addEventListener('mousemove', onMove)
@@ -986,9 +991,11 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
               <tr>
                 <th style={{
                   border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                  width: 180, minWidth: 100, maxWidth: 300, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, borderRight: '3px solid #9e9e9e',
+                  width: firstColWidth, minWidth: 80, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e', overflow: 'hidden',
                 }}>
                   {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
+                  <span style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 5, cursor: 'col-resize' }}
+                    onMouseDown={e => handleColResizeStart(-1, e)} />
                 </th>
                 {displayCols.map((dc, ci) => (
                   <th key={`${dc.node.record.id}-${dc.isSum ? 's' : 'l'}`} style={{
@@ -1013,8 +1020,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   {ri === 0 && (
                     <th rowSpan={headerRows.length} style={{
                       border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                      width: 180, minWidth: 100, maxWidth: 300, textAlign: 'left', verticalAlign: 'bottom',
-                      position: 'sticky', left: 0, zIndex: 2, borderRight: '3px solid #9e9e9e',
+                      width: firstColWidth, minWidth: 80, textAlign: 'left', verticalAlign: 'bottom',
+                      position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e', overflow: 'hidden',
                     }}>
                       {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
                     </th>
@@ -1043,9 +1050,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   }}
                   style={{
                     border: '1px solid #e0e0e0', padding: '2px 6px', paddingLeft: 6 + row.indent * 14,
+                    width: firstColWidth, minWidth: 80,
                     whiteSpace: 'normal', wordBreak: 'break-word', fontWeight: row.isGroup ? 600 : 400,
                     background: row.isGroup ? '#fafafa' : '#fff', fontSize: 12,
-                    position: 'sticky', left: 0, zIndex: 1, borderRight: '3px solid #9e9e9e',
+                    position: 'sticky', left: 0, zIndex: 1, boxShadow: '3px 0 0 0 #9e9e9e',
                     cursor: row.dragInfo ? 'grab' : 'default',
                   }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
