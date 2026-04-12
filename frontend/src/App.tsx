@@ -119,15 +119,26 @@ function ImportDialog({ open, onClose, onImported }: {
           onChange={e => setModelName(e.target.value)}
           fullWidth size="small" disabled={loading}
         />
-        {loading && progress.total > 0 && (
+        {loading && !done && (
           <Box sx={{ width: '100%', mb: 1 }}>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#666', mb: 0.5 }}>
-              <span>Лист {progress.current} из {progress.total}</span>
-              <span>{Math.round(progress.current / progress.total * 100)}%</span>
-            </Box>
-            <Box sx={{ width: '100%', height: 6, bgcolor: '#e0e0e0', borderRadius: 3 }}>
-              <Box sx={{ width: `${progress.current / progress.total * 100}%`, height: '100%', bgcolor: '#1976d2', borderRadius: 3, transition: 'width 0.3s' }} />
-            </Box>
+            {progress.total > 0 ? (
+              <>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#666', mb: 0.5 }}>
+                  <span>Показатели: {progress.current} из {progress.total}</span>
+                  <span>{Math.round(progress.current / progress.total * 100)}%</span>
+                </Box>
+                <Box sx={{ width: '100%', height: 6, bgcolor: '#e0e0e0', borderRadius: 3 }}>
+                  <Box sx={{ width: `${progress.current / progress.total * 100}%`, height: '100%', bgcolor: '#1976d2', borderRadius: 3, transition: 'width 0.3s' }} />
+                </Box>
+              </>
+            ) : (
+              <Box sx={{ width: '100%', height: 6, bgcolor: '#e0e0e0', borderRadius: 3, overflow: 'hidden' }}>
+                <Box sx={{ width: '30%', height: '100%', bgcolor: '#1976d2', borderRadius: 3,
+                  animation: 'indeterminate 1.5s ease-in-out infinite',
+                  '@keyframes indeterminate': { '0%': { transform: 'translateX(-100%)' }, '100%': { transform: 'translateX(400%)' } },
+                }} />
+              </Box>
+            )}
           </Box>
         )}
         {log.length > 0 && (
