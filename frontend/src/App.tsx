@@ -53,6 +53,7 @@ function ImportDialog({ open, onClose, onImported }: {
   const [log, setLog] = useState<string[]>([])
   const [done, setDone] = useState(false)
   const [elapsed, setElapsed] = useState(0)
+  const [progress, setProgress] = useState({ current: 0, total: 0 })
   const elapsedRef = useRef<ReturnType<typeof setInterval>>()
   const fileRef = useRef<HTMLInputElement>(null)
   const logRef = useRef<HTMLDivElement>(null)
@@ -72,10 +73,14 @@ function ImportDialog({ open, onClose, onImported }: {
     setDone(false)
     setElapsed(0)
     elapsedRef.current = setInterval(() => setElapsed(t => t + 1), 1000)
+    setProgress({ current: 0, total: 0 })
     try {
       const result = await api.importExcelModelStream(file, modelName, (msg, data) => {
         setLog(prev => [...prev, msg])
         setTimeout(() => logRef.current?.scrollTo(0, logRef.current.scrollHeight), 50)
+        // Parse progress from messages like "(3/7)"
+        const pm = msg.match(/\((\d+)\/(\d+)\)/)
+        if (pm) setProgress({ current: parseInt(pm[1]), total: parseInt(pm[2]) })
         if (data?.done) {
           setDone(true)
           onImported(data.model_id)
@@ -114,6 +119,17 @@ function ImportDialog({ open, onClose, onImported }: {
           onChange={e => setModelName(e.target.value)}
           fullWidth size="small" disabled={loading}
         />
+        {loading && progress.total > 0 && (
+          <Box sx={{ width: '100%', mb: 1 }}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#666', mb: 0.5 }}>
+              <span>Лист {progress.current} из {progress.total}</span>
+              <span>{Math.round(progress.current / progress.total * 100)}%</span>
+            </Box>
+            <Box sx={{ width: '100%', height: 6, bgcolor: '#e0e0e0', borderRadius: 3 }}>
+              <Box sx={{ width: `${progress.current / progress.total * 100}%`, height: '100%', bgcolor: '#1976d2', borderRadius: 3, transition: 'width 0.3s' }} />
+            </Box>
+          </Box>
+        )}
         {log.length > 0 && (
           <Box
             ref={logRef}

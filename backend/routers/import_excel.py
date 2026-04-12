@@ -251,13 +251,16 @@ def _get_claude_client():
 
 
 def _parse_claude_json(response_text: str) -> dict:
-    """Parse JSON from Claude response, handling markdown fences."""
+    """Parse JSON from Claude response, handling markdown fences and common issues."""
+    import re
     text = response_text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
         if "```" in text:
             text = text[: text.rfind("```")]
         text = text.strip()
+    # Fix trailing commas before } or ]
+    text = re.sub(r',\s*([}\]])', r'\1', text)
     return json.loads(text)
 
 
@@ -269,11 +272,15 @@ async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) 
         try:
             message = await loop.run_in_executor(None, lambda: client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=16384,
-                system=PEBBLE_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": SHEET_ANALYSIS_PROMPT + sheet_text}],
+                max_tokens=8192,
+                system=PEBBLE_SYSTEM_PROMPT + "\n\nIMPORTANT: Return ONLY valid JSON. No markdown fences, no comments, no trailing commas.",
+                messages=[
+                    {"role": "user", "content": SHEET_ANALYSIS_PROMPT + sheet_text},
+                    {"role": "assistant", "content": "{"},  # prefill to force JSON
+                ],
             ))
-            return _parse_claude_json(message.content[0].text)
+            # Prepend the prefilled "{" back
+            return _parse_claude_json("{" + message.content[0].text)
         except Exception as e:
             if attempt < retries - 1 and ("overloaded" in str(e).lower() or "529" in str(e)):
                 await asyncio.sleep(2 ** attempt)
