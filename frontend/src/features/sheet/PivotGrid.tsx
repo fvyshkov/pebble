@@ -1032,6 +1032,12 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed',
           width: firstColWidth + displayCols.reduce((s, _, i) => s + (colWidths[i] || 110), 0),
         }}>
+          <colgroup>
+            <col style={{ width: firstColWidth }} />
+            {displayCols.map((_, ci) => (
+              <col key={ci} style={{ width: colWidths[ci] || 110 }} />
+            ))}
+          </colgroup>
           <thead onMouseDown={handleHeaderMouseDown} onMouseMove={handleHeaderMouseMove}>
             {useSimpleHeader ? (
               <tr>
