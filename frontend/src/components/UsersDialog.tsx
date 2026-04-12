@@ -239,6 +239,14 @@ export default function UsersDialog({ open, onClose }: Props) {
                   }))).then(loadPerms)
                 }
 
+                // Helpers to compute checked/indeterminate for analytics tree
+                const flatAll = (recs: any[]): any[] => recs.flatMap(r => [r, ...flatAll(r.children || [])])
+                const allAnalyticRecords = (model.analytics || []).flatMap((a: any) => flatAll(a.records))
+                const analyticsFolderChecked = (field: string) => allAnalyticRecords.length > 0 && allAnalyticRecords.every((r: any) => r[field])
+                const analyticsFolderIndeterminate = (field: string) => allAnalyticRecords.some((r: any) => r[field]) && !allAnalyticRecords.every((r: any) => r[field])
+                const analyticChecked = (analytic: any, field: string) => { const flat = flatAll(analytic.records); return flat.length > 0 && flat.every((r: any) => r[field]) }
+                const analyticIndeterminate = (analytic: any, field: string) => { const flat = flatAll(analytic.records); return flat.some((r: any) => r[field]) && !flat.every((r: any) => r[field]) }
+
                 const renderRecords = (analyticId: string, records: any[], depth: number): any => {
                   return records.map((rec: any) => {
                     const hasChildren = rec.children && rec.children.length > 0
@@ -350,10 +358,14 @@ export default function UsersDialog({ open, onClose }: Props) {
                             <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>Аналитики</Box>
                             <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
                               <Checkbox size="small"
+                                checked={analyticsFolderChecked('can_view')}
+                                indeterminate={analyticsFolderIndeterminate('can_view')}
                                 onChange={e => { model.analytics.forEach((a: any) => setRecordTreePerm(a.id, a.records, 'can_view', e.target.checked)) }} />
                             </Box>
                             <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
                               <Checkbox size="small"
+                                checked={analyticsFolderChecked('can_edit')}
+                                indeterminate={analyticsFolderIndeterminate('can_edit')}
                                 onChange={e => { model.analytics.forEach((a: any) => setRecordTreePerm(a.id, a.records, 'can_edit', e.target.checked)) }} />
                             </Box>
                           </Box>
@@ -369,10 +381,14 @@ export default function UsersDialog({ open, onClose }: Props) {
                                   <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>{analytic.name}</Box>
                                   <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
                                     <Checkbox size="small"
+                                      checked={analyticChecked(analytic, 'can_view')}
+                                      indeterminate={analyticIndeterminate(analytic, 'can_view')}
                                       onChange={e => setRecordTreePerm(analytic.id, analytic.records, 'can_view', e.target.checked)} />
                                   </Box>
                                   <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
                                     <Checkbox size="small"
+                                      checked={analyticChecked(analytic, 'can_edit')}
+                                      indeterminate={analyticIndeterminate(analytic, 'can_edit')}
                                       onChange={e => setRecordTreePerm(analytic.id, analytic.records, 'can_edit', e.target.checked)} />
                                   </Box>
                                 </Box>
