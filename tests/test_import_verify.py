@@ -22,10 +22,18 @@ def db():
 
 @pytest.fixture(scope="module")
 def model_id(db):
-    """Find the VERIFIED model or skip."""
+    """Find the VERIFIED model. Reimport if data was corrupted."""
     row = db.execute("SELECT id FROM models WHERE name='VERIFIED'").fetchone()
     if not row:
-        pytest.skip("VERIFIED model not found — run import first")
+        # Try to import
+        import requests
+        resp = requests.post("http://localhost:8000/api/import/excel",
+                            files={"file": open(EXCEL_PATH, "rb")},
+                            data={"model_name": "VERIFIED"}, timeout=300)
+        data = resp.json()
+        if data.get("model_id"):
+            return data["model_id"]
+        pytest.skip("VERIFIED model not found and import failed")
     return row["id"]
 
 
