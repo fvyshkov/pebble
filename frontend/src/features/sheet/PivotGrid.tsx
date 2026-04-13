@@ -277,6 +277,12 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [firstColWidth, setFirstColWidth] = useState(500)
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null)
   const [historyItems, setHistoryItems] = useState<any[]>([])
+  const [hasHistory, setHasHistory] = useState(false)
+
+  // Check if there's any undo history
+  const refreshHistory = useCallback(() => {
+    api.getModelHistory(modelId, 1).then(h => setHasHistory(h.length > 0))
+  }, [modelId])
   const resizingCol = useRef<{ idx: number; startX: number; startW: number } | null>(null)
   const gridBoxRef = useRef<HTMLDivElement>(null)
   // Auto-focus grid on mount
@@ -341,9 +347,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     const cellMap: Record<string, string> = {}
     for (const c of cellData) cellMap[c.coord_key] = c.value ?? ''
     setCells(cellMap)
-  }, [sheetId, currentUserId])
+    refreshHistory()
+  }, [sheetId, currentUserId, refreshHistory])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(); refreshHistory() }, [load, refreshHistory])
 
   // Check edit permission for current sheet
   useEffect(() => {
@@ -965,7 +972,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         {/* Undo with history dropdown */}
         <Box sx={{ display: 'inline-flex', alignItems: 'center' }}>
           <Tooltip title="Отменить последнее изменение">
-            <IconButton size="small" onClick={async () => {
+            <IconButton size="small" disabled={!hasHistory} onClick={async () => {
               const hist = await api.getModelHistory(modelId, 1)
               if (hist.length > 0) {
                 await api.undoChanges(modelId, hist[0].id)
@@ -976,7 +983,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
             </IconButton>
           </Tooltip>
           <Tooltip title="История изменений">
-            <IconButton size="small" onClick={async e => {
+            <IconButton size="small" disabled={!hasHistory} onClick={async e => {
               const hist = await api.getModelHistory(modelId, 10)
               setHistoryAnchor(e.currentTarget)
               setHistoryItems(hist)
