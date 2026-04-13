@@ -1291,12 +1291,14 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     const num = serverVal !== '' ? parseFloat(serverVal) : null
                     const result = num !== null && !isNaN(num) ? num : null
                     return (
-                      <td key={colRecId} onClick={cellClick} style={{
-                        border: focusBorder, padding: '4px 6px',
-                        textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
-                      }} title={fText ? `ƒ ${fText}` : 'Формула не задана'}>
-                        {result !== null && !isNaN(result) ? fmtDisplay(String(result), rowDt) : ''}
-                      </td>
+                      <Tooltip key={colRecId} title={fText ? `ƒ ${fText}` : ''} enterDelay={200} arrow placement="top">
+                        <td onClick={cellClick} style={{
+                          border: focusBorder, padding: '4px 6px',
+                          textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
+                        }}>
+                          {result !== null && !isNaN(result) ? fmtDisplay(String(result), rowDt) : ''}
+                        </td>
+                      </Tooltip>
                     )
                   }
 

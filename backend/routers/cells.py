@@ -242,17 +242,24 @@ class UndoIn(BaseModel):
 async def undo(model_id: str, body: UndoIn):
     """Undo changes from most recent back to history_id (inclusive)."""
     db = get_db()
-    # Get all history entries from newest to the target
-    rows = await db.execute_fetchall(
-        """SELECT h.id, h.sheet_id, h.coord_key, h.old_value, h.created_at
-           FROM cell_history h
-           JOIN sheets s ON s.id = h.sheet_id AND s.model_id = ?
-           WHERE h.created_at >= (SELECT created_at FROM cell_history WHERE id = ?)
-           ORDER BY h.created_at DESC""",
-        (model_id, body.history_id),
-    )
-    if not rows:
+    # Get target timestamp
+    target = await db.execute_fetchall("SELECT created_at FROM cell_history WHERE id = ?", (body.history_id,))
+    if not target:
         return {"error": "History entry not found"}
+    target_ts = target[0]["created_at"]
+    # Get sheet IDs for model
+    sheet_rows = await db.execute_fetchall("SELECT id FROM sheets WHERE model_id = ?", (model_id,))
+    rows = []
+    for sr in sheet_rows:
+        sheet_hist = await db.execute_fetchall(
+            """SELECT id, sheet_id, coord_key, old_value FROM cell_history
+               WHERE sheet_id = ? AND created_at >= ?
+               ORDER BY created_at DESC""",
+            (sr["id"], target_ts),
+        )
+        rows.extend(sheet_hist)
+    if not rows:
+        return {"error": "No changes to undo"}
 
     undone = 0
     for r in rows:
