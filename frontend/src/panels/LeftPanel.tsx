@@ -41,7 +41,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
       const accessible = await api.getAccessibleSheets(currentUserId)
       const treesData: ModelTree[] = accessible.map((m: any) => ({
         model: { id: m.id, name: m.name } as Model,
-        sheets: m.sheets.map((s: any) => ({ id: s.id, name: s.name, can_edit: s.can_edit, model_id: m.id } as Sheet & { can_edit?: boolean })),
+        sheets: m.sheets.map((s: any) => ({ id: s.id, name: s.name, excel_code: s.excel_code, can_edit: s.can_edit, model_id: m.id, created_at: '', updated_at: '' } as Sheet & { can_edit?: boolean })),
         analytics: [],
       }))
       setTrees(treesData)

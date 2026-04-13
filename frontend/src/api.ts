@@ -83,10 +83,38 @@ export const saveViewSettings = (sheetId: string, settings: any) =>
 // Cells
 export const getCells = (sheetId: string, userId?: string) =>
   fetch(`${BASE}/cells/by-sheet/${sheetId}${userId ? `?user_id=${userId}` : ''}`).then(r => json<CellData[]>(r))
-export const saveCells = (sheetId: string, cells: { coord_key: string; value?: string | null; data_type?: string; user_id?: string; rule?: string; formula?: string }[]) =>
-  fetch(`${BASE}/cells/by-sheet/${sheetId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cells }) }).then(r => json<any>(r))
+export const saveCells = (sheetId: string, cells: { coord_key: string; value?: string | null; data_type?: string; user_id?: string; rule?: string; formula?: string }[], noRecalc = false) =>
+  fetch(`${BASE}/cells/by-sheet/${sheetId}${noRecalc ? '?no_recalc=true' : ''}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cells }) }).then(r => json<any>(r))
 export const calculateSheet = (sheetId: string) =>
   fetch(`${BASE}/cells/calculate/${sheetId}`, { method: 'POST' }).then(r => json<any>(r))
+export const getCellsPartial = (sheetId: string, coordKeys: string[], userId?: string) =>
+  fetch(`${BASE}/cells/by-sheet/${sheetId}/partial${userId ? `?user_id=${userId}` : ''}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ coord_keys: coordKeys }),
+  }).then(r => json<CellData[]>(r))
+export const calculateModelStream = (
+  modelId: string,
+  onProgress: (data: { phase: string; sheet?: string; done?: number; total_sheets?: number; computed?: number }) => void,
+): Promise<void> =>
+  fetch(`${BASE}/cells/calculate-model/${modelId}/stream`, { method: 'POST' })
+    .then(async res => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try { onProgress(JSON.parse(line.slice(6))) } catch {}
+          }
+        }
+      }
+    })
 export const getCellHistory = (sheetId: string, coordKey: string) =>
   fetch(`${BASE}/cells/history/${sheetId}/${encodeURIComponent(coordKey)}`).then(r => json<any[]>(r))
 export const getModelHistory = (modelId: string, limit = 10) =>

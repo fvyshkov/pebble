@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   Box, Typography, IconButton, Tooltip, Dialog, DialogTitle, DialogContent,
   List, ListItem, ListItemIcon, ListItemText, Chip, Popover,
-  Select, MenuItem,
+  Select, MenuItem, LinearProgress, Button,
 } from '@mui/material'
 import FormatListNumberedOutlined from '@mui/icons-material/FormatListNumberedOutlined'
 import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
@@ -278,6 +278,9 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null)
   const [historyItems, setHistoryItems] = useState<any[]>([])
   const [hasHistory, setHasHistory] = useState(false)
+  const [calcMode, setCalcMode] = useState<'auto' | 'manual'>('manual')
+  const [calcProgress, setCalcProgress] = useState<{ running: boolean; done: number; total: number; sheet?: string } | null>(null)
+  const [loadedCoordKeys, setLoadedCoordKeys] = useState<Set<string>>(new Set())
 
   // Check if there's any undo history
   const refreshHistory = useCallback(() => {
@@ -287,6 +290,60 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const gridBoxRef = useRef<HTMLDivElement>(null)
   // Auto-focus grid on mount
   useEffect(() => { if (!loading) gridBoxRef.current?.focus() }, [loading])
+
+  // Helper: compute coord keys for a set of rows × column leaves
+  const computeCoordKeysForRows = useCallback((
+    rowEntries: { recordIds: Record<string, string> }[],
+    colLeaves: RecordNode[],
+    dbOrd: string[],
+    colAId: string,
+    pinnedMap: Record<string, string>,
+  ): string[] => {
+    const keys: string[] = []
+    for (const row of rowEntries) {
+      for (const leaf of colLeaves) {
+        const parts: string[] = []
+        for (const aId of dbOrd) {
+          if (aId === colAId) parts.push(leaf.record.id)
+          else if (pinnedMap[aId]) parts.push(pinnedMap[aId])
+          else if (row.recordIds[aId]) parts.push(row.recordIds[aId])
+        }
+        keys.push(parts.join('|'))
+      }
+    }
+    return keys
+  }, [])
+
+  // Fetch cells for specific coord keys and merge into state
+  const fetchAndMergeCells = useCallback(async (coordKeys: string[]) => {
+    if (coordKeys.length === 0) return
+    // Filter out already-loaded keys
+    const toLoad = coordKeys.filter(k => !loadedCoordKeys.has(k))
+    if (toLoad.length === 0) return
+    const cellData = await api.getCellsPartial(sheetId, toLoad, currentUserId)
+    setCells(prev => {
+      const next = { ...prev }
+      for (const c of cellData) next[c.coord_key] = c.value ?? ''
+      return next
+    })
+    setCellRules(prev => {
+      const next = { ...prev }
+      for (const c of cellData) {
+        if (c.rule && c.rule !== 'manual') next[c.coord_key] = c.rule as CellRule
+      }
+      return next
+    })
+    setFormulas(prev => {
+      const next = { ...prev }
+      for (const c of cellData) { if (c.formula) next[c.coord_key] = c.formula }
+      return next
+    })
+    setLoadedCoordKeys(prev => {
+      const next = new Set(prev)
+      for (const k of toLoad) next.add(k)
+      return next
+    })
+  }, [sheetId, currentUserId, loadedCoordKeys])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -306,30 +363,96 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
 
     // Load saved view settings
     const defaultOrder = sa.map(b => b.analytic_id)
+    let savedCollapsed: Set<string> | null = null
+    let curOrder = defaultOrder
+    let curPinned: Record<string, string> = {}
     try {
       const vs = await api.getViewSettings(sheetId)
       if (vs.order && vs.order.length > 0) {
-        // Validate order IDs still exist
         const validIds = new Set(defaultOrder)
         const savedOrder = (vs.order as string[]).filter(id => validIds.has(id))
-        // Add any new analytics not in saved order
         for (const id of defaultOrder) if (!savedOrder.includes(id)) savedOrder.push(id)
+        curOrder = savedOrder
         setOrder(savedOrder)
       } else {
         setOrder(defaultOrder)
       }
       if (vs.colLevelToggles) setColLevelToggles(vs.colLevelToggles)
       else setColLevelToggles({ 0: true, 1: true, 2: true, 3: true })
-      if (vs.pinned) setPinned(vs.pinned)
+      if (vs.pinned) { curPinned = vs.pinned; setPinned(vs.pinned) }
       if (vs.colWidths) setColWidths(vs.colWidths)
       if (vs.firstColWidth) setFirstColWidth(vs.firstColWidth)
-      if (vs.collapsedRows) setCollapsedRows(new Set(vs.collapsedRows))
+      if (vs.collapsedRows) savedCollapsed = new Set(vs.collapsedRows)
+      if (vs.calcMode) setCalcMode(vs.calcMode)
     } catch {
       setOrder(defaultOrder)
       setColLevelToggles({ 0: true, 1: true, 2: true, 3: true })
     }
 
-    const cellData = await api.getCells(sheetId, currentUserId)
+    // Default: collapse all top-level rows (first analytic's root records)
+    const colAId = curOrder[0]
+    const rowAIds = curOrder.slice(1).filter(id => !curPinned[id] || (findNodeById(rMap[id] || [], curPinned[id])?.children.length ?? 0) > 0)
+    if (savedCollapsed === null && rowAIds.length > 0) {
+      // Collapse all root nodes of the first row analytic
+      const firstRowAId = rowAIds[0]
+      const rootNodes = rMap[firstRowAId] || []
+      const allCollapsed = new Set<string>()
+      for (const n of rootNodes) {
+        if (n.children.length > 0) allCollapsed.add(n.record.id)
+      }
+      // Also collapse leaf nodes that have sub-analytics
+      if (rowAIds.length > 1) {
+        const walk = (nodes: RecordNode[]) => {
+          for (const n of nodes) {
+            if (n.children.length === 0) allCollapsed.add(n.record.id)
+            else walk(n.children)
+          }
+        }
+        walk(rootNodes)
+      }
+      savedCollapsed = allCollapsed
+    }
+    const collapsedSet = savedCollapsed || new Set<string>()
+    setCollapsedRows(collapsedSet)
+
+    // Compute top-level visible rows to determine which cells to fetch
+    // Build row entries just like useMemo does, then filter by collapsed
+    const dbOrd = sa.map(b => b.analytic_id)
+    const totalAnalytics = rowAIds.length
+    const hasPinnedGrp = Object.keys(curPinned).some(aId => {
+      const nd = findNodeById(rMap[aId] || [], curPinned[aId])
+      return nd && nd.children.length > 0
+    })
+    type MiniRow = { recordIds: Record<string, string>; ancestorRecordIds: string[]; ownRecordId?: string }
+    const miniRows: MiniRow[] = []
+    const buildLvl = (ai: number, parentIds: Record<string, string>, ancestors: string[]) => {
+      if (ai >= totalAnalytics) return
+      const aId = rowAIds[ai]
+      // Use filteredRecordsByAnalytic logic — for pinned group, filter to pinned subtree
+      let tree = rMap[aId] || []
+      if (curPinned[aId]) {
+        const pNode = findNodeById(tree, curPinned[aId])
+        tree = pNode ? pNode.children : []
+      }
+      for (const { node, parentChain } of flattenWithLevelAndParents(tree)) {
+        const ids = { ...parentIds, [aId]: node.record.id }
+        const hasChildren = node.children.length > 0
+        const isLastAnalytic = ai === totalAnalytics - 1
+        const allAncestors = [...ancestors, ...parentChain]
+        miniRows.push({ recordIds: ids, ancestorRecordIds: allAncestors, ownRecordId: node.record.id })
+        if (!hasChildren && !isLastAnalytic) {
+          buildLvl(ai + 1, ids, [...allAncestors, node.record.id])
+        }
+      }
+    }
+    if (totalAnalytics > 0) buildLvl(0, {}, [])
+
+    const visRows = miniRows.filter(r => !r.ancestorRecordIds.some(aid => collapsedSet.has(aid)))
+    const colLeaves = colAId ? getLeaves(rMap[colAId] || []) : []
+
+    // Fetch only visible cells
+    const coordKeys = computeCoordKeysForRows(visRows, colLeaves, dbOrd, colAId, curPinned)
+    const cellData = await api.getCellsPartial(sheetId, coordKeys, currentUserId)
     const cellMap: Record<string, string> = {}
     const ruleMap: Record<string, CellRule> = {}
     const formulaMap: Record<string, string> = {}
@@ -338,17 +461,21 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       if (c.rule && c.rule !== 'manual') ruleMap[c.coord_key] = c.rule as CellRule
       if (c.formula) formulaMap[c.coord_key] = c.formula
     }
-    setCells(cellMap); setCellRules(ruleMap); setFormulas(formulaMap); setLoading(false)
+    setCells(cellMap); setCellRules(ruleMap); setFormulas(formulaMap)
+    setLoadedCoordKeys(new Set(coordKeys))
+    setLoading(false)
   }, [sheetId])
 
-  // Light reload: only cell values (no structure rebuild, no scroll reset)
+  // Light reload: only cell values for loaded keys (no structure rebuild, no scroll reset)
   const reloadCells = useCallback(async () => {
-    const cellData = await api.getCells(sheetId, currentUserId)
+    const keys = Array.from(loadedCoordKeys)
+    if (keys.length === 0) return
+    const cellData = await api.getCellsPartial(sheetId, keys, currentUserId)
     const cellMap: Record<string, string> = {}
     for (const c of cellData) cellMap[c.coord_key] = c.value ?? ''
     setCells(cellMap)
     refreshHistory()
-  }, [sheetId, currentUserId, refreshHistory])
+  }, [sheetId, currentUserId, refreshHistory, loadedCoordKeys])
 
   useEffect(() => { load(); refreshHistory() }, [load, refreshHistory])
 
@@ -482,9 +609,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         order, colLevelToggles, pinned,
         colWidths, firstColWidth,
         collapsedRows: Array.from(collapsedRows),
+        calcMode,
       })
     }, 500)
-  }, [order, colLevelToggles, pinned, colWidths, firstColWidth, collapsedRows, sheetId, loading])
+  }, [order, colLevelToggles, pinned, colWidths, firstColWidth, collapsedRows, sheetId, loading, calcMode])
 
   const analyticNames = useMemo(() => {
     const m: Record<string, string> = {}; for (const [id, a] of Object.entries(analyticsMap)) m[id] = a.name; return m
@@ -603,6 +731,9 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   // Fallback: if headerRows is empty, render a simple header from displayCols
   const useSimpleHeader = headerRows.length === 0 && displayCols.length > 0
 
+  // coord_key always uses DB binding order (not display order) for consistency
+  const dbOrder = useMemo(() => bindings.map(b => b.analytic_id), [bindings])
+
   // ─── Build rows ───
   interface RowEntry {
     recordIds: Record<string, string>; label: string; indent: number
@@ -613,6 +744,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     ancestorRecordIds: string[]
     /** Whether this row has children that can be collapsed */
     hasChildren: boolean
+    /** Whether this row can be collapsed (has children OR has sub-analytic rows beneath it) */
+    canCollapse: boolean
   }
   const rows = useMemo(() => {
     const result: RowEntry[] = []
@@ -625,6 +758,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         const ids = { ...parentIds, [aId]: node.record.id }
         const hasChildren = node.children.length > 0
         const isLastAnalytic = ai === totalAnalytics - 1
+        // A leaf node in its analytic that has a sub-analytic beneath it can also be collapsed
+        const canCollapse = hasChildren || (!hasChildren && !isLastAnalytic)
         const isGroup = hasChildren || !isLastAnalytic || hasPinnedGroup
         const indent = baseIndent + level
         const allAncestors = [...ancestors, ...parentChain]
@@ -635,7 +770,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           dragInfo: { analyticId: aId, recordId: node.record.id },
           ownRecordId: node.record.id,
           ancestorRecordIds: allAncestors,
-          hasChildren,
+          hasChildren, canCollapse,
         })
 
         if (!hasChildren && !isLastAnalytic) {
@@ -645,7 +780,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     }
 
     if (totalAnalytics > 0) buildLevel(0, {}, 0, [])
-    else result.push({ recordIds: {}, label: '', indent: 0, isGroup: false, analyticId: '', ancestorRecordIds: [], hasChildren: false })
+    else result.push({ recordIds: {}, label: '', indent: 0, isGroup: false, analyticId: '', ancestorRecordIds: [], hasChildren: false, canCollapse: false })
     return result
   }, [rowAnalyticIds, filteredRecordsByAnalytic, hasPinnedGroup])
 
@@ -658,17 +793,30 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   }, [rows, collapsedRows])
 
   const toggleRowCollapse = useCallback((recordId: string) => {
+    const wasCollapsed = collapsedRows.has(recordId)
     setCollapsedRows(prev => {
       const next = new Set(prev)
       if (next.has(recordId)) next.delete(recordId); else next.add(recordId)
       return next
     })
-  }, [])
+    // On expand: fetch cells for newly visible direct children
+    if (wasCollapsed) {
+      // Find rows that become visible when this recordId is expanded
+      // These are rows whose ancestorRecordIds contain recordId but no OTHER collapsed ancestor
+      const newlyVisible = rows.filter(row => {
+        if (!row.ancestorRecordIds.includes(recordId)) return false
+        // Check no other collapsed ancestor (besides the one we're expanding)
+        return !row.ancestorRecordIds.some(aid => aid !== recordId && collapsedRows.has(aid))
+      })
+      if (newlyVisible.length > 0 && colAnalyticId) {
+        const colLeaves = getLeaves(recordsByAnalytic[colAnalyticId] || [])
+        const keys = computeCoordKeysForRows(newlyVisible, colLeaves, dbOrder, colAnalyticId, pinned)
+        fetchAndMergeCells(keys)
+      }
+    }
+  }, [collapsedRows, rows, colAnalyticId, recordsByAnalytic, dbOrder, pinned, computeCoordKeysForRows, fetchAndMergeCells])
 
   // ─── Coord key ───
-  // coord_key always uses DB binding order (not display order) for consistency
-  const dbOrder = useMemo(() => bindings.map(b => b.analytic_id), [bindings])
-
   const makeCoordKey = (rowIds: Record<string, string>, colId: string) => {
     const parts: string[] = []
     for (const aId of dbOrder) {
@@ -849,7 +997,11 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       }
     }
     setCells(newCells)
-    if (toSave.length > 0) { await api.saveCells(sheetId, toSave); reloadCells() }
+    if (toSave.length > 0) {
+      const noRecalc = calcMode === 'manual'
+      await api.saveCells(sheetId, toSave, noRecalc)
+      if (!noRecalc) reloadCells()
+    }
     // Expand selection to pasted area
     const endR = Math.min(startR + pasteRows.length - 1, rows.length - 1)
     const endC = Math.min(startC + (Math.max(...pasteRows.map(r => r.length)) || 1) - 1, displayCols.length - 1)
@@ -873,8 +1025,12 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       }
     }
     setCells(newCells)
-    if (toSave.length > 0) { await api.saveCells(sheetId, toSave); reloadCells() }
-  }, [editingCell, selRange, visibleRows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId, reloadCells])
+    if (toSave.length > 0) {
+      const noRecalc = calcMode === 'manual'
+      await api.saveCells(sheetId, toSave, noRecalc)
+      if (!noRecalc) reloadCells()
+    }
+  }, [editingCell, selRange, visibleRows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId, reloadCells, calcMode])
 
   // ─── Context menu + history ───
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; coordKey: string } | null>(null)
@@ -899,8 +1055,9 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   // ─── Save (auto-recalc on backend, then reload) ───
   const handleCellSave = async (coordKey: string, value: string) => {
     setCells(prev => ({ ...prev, [coordKey]: value }))
-    await api.saveCells(sheetId, [{ coord_key: coordKey, value, data_type: dataType, user_id: currentUserId }])
-    reloadCells() // reload only values, keep scroll/focus
+    const noRecalc = calcMode === 'manual'
+    await api.saveCells(sheetId, [{ coord_key: coordKey, value, data_type: dataType, user_id: currentUserId }], noRecalc)
+    if (!noRecalc) reloadCells()
   }
 
   const handleReorder = (newOrder: string[]) => {
@@ -960,14 +1117,54 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           </IconButton>
         </Tooltip>
 
-        <Tooltip title="Рассчитать формулы">
-          <IconButton size="small" onClick={async () => {
-            await api.calculateSheet(sheetId)
-            load()
-          }}>
-            <CalculateOutlined fontSize="small" />
-          </IconButton>
+        {/* Calc mode toggle + calculate button */}
+        <Tooltip title={calcMode === 'auto' ? 'Авто-расчёт (при каждом сохранении)' : 'Расчёт по запросу'}>
+          <Chip
+            size="small"
+            label={calcMode === 'auto' ? 'авто' : 'вручную'}
+            variant={calcMode === 'auto' ? 'filled' : 'outlined'}
+            color={calcMode === 'auto' ? 'success' : 'default'}
+            onClick={() => setCalcMode(prev => prev === 'auto' ? 'manual' : 'auto')}
+            sx={{ fontSize: 11, cursor: 'pointer' }}
+          />
         </Tooltip>
+        {calcMode === 'manual' && (
+          <Tooltip title="Рассчитать все формулы">
+            <Button
+              size="small"
+              variant="outlined"
+              disabled={!!calcProgress?.running}
+              startIcon={<CalculateOutlined fontSize="small" />}
+              onClick={async () => {
+                setCalcProgress({ running: true, done: 0, total: 1 })
+                await api.calculateModelStream(modelId, (data) => {
+                  if (data.phase === 'start') {
+                    setCalcProgress({ running: true, done: 0, total: data.total_sheets || 1, sheet: '' })
+                  } else if (data.phase === 'sheet_done') {
+                    setCalcProgress({ running: true, done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet })
+                  } else if (data.phase === 'done') {
+                    setCalcProgress(null)
+                  }
+                })
+                // Reload visible cells after calc
+                reloadCells()
+              }}
+              sx={{ fontSize: 11, textTransform: 'none', minWidth: 0, py: 0, px: 1 }}
+            >
+              Рассчитать
+            </Button>
+          </Tooltip>
+        )}
+        {calcMode === 'auto' && (
+          <Tooltip title="Рассчитать формулы">
+            <IconButton size="small" onClick={async () => {
+              await api.calculateSheet(sheetId)
+              reloadCells()
+            }}>
+              <CalculateOutlined fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
 
         {/* Undo with history dropdown */}
         <Box sx={{ display: 'inline-flex', alignItems: 'center' }}>
@@ -1050,6 +1247,20 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
 
         {!canEdit && <Chip size="small" label="только чтение" sx={{ fontSize: 11, bgcolor: '#fff5f5', color: '#c62828' }} />}
       </Box>
+
+      {/* ─── Calc progress bar ─── */}
+      {calcProgress?.running && (
+        <Box sx={{ px: 1, py: 0.5, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <LinearProgress
+            variant="determinate"
+            value={calcProgress.total > 0 ? (calcProgress.done / calcProgress.total) * 100 : 0}
+            sx={{ flex: 1, height: 6, borderRadius: 3 }}
+          />
+          <Typography sx={{ fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>
+            {calcProgress.sheet || ''} ({calcProgress.done}/{calcProgress.total})
+          </Typography>
+        </Box>
+      )}
 
       {/* ─── Grid ─── */}
       <Box ref={gridBoxRef} sx={{ flex: 1, overflow: 'auto', outline: 'none' }}
@@ -1173,7 +1384,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     cursor: row.dragInfo ? 'grab' : 'default',
                   }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
-                    {row.hasChildren ? (
+                    {row.canCollapse ? (
                       <span
                         style={{ display: 'inline-flex', cursor: 'pointer', opacity: 0.5, marginLeft: -2 }}
                         onClick={e => { e.stopPropagation(); if (row.ownRecordId) toggleRowCollapse(row.ownRecordId) }}
@@ -1306,12 +1517,14 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   if (rule === 'sum_children' && isNumeric) {
                     const agg = computeSum(row, colRecId)
                     return (
-                      <td key={colRecId} onClick={cellClick} style={{
-                        border: focusBorder, padding: '4px 6px',
-                        textAlign: 'right', color: '#666', background: selBg || '#fff', fontSize: 13,
-                      }}>
-                        {agg !== null ? fmtDisplay(String(agg), rowDt) : ''}
-                      </td>
+                      <Tooltip key={colRecId} title="Σ сумма дочерних" enterDelay={200} arrow placement="top">
+                        <td onClick={cellClick} style={{
+                          border: focusBorder, padding: '4px 6px',
+                          textAlign: 'right', color: '#666', background: selBg || '#fff', fontSize: 13,
+                        }}>
+                          {agg !== null ? fmtDisplay(String(agg), rowDt) : ''}
+                        </td>
+                      </Tooltip>
                     )
                   }
 

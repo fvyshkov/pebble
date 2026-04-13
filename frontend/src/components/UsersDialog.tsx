@@ -54,6 +54,9 @@ export default function UsersDialog({ open, onClose }: Props) {
     })
   }, [selectedId])
 
+  const [pwDialogOpen, setPwDialogOpen] = useState(false)
+  const [newPassword, setNewPassword] = useState('')
+
   useEffect(() => {
     if (!selectedId) return
     const u = users.find(x => x.id === selectedId)
@@ -93,9 +96,6 @@ export default function UsersDialog({ open, onClose }: Props) {
     await api.setAdmin(selectedId, val)
     loadUsers()
   }
-
-  const [pwDialogOpen, setPwDialogOpen] = useState(false)
-  const [newPassword, setNewPassword] = useState('')
 
   const handleResetPassword = async () => {
     if (!selectedId || !newPassword) return

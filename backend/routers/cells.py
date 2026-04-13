@@ -1,5 +1,8 @@
 import uuid
+import json
+import asyncio
 from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from backend.db import get_db
 
@@ -88,6 +91,38 @@ async def get_cells(sheet_id: str, user_id: str | None = Query(None)):
     return [dict(r) for r in rows if _coord_allowed(r["coord_key"], restrictions, order)]
 
 
+class PartialCellsIn(BaseModel):
+    coord_keys: list[str]
+
+
+@router.post("/by-sheet/{sheet_id}/partial")
+async def get_cells_partial(sheet_id: str, body: PartialCellsIn, user_id: str | None = Query(None)):
+    """Return cells only for the requested coord_keys (lazy loading)."""
+    db = get_db()
+    if not body.coord_keys:
+        return []
+    # Fetch in batches of 500 using IN clause
+    results = []
+    keys = body.coord_keys
+    for i in range(0, len(keys), 500):
+        batch = keys[i:i+500]
+        placeholders = ",".join("?" for _ in batch)
+        rows = await db.execute_fetchall(
+            f"SELECT * FROM cell_data WHERE sheet_id = ? AND coord_key IN ({placeholders})",
+            (sheet_id, *batch),
+        )
+        results.extend(rows)
+
+    restrictions = await _get_allowed_records(db, user_id, sheet_id)
+    if not restrictions:
+        return [dict(r) for r in results]
+
+    order = [b["analytic_id"] for b in await db.execute_fetchall(
+        "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
+    )]
+    return [dict(r) for r in results if _coord_allowed(r["coord_key"], restrictions, order)]
+
+
 async def _save_cell(db, sheet_id: str, cell: CellIn):
     existing = await db.execute_fetchall(
         "SELECT id, value FROM cell_data WHERE sheet_id = ? AND coord_key = ?",
@@ -143,7 +178,7 @@ async def _recalc_model(db, sheet_id: str) -> int:
 
 
 @router.put("/by-sheet/{sheet_id}")
-async def save_cells(sheet_id: str, body: BulkCellsIn):
+async def save_cells(sheet_id: str, body: BulkCellsIn, no_recalc: bool = Query(False)):
     db = get_db()
     # Check edit permissions if user_id provided
     user_id = body.cells[0].user_id if body.cells else None
@@ -157,7 +192,9 @@ async def save_cells(sheet_id: str, body: BulkCellsIn):
                 return {"error": f"No edit permission for {cell.coord_key}"}
     for cell in body.cells:
         await _save_cell(db, sheet_id, cell)
-    computed = await _recalc_model(db, sheet_id)
+    computed = 0
+    if not no_recalc:
+        computed = await _recalc_model(db, sheet_id)
     await db.commit()
     return {"ok": True, "computed": computed}
 
@@ -185,6 +222,36 @@ async def calculate(sheet_id: str):
     computed = await _recalc_model(db, sheet_id)
     await db.commit()
     return {"computed": computed}
+
+
+@router.post("/calculate-model/{model_id}/stream")
+async def calculate_model_stream(model_id: str):
+    """Recalculate all formula cells with SSE streaming progress."""
+    from backend.formula_engine import calculate_model
+
+    async def event_stream():
+        db = get_db()
+        sheets = await db.execute_fetchall(
+            "SELECT id, name FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,))
+        total_sheets = len(sheets)
+        yield f"data: {json.dumps({'phase': 'start', 'total_sheets': total_sheets})}\n\n"
+
+        result = await calculate_model(db, model_id)
+        total = 0
+        done_sheets = 0
+        for sid, changes in result.items():
+            for ck, val in changes.items():
+                await db.execute("UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?", (val, sid, ck))
+            total += len(changes)
+            done_sheets += 1
+            sheet_name = next((s["name"] for s in sheets if s["id"] == sid), sid)
+            yield f"data: {json.dumps({'phase': 'sheet_done', 'sheet': sheet_name, 'done': done_sheets, 'total_sheets': total_sheets, 'computed': total})}\n\n"
+            await asyncio.sleep(0)  # yield control
+
+        await db.commit()
+        yield f"data: {json.dumps({'phase': 'done', 'computed': total})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.get("/history/{sheet_id}/{coord_key}")

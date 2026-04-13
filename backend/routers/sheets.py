@@ -9,6 +9,7 @@ router = APIRouter(prefix="/api/sheets", tags=["sheets"])
 class SheetIn(BaseModel):
     model_id: str | None = None
     name: str = ""
+    excel_code: str = ""
 
 
 class SheetAnalyticIn(BaseModel):
@@ -50,8 +51,8 @@ async def create_sheet(body: SheetIn):
     db = get_db()
     sid = str(uuid.uuid4())
     await db.execute(
-        "INSERT INTO sheets (id, model_id, name) VALUES (?, ?, ?)",
-        (sid, body.model_id, body.name),
+        "INSERT INTO sheets (id, model_id, name, excel_code) VALUES (?, ?, ?, ?)",
+        (sid, body.model_id, body.name, body.excel_code),
     )
     # Auto-grant permissions to all existing users
     users = await db.execute_fetchall("SELECT id FROM users")
@@ -69,10 +70,13 @@ async def create_sheet(body: SheetIn):
 @router.put("/{sheet_id}")
 async def update_sheet(sheet_id: str, body: SheetIn):
     db = get_db()
-    await db.execute(
-        "UPDATE sheets SET name=?, updated_at=datetime('now') WHERE id=?",
-        (body.name, sheet_id),
-    )
+    fields = ["name=?", "updated_at=datetime('now')"]
+    params: list = [body.name]
+    if body.excel_code:
+        fields.append("excel_code=?")
+        params.append(body.excel_code)
+    params.append(sheet_id)
+    await db.execute(f"UPDATE sheets SET {', '.join(fields)} WHERE id=?", params)
     await db.commit()
     row = await db.execute_fetchall("SELECT * FROM sheets WHERE id = ?", (sheet_id,))
     return dict(row[0])
