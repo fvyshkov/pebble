@@ -198,3 +198,67 @@ async def get_cell_history(sheet_id: str, coord_key: str):
         (sheet_id, coord_key),
     )
     return [dict(r) for r in rows]
+
+
+@router.get("/history/model/{model_id}")
+async def get_model_history(model_id: str, limit: int = 10):
+    """Recent changes across all sheets in a model."""
+    db = get_db()
+    rows = await db.execute_fetchall(
+        """SELECT h.id, h.sheet_id, h.coord_key, h.old_value, h.new_value, h.created_at,
+                  s.name as sheet_name, u.username
+           FROM cell_history h
+           JOIN sheets s ON s.id = h.sheet_id AND s.model_id = ?
+           LEFT JOIN users u ON u.id = h.user_id
+           ORDER BY h.created_at DESC LIMIT ?""",
+        (model_id, limit),
+    )
+    return [dict(r) for r in rows]
+
+
+class UndoIn(BaseModel):
+    history_id: str  # undo up to and including this history entry
+
+
+@router.post("/undo/{model_id}")
+async def undo(model_id: str, body: UndoIn):
+    """Undo changes from most recent back to history_id (inclusive)."""
+    db = get_db()
+    # Get all history entries from newest to the target
+    rows = await db.execute_fetchall(
+        """SELECT h.id, h.sheet_id, h.coord_key, h.old_value, h.created_at
+           FROM cell_history h
+           JOIN sheets s ON s.id = h.sheet_id AND s.model_id = ?
+           WHERE h.created_at >= (SELECT created_at FROM cell_history WHERE id = ?)
+           ORDER BY h.created_at DESC""",
+        (model_id, body.history_id),
+    )
+    if not rows:
+        return {"error": "History entry not found"}
+
+    undone = 0
+    for r in rows:
+        await db.execute(
+            "UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?",
+            (r["old_value"], r["sheet_id"], r["coord_key"]),
+        )
+        await db.execute("DELETE FROM cell_history WHERE id = ?", (r["id"],))
+        undone += 1
+
+    # Recalc
+    sheet_id = rows[0]["sheet_id"]
+    computed = await _recalc_model(db, sheet_id)
+    await db.commit()
+    return {"undone": undone, "computed": computed}
+
+
+@router.delete("/history/model/{model_id}")
+async def clear_history(model_id: str):
+    """Clear all history for a model."""
+    db = get_db()
+    await db.execute(
+        "DELETE FROM cell_history WHERE sheet_id IN (SELECT id FROM sheets WHERE model_id = ?)",
+        (model_id,),
+    )
+    await db.commit()
+    return {"ok": True}

@@ -8,6 +8,7 @@ import FormatListNumberedOutlined from '@mui/icons-material/FormatListNumberedOu
 import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import CalculateOutlined from '@mui/icons-material/CalculateOutlined'
+import UndoOutlined from '@mui/icons-material/UndoOutlined'
 import DragIndicatorOutlined from '@mui/icons-material/DragIndicatorOutlined'
 import PushPinOutlined from '@mui/icons-material/PushPinOutlined'
 import * as Icons from '@mui/icons-material'
@@ -274,6 +275,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const gridRef = useRef<HTMLTableElement>(null)
   const [colWidths, setColWidths] = useState<Record<number, number>>({})
   const [firstColWidth, setFirstColWidth] = useState(500)
+  const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null)
+  const [historyItems, setHistoryItems] = useState<any[]>([])
   const resizingCol = useRef<{ idx: number; startX: number; startW: number } | null>(null)
   const gridBoxRef = useRef<HTMLDivElement>(null)
   // Auto-focus grid on mount
@@ -958,6 +961,54 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
             <CalculateOutlined fontSize="small" />
           </IconButton>
         </Tooltip>
+
+        {/* Undo with history dropdown */}
+        <Box sx={{ display: 'inline-flex', alignItems: 'center' }}>
+          <Tooltip title="Отменить последнее изменение">
+            <IconButton size="small" onClick={async () => {
+              const hist = await api.getModelHistory(modelId, 1)
+              if (hist.length > 0) {
+                await api.undoChanges(modelId, hist[0].id)
+                reloadCells()
+              }
+            }}>
+              <UndoOutlined fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="История изменений">
+            <IconButton size="small" onClick={async e => {
+              const hist = await api.getModelHistory(modelId, 10)
+              setHistoryAnchor(e.currentTarget)
+              setHistoryItems(hist)
+            }} sx={{ ml: -0.5, p: 0.25 }}>
+              <Icons.ArrowDropDownOutlined sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+        <Popover
+          open={!!historyAnchor} anchorEl={historyAnchor}
+          onClose={() => setHistoryAnchor(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+        >
+          <Box sx={{ p: 1, minWidth: 300, maxHeight: 300, overflow: 'auto', fontSize: 12 }}>
+            <Typography sx={{ fontWeight: 600, fontSize: 12, mb: 0.5 }}>История (отменить до выбранного)</Typography>
+            {historyItems.length === 0 && <Typography sx={{ color: '#999', fontSize: 12 }}>Нет изменений</Typography>}
+            {historyItems.map((h, i) => (
+              <Box key={h.id} sx={{ display: 'flex', gap: 1, py: 0.5, px: 0.5, cursor: 'pointer', '&:hover': { bgcolor: '#f5f5f5' }, borderRadius: 1 }}
+                onClick={async () => {
+                  await api.undoChanges(modelId, h.id)
+                  setHistoryAnchor(null)
+                  reloadCells()
+                }}>
+                <Box sx={{ color: '#999', minWidth: 40 }}>{h.created_at?.slice(11, 19)}</Box>
+                <Box sx={{ flex: 1 }}>
+                  <Box>{h.sheet_name} · {h.coord_key?.split('|').pop()?.slice(0, 8)}</Box>
+                  <Box sx={{ color: '#999' }}>{h.old_value} → {h.new_value} {h.username ? `(${h.username})` : ''}</Box>
+                </Box>
+              </Box>
+            ))}
+          </Box>
+        </Popover>
 
         {/* Column level toggles */}
         {colLevelNames.length > 0 && colLevelNames.map(({ level, label }) => (
