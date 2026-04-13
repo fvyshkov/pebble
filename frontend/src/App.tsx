@@ -12,7 +12,9 @@ import TableChartOutlined from '@mui/icons-material/TableChartOutlined'
 import FunctionsOutlined from '@mui/icons-material/FunctionsOutlined'
 import PeopleOutlined from '@mui/icons-material/PeopleOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
+import LogoutOutlined from '@mui/icons-material/LogoutOutlined'
 import type { TreeSelection } from './types'
+import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
 import CenterPanel from './panels/CenterPanel'
 import Splitter from './components/Splitter'
@@ -186,7 +188,7 @@ function ImportDialog({ open, onClose, onImported }: {
   )
 }
 
-function AppInner() {
+function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: string; can_admin: boolean }; onLogout?: () => void }) {
   const [mode, setMode] = useState<AppMode>('settings')
   const [selection, setSelection] = useState<TreeSelection | null>(null)
   const [leftWidth, setLeftWidth] = useState(280)
@@ -196,13 +198,15 @@ function AppInner() {
   const [showImport, setShowImport] = useState(false)
   const [expandAfterCreate, setExpandAfterCreate] = useState<any>(null)
   const [users, setUsers] = useState<any[]>([])
-  const [currentUserId, setCurrentUserId] = useState('')
+  const [currentUserId, setCurrentUserId] = useState(authUser?.id || '')
 
   useEffect(() => {
     api.listUsers().then(u => {
       setUsers(u)
-      if (u.length > 0) {
-        // Set first user if current is empty or no longer exists
+      // If authUser exists, use it; otherwise first user
+      if (authUser) {
+        setCurrentUserId(authUser.id)
+      } else if (u.length > 0) {
         const ids = new Set(u.map((x: any) => x.id))
         setCurrentUserId(prev => (prev && ids.has(prev)) ? prev : u[0].id)
       }
@@ -303,11 +307,24 @@ function AppInner() {
             </FormControl>
           )}
 
-          <Tooltip title="Пользователи">
-            <IconButton size="small" onClick={() => setShowUsers(true)}>
-              <PeopleOutlined fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          {isAdmin && (
+            <Tooltip title="Пользователи">
+              <IconButton size="small" onClick={() => setShowUsers(true)}>
+                <PeopleOutlined fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
+
+          {authUser && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 1 }}>
+              <Typography sx={{ fontSize: 13, color: '#555' }}>{authUser.username}</Typography>
+              <Tooltip title="Выйти">
+                <IconButton size="small" onClick={onLogout}>
+                  <LogoutOutlined fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
         </div>
 
         <div className="app-body">
@@ -346,4 +363,21 @@ function AppInner() {
   )
 }
 
-export default function App() { return <AppInner /> }
+export default function App() {
+  const [auth, setAuth] = useState<{ token: string; user: { id: string; username: string; can_admin: boolean } } | null>(() => {
+    const token = localStorage.getItem('pebble_token')
+    const user = localStorage.getItem('pebble_user')
+    if (token && user) return { token, user: JSON.parse(user) }
+    return null
+  })
+
+  if (!auth) {
+    return <LoginPage onLogin={(token, user) => setAuth({ token, user })} />
+  }
+
+  return <AppInner authUser={auth.user} onLogout={() => {
+    localStorage.removeItem('pebble_token')
+    localStorage.removeItem('pebble_user')
+    setAuth(null)
+  }} />
+}
