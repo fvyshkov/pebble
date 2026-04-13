@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   Box, Typography, IconButton, TextField, Tooltip, Checkbox,
   FormControlLabel, Switch, Divider,
+  Dialog, DialogTitle, DialogContent, DialogActions, Button,
 } from '@mui/material'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
@@ -93,12 +94,14 @@ export default function UsersDialog({ open, onClose }: Props) {
     loadUsers()
   }
 
+  const [pwDialogOpen, setPwDialogOpen] = useState(false)
+  const [newPassword, setNewPassword] = useState('')
+
   const handleResetPassword = async () => {
-    if (!selectedId) return
-    const pw = prompt('Новый пароль:')
-    if (!pw) return
-    await api.resetPassword(selectedId, pw)
-    alert('Пароль изменён')
+    if (!selectedId || !newPassword) return
+    await api.resetPassword(selectedId, newPassword)
+    setPwDialogOpen(false)
+    setNewPassword('')
   }
 
   const handleSheetPerm = async (sheetId: string, field: 'can_view' | 'can_edit', value: boolean) => {
@@ -156,7 +159,7 @@ export default function UsersDialog({ open, onClose }: Props) {
     return on > 0 && on < allItems.length
   }
 
-  return (
+  return (<>
     <Box sx={{ position: 'fixed', inset: 0, zIndex: 1300, bgcolor: '#fff', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
       <Box sx={{ display: 'flex', alignItems: 'center', px: 2, py: 1, borderBottom: '1px solid #e0e0e0' }}>
@@ -209,8 +212,8 @@ export default function UsersDialog({ open, onClose }: Props) {
                 control={<Switch checked={isAdmin} onChange={e => handleToggleAdmin(e.target.checked)} size="small" />}
                 label="Админ"
               />
-              <Tooltip title="Сбросить пароль">
-                <IconButton size="small" onClick={handleResetPassword}>
+              <Tooltip title="Сменить пароль">
+                <IconButton size="small" onClick={() => { setNewPassword(''); setPwDialogOpen(true) }}>
                   <KeyOutlined fontSize="small" />
                 </IconButton>
               </Tooltip>
@@ -435,5 +438,21 @@ export default function UsersDialog({ open, onClose }: Props) {
         )}
       </Box>
     </Box>
-  )
+
+    <Dialog open={pwDialogOpen} onClose={() => setPwDialogOpen(false)} maxWidth="xs" fullWidth>
+      <DialogTitle>Сменить пароль</DialogTitle>
+      <DialogContent>
+        <TextField
+          label="Новый пароль" fullWidth type="password"
+          value={newPassword} onChange={e => setNewPassword(e.target.value)}
+          autoComplete="new-password" name="new-password"
+          sx={{ mt: 1 }} autoFocus
+        />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setPwDialogOpen(false)}>Отмена</Button>
+        <Button variant="contained" disabled={!newPassword} onClick={handleResetPassword}>Сохранить</Button>
+      </DialogActions>
+    </Dialog>
+  </>)
 }

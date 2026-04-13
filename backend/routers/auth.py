@@ -1,8 +1,20 @@
 """Authentication endpoints."""
+import bcrypt
 from fastapi import APIRouter
 from pydantic import BaseModel
 from backend.db import get_db
 from backend.auth import create_token
+
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+
+
+def check_password(plain: str, hashed: str) -> bool:
+    # Support both bcrypt hashes and legacy plain-text passwords
+    if hashed.startswith("$2"):
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
+    return plain == hashed  # legacy: plain-text match
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -21,7 +33,7 @@ async def login(body: LoginIn):
     )
     if not user:
         return {"error": "Неверный логин или пароль"}
-    if user[0]["password"] != body.password:
+    if not check_password(body.password, user[0]["password"]):
         return {"error": "Неверный логин или пароль"}
 
     token = create_token(user[0]["id"], user[0]["username"])

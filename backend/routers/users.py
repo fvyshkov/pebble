@@ -20,11 +20,12 @@ async def list_users():
 @router.post("")
 async def create_user(body: UserIn):
     db = get_db()
+    from backend.routers.auth import hash_password
     uid = str(uuid.uuid4())
     # Default password = username
     await db.execute(
         "INSERT INTO users (id, username, password) VALUES (?, ?, ?)",
-        (uid, body.username, body.username),
+        (uid, body.username, hash_password(body.username)),
     )
     # Grant access to all existing sheets
     sheets = await db.execute_fetchall("SELECT id FROM sheets")
@@ -49,6 +50,8 @@ async def update_user(user_id: str, body: UserIn):
 @router.delete("/{user_id}")
 async def delete_user(user_id: str):
     db = get_db()
+    await db.execute("DELETE FROM analytic_record_permissions WHERE user_id = ?", (user_id,))
+    await db.execute("DELETE FROM sheet_permissions WHERE user_id = ?", (user_id,))
     await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     await db.commit()
     return {"ok": True}
@@ -76,7 +79,8 @@ async def reset_password(user_id: str, body: PasswordIn):
     rows = await db.execute_fetchall("SELECT id FROM users WHERE id = ?", (user_id,))
     if not rows:
         return {"error": "not found"}
-    await db.execute("UPDATE users SET password = ? WHERE id = ?", (body.password, user_id))
+    from backend.routers.auth import hash_password
+    await db.execute("UPDATE users SET password = ? WHERE id = ?", (hash_password(body.password), user_id))
     await db.commit()
     return {"ok": True}
 
