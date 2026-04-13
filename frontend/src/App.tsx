@@ -292,8 +292,8 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
 
           <div style={{ flex: 1 }} />
 
-          {/* User selector — right aligned */}
-          {users.length > 0 && (
+          {/* User selector — admin only, for testing as different user */}
+          {isAdmin && users.length > 1 && (
             <FormControl size="small" sx={{ minWidth: 120 }}>
               <Select
                 value={currentUserId}
