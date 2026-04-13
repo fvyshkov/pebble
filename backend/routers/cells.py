@@ -200,20 +200,38 @@ async def get_cell_history(sheet_id: str, coord_key: str):
     return [dict(r) for r in rows]
 
 
-@router.get("/history/model/{model_id}")
+@router.get("/model-history/{model_id}")
 async def get_model_history(model_id: str, limit: int = 10):
     """Recent changes across all sheets in a model."""
     db = get_db()
-    rows = await db.execute_fetchall(
-        """SELECT h.id, h.sheet_id, h.coord_key, h.old_value, h.new_value, h.created_at,
-                  s.name as sheet_name, u.username
-           FROM cell_history h
-           JOIN sheets s ON s.id = h.sheet_id AND s.model_id = ?
-           LEFT JOIN users u ON u.id = h.user_id
-           ORDER BY h.created_at DESC LIMIT ?""",
-        (model_id, limit),
-    )
-    return [dict(r) for r in rows]
+    # Two-step: get sheet IDs, then filter history
+    sheet_rows = await db.execute_fetchall(
+        "SELECT id, name FROM sheets WHERE model_id = ?", (model_id,))
+    if not sheet_rows:
+        return []
+    sheet_names = {r["id"]: r["name"] for r in sheet_rows}
+
+    # Get ALL recent history and filter in Python
+    # Fetch history for each sheet individually (workaround for aiosqlite query issues)
+    rows = []
+    for sid in sheet_names:
+        sheet_rows = await db.execute_fetchall(
+            """SELECT h.*, u.username FROM cell_history h
+               LEFT JOIN users u ON u.id = h.user_id
+               WHERE h.sheet_id = ?
+               ORDER BY h.created_at DESC LIMIT ?""",
+            (sid, limit),
+        )
+        rows.extend(sheet_rows)
+    result = []
+    for r in rows:
+        if r["sheet_id"] in sheet_names:
+            d = dict(r)
+            d["sheet_name"] = sheet_names[r["sheet_id"]]
+            result.append(d)
+            if len(result) >= limit:
+                break
+    return result
 
 
 class UndoIn(BaseModel):
@@ -252,7 +270,7 @@ async def undo(model_id: str, body: UndoIn):
     return {"undone": undone, "computed": computed}
 
 
-@router.delete("/history/model/{model_id}")
+@router.delete("/model-history/{model_id}")
 async def clear_history(model_id: str):
     """Clear all history for a model."""
     db = get_db()
