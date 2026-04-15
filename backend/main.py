@@ -1,6 +1,10 @@
+import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from backend.db import init_db, close_db
 from backend.routers import models, analytics, sheets, cells, excel_io, users, import_excel, auth
 
@@ -34,3 +38,17 @@ app.include_router(auth.router)
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+# Serve frontend static files (production build)
+_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _dist.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_dist / "assets")), name="static")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # Try static file first, fallback to index.html (SPA routing)
+        file = _dist / full_path
+        if file.is_file():
+            return FileResponse(str(file))
+        return FileResponse(str(_dist / "index.html"))

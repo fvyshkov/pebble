@@ -281,6 +281,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [calcMode, setCalcMode] = useState<'auto' | 'manual'>('manual')
   const [calcProgress, setCalcProgress] = useState<{ running: boolean; done: number; total: number; sheet?: string } | null>(null)
   const [loadedCoordKeys, setLoadedCoordKeys] = useState<Set<string>>(new Set())
+  const [allowedRecords, setAllowedRecords] = useState<Record<string, string[]>>({})
+  const [autoPinnedIds, setAutoPinnedIds] = useState<Set<string>>(new Set())
 
   // Check if there's any undo history
   const refreshHistory = useCallback(() => {
@@ -290,6 +292,21 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const gridBoxRef = useRef<HTMLDivElement>(null)
   // Auto-focus grid on mount
   useEffect(() => { if (!loading) gridBoxRef.current?.focus() }, [loading])
+  // Arrow keys always focus grid (even if focus is elsewhere)
+  useEffect(() => {
+    if (loading) return
+    const handler = (e: KeyboardEvent) => {
+      if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        const tag = (e.target as HTMLElement)?.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+        if (document.activeElement !== gridBoxRef.current) {
+          gridBoxRef.current?.focus()
+        }
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [loading])
 
   // Helper: compute coord keys for a set of rows × column leaves
   const computeCoordKeysForRows = useCallback((
@@ -382,37 +399,54 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       if (vs.pinned) { curPinned = vs.pinned; setPinned(vs.pinned) }
       if (vs.colWidths) setColWidths(vs.colWidths)
       if (vs.firstColWidth) setFirstColWidth(vs.firstColWidth)
-      if (vs.collapsedRows) savedCollapsed = new Set(vs.collapsedRows)
+      // collapsedRows no longer restored — always start fully collapsed
       if (vs.calcMode) setCalcMode(vs.calcMode)
     } catch {
       setOrder(defaultOrder)
       setColLevelToggles({ 0: true, 1: true, 2: true, 3: true })
     }
 
-    // Default: collapse all top-level rows (first analytic's root records)
+    // Auto-pin analytics where user has access to only 1 record (during load, before rows build)
+    const autoPin = new Set<string>()
+    if (currentUserId) {
+      try {
+        const allowed = await api.getAllowedRecords(currentUserId, sheetId)
+        if (allowed && Object.keys(allowed).length > 0) {
+          setAllowedRecords(allowed)
+          for (const [aId, recordIds] of Object.entries(allowed)) {
+            if (recordIds.length === 1) {
+              curPinned[aId] = recordIds[0]
+              autoPin.add(aId)
+            }
+          }
+          setPinned(prev => ({ ...prev, ...curPinned }))
+          setAutoPinnedIds(autoPin)
+        }
+      } catch {}
+    }
+
+    // Always start fully collapsed — collapse every node that has children or sub-analytics
     const colAId = curOrder[0]
     const rowAIds = curOrder.slice(1).filter(id => !curPinned[id] || (findNodeById(rMap[id] || [], curPinned[id])?.children.length ?? 0) > 0)
-    if (savedCollapsed === null && rowAIds.length > 0) {
-      // Collapse all root nodes of the first row analytic
+    const allCollapsed = new Set<string>()
+    if (rowAIds.length > 0) {
       const firstRowAId = rowAIds[0]
       const rootNodes = rMap[firstRowAId] || []
-      const allCollapsed = new Set<string>()
-      for (const n of rootNodes) {
-        if (n.children.length > 0) allCollapsed.add(n.record.id)
-      }
-      // Also collapse leaf nodes that have sub-analytics
-      if (rowAIds.length > 1) {
-        const walk = (nodes: RecordNode[]) => {
-          for (const n of nodes) {
-            if (n.children.length === 0) allCollapsed.add(n.record.id)
-            else walk(n.children)
+      // Collapse all nodes that have children
+      const walkCollapse = (nodes: RecordNode[]) => {
+        for (const n of nodes) {
+          if (n.children.length > 0) {
+            allCollapsed.add(n.record.id)
+            walkCollapse(n.children)
+          } else if (rowAIds.length > 1) {
+            // Leaf in first analytic but has sub-analytics — also collapse
+            allCollapsed.add(n.record.id)
           }
         }
-        walk(rootNodes)
       }
-      savedCollapsed = allCollapsed
+      walkCollapse(rootNodes)
     }
-    const collapsedSet = savedCollapsed || new Set<string>()
+    const collapsedSet = allCollapsed
     setCollapsedRows(collapsedSet)
 
     // Compute top-level visible rows to determine which cells to fetch
@@ -488,20 +522,28 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     })
   }, [currentUserId, sheetId])
 
-  // Auto-pin analytics where user has access to only 1 record
+  // Auto-pin analytics where user has access to only 1 record + save allowed records for filtering
   useEffect(() => {
     if (!currentUserId) return
     api.getAllowedRecords(currentUserId, sheetId).then(allowed => {
-      if (!allowed || Object.keys(allowed).length === 0) return
+      if (!allowed || Object.keys(allowed).length === 0) {
+        setAllowedRecords({})
+        setAutoPinnedIds(new Set())
+        return
+      }
+      setAllowedRecords(allowed)
+      const autoPin = new Set<string>()
       setPinned(prev => {
         const next = { ...prev }
         for (const [aId, recordIds] of Object.entries(allowed)) {
           if (recordIds.length === 1) {
             next[aId] = recordIds[0]
+            autoPin.add(aId)
           }
         }
         return next
       })
+      setAutoPinnedIds(autoPin)
     })
   }, [currentUserId, sheetId])
 
@@ -644,13 +686,24 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   // Build filtered record trees for pinned group analytics
   const filteredRecordsByAnalytic = useMemo(() => {
     const result: Record<string, RecordNode[]> = { ...recordsByAnalytic }
+    // Filter by pinned groups
     for (const aId of pinnedGroupIds) {
       const tree = recordsByAnalytic[aId] || []
       const node = findNodeById(tree, pinned[aId])
-      if (node) result[aId] = [node] // Only show this node and its children
+      if (node) result[aId] = [node]
+    }
+    // Filter by allowed records (permission-based)
+    for (const [aId, allowedIds] of Object.entries(allowedRecords)) {
+      if (!result[aId]) continue
+      const allowed = new Set(allowedIds)
+      const filterTree = (nodes: RecordNode[]): RecordNode[] =>
+        nodes.filter(n => allowed.has(n.record.id)).map(n => ({
+          ...n, children: filterTree(n.children),
+        }))
+      result[aId] = filterTree(result[aId])
     }
     return result
-  }, [recordsByAnalytic, pinnedGroupIds, pinned])
+  }, [recordsByAnalytic, pinnedGroupIds, pinned, allowedRecords])
 
   const hasPinnedGroup = pinnedGroupIds.size > 0
   const colTree = recordsByAnalytic[colAnalyticId] || []
@@ -1227,18 +1280,6 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           />
         ))}
 
-        {/* Pinned chips */}
-        {pinnedEntries.map(aId => {
-          const tree = recordsByAnalytic[aId] || []
-          const node = findNodeById(tree, pinned[aId])
-          return (
-            <Chip key={aId} size="small" icon={getIcon(aId) || undefined}
-              label={`${analyticNames[aId]}: ${node?.data.name || '?'}`}
-              onClick={e => { setPickerAnchor(e.currentTarget); setPickerAnalyticId(aId) }}
-              onDelete={() => handleUnpin(aId)} sx={{ fontSize: 12 }} />
-          )
-        })}
-
         <Box sx={{ flex: 1, display: 'flex', justifyContent: 'center', minWidth: 0 }}>
           <Typography noWrap sx={{ fontSize: 13, color: '#555' }}>
             {modelName}{modelName && sheetName ? ' → ' : ''}{sheetName}
@@ -1247,6 +1288,22 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
 
         {!canEdit && <Chip size="small" label="только чтение" sx={{ fontSize: 11, bgcolor: '#fff5f5', color: '#c62828' }} />}
       </Box>
+
+      {/* ─── Pinned chips row ─── */}
+      {pinnedEntries.length > 0 && (
+        <Box sx={{ display: 'flex', alignItems: 'center', px: 1, py: 0.5, borderBottom: '1px solid #f0f0f0', gap: 0.5, flexWrap: 'wrap', minHeight: 28 }}>
+          {pinnedEntries.map(aId => {
+            const tree = recordsByAnalytic[aId] || []
+            const node = findNodeById(tree, pinned[aId])
+            return (
+              <Chip key={aId} size="small" icon={getIcon(aId) || undefined}
+                label={`${analyticNames[aId]}: ${node?.data.name || '?'}`}
+                onClick={e => { setPickerAnchor(e.currentTarget); setPickerAnalyticId(aId) }}
+                onDelete={() => handleUnpin(aId)} sx={{ fontSize: 12 }} />
+            )
+          })}
+        </Box>
+      )}
 
       {/* ─── Calc progress bar ─── */}
       {calcProgress?.running && (
@@ -1284,10 +1341,35 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           switch (e.key) {
             case 'ArrowDown': e.preventDefault(); moveWithSelection(Math.min(fr + 1, totalRows - 1), fc); break
             case 'ArrowUp': e.preventDefault(); moveWithSelection(Math.max(fr - 1, 0), fc); break
-            case 'ArrowRight': e.preventDefault(); moveWithSelection(fr, Math.min(fc + 1, totalCols - 1)); break
-            case 'ArrowLeft': e.preventDefault(); moveWithSelection(fr, Math.max(fc - 1, 0)); break
+            case 'ArrowRight':
+              e.preventDefault()
+              if ((e.metaKey || e.ctrlKey) && visibleRows[fr]?.canCollapse && visibleRows[fr]?.ownRecordId && collapsedRows.has(visibleRows[fr].ownRecordId!)) {
+                toggleRowCollapse(visibleRows[fr].ownRecordId!)
+              } else if (!e.metaKey && !e.ctrlKey) {
+                moveWithSelection(fr, Math.min(fc + 1, totalCols - 1))
+              }
+              break
+            case 'ArrowLeft':
+              e.preventDefault()
+              if ((e.metaKey || e.ctrlKey) && visibleRows[fr]?.canCollapse && visibleRows[fr]?.ownRecordId && !collapsedRows.has(visibleRows[fr].ownRecordId!)) {
+                toggleRowCollapse(visibleRows[fr].ownRecordId!)
+              } else if (!e.metaKey && !e.ctrlKey) {
+                moveWithSelection(fr, Math.max(fc - 1, 0))
+              }
+              break
             case 'Tab': e.preventDefault(); setSelAnchor(null); if (shift) { if (fc > 0) setFocusCell([fr, fc - 1]); else if (fr > 0) setFocusCell([fr - 1, totalCols - 1]) } else { if (fc < totalCols - 1) setFocusCell([fr, fc + 1]); else if (fr < totalRows - 1) setFocusCell([fr + 1, 0]) } break
-            case 'Enter': e.preventDefault(); setEditingCell(true); break
+            case 'Enter': {
+              e.preventDefault()
+              // Only enter edit mode for editable cells
+              const focusedRow = visibleRows[fr]
+              const focusedCol = displayCols[fc]
+              if (focusedRow && focusedCol && !focusedCol.isSum) {
+                const ck = makeCoordKey(focusedRow.recordIds, focusedCol.node.record.id)
+                const r = resolveRule(ck, focusedRow.isGroup)
+                if (r === 'manual') setEditingCell(true)
+              }
+              break
+            }
             case 'Escape': e.preventDefault(); setEditingCell(false); setSelAnchor(null); break
             case 'Delete': case 'Backspace': e.preventDefault(); handleDelete(); break
             case 'a':
@@ -1322,9 +1404,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
               <tr>
                 <th style={{
                   border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
-                  width: firstColWidth, minWidth: 80, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e',
+                  width: firstColWidth, minWidth: 80, textAlign: 'left', position: 'sticky', left: 0, zIndex: 2, borderRight: '2px solid #bdbdbd',
                 }}>
-                  {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
                 </th>
                 {displayCols.map((dc, ci) => (
                   <th key={`${dc.node.record.id}-${dc.isSum ? 's' : 'l'}`} style={{
@@ -1346,9 +1427,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     <th rowSpan={headerRows.length} style={{
                       border: '1px solid #e0e0e0', padding: '4px 8px', background: '#f5f5f5',
                       width: firstColWidth, minWidth: 80, textAlign: 'left', verticalAlign: 'bottom',
-                      position: 'sticky', left: 0, zIndex: 2, boxShadow: '3px 0 0 0 #9e9e9e',
+                      position: 'sticky', left: 0, zIndex: 2, borderRight: '2px solid #bdbdbd',
                     }}>
-                      {rowAnalyticIds.map(id => analyticNames[id]).join(' / ') || '—'}
                     </th>
                   )}
                   {row.map(({ node, colspan, rowspan }) => (
@@ -1380,7 +1460,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     width: firstColWidth, minWidth: 80,
                     whiteSpace: 'normal', wordBreak: 'break-word', fontWeight: row.isGroup ? 600 : 400,
                     background: row.isGroup ? '#fafafa' : '#fff', fontSize: 12,
-                    position: 'sticky', left: 0, zIndex: 1, boxShadow: '3px 0 0 0 #9e9e9e',
+                    position: 'sticky', left: 0, zIndex: 1, borderRight: '2px solid #bdbdbd',
                     cursor: row.dragInfo ? 'grab' : 'default',
                   }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
@@ -1397,7 +1477,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                       <span style={{ width: 16, display: 'inline-block' }} />
                     )}
                     {row.analyticId && (() => { const ic = getIcon(row.analyticId); return ic ? <span style={{ display: 'inline-flex', opacity: 0.5 }}>{ic}</span> : null })()}
-                    {row.label || '—'}
+                    {row.label}
                   </span>
                 </td>
                 {displayCols.map((col, ci) => {
@@ -1415,8 +1495,18 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     setEditingCell(false)
                   }
 
-                  // For sum columns: always show aggregated value
+                  // For sum columns: show aggregated value (data mode) or label (settings mode)
                   if (col.isSum) {
+                    if (mode === 'settings') {
+                      return (
+                        <td key={`${col.node.record.id}-s`} onClick={cellClick} style={{
+                          border: focusBorder, padding: '4px 6px',
+                          textAlign: 'center', color: '#2e7d32', background: selBg || '#fafbfc', fontSize: 11,
+                        }}>
+                          сумма
+                        </td>
+                      )
+                    }
                     const rowCombos = getAllLeafRecordCombinations(row)
                     let sum = 0; let has = false
                     for (const combo of rowCombos) {

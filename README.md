@@ -2,6 +2,36 @@
 
 Mini-Anaplan: multidimensional planning with pivot tables.
 
+## Установка и запуск
+
+### 1. Установить Python 3.10+
+
+**Windows** (PowerShell):
+```powershell
+winget install Python.Python.3.12
+```
+
+**macOS:**
+```bash
+brew install python@3.12
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get install python3 python3-venv python3-pip
+```
+
+### 2. Запустить
+
+```bash
+python start.py
+```
+
+Скрипт автоматически:
+- создаст виртуальное окружение и установит Python-зависимости
+- установит Node.js (если нужно), соберёт фронтенд
+- запустит сервер и откроет браузер на http://localhost:8000
+
 ## Features
 
 - **Models** — containers for sheets and analytics
@@ -18,22 +48,6 @@ Mini-Anaplan: multidimensional planning with pivot tables.
 
 - **Backend**: Python, FastAPI, SQLite (aiosqlite), openpyxl
 - **Frontend**: React 18, TypeScript, Vite, Material UI 5
-
-## Running
-
-```bash
-# Backend
-cd backend
-pip install -r requirements.txt
-uvicorn backend.main:app --reload --port 8000
-
-# Frontend
-cd frontend
-npm install
-npm run dev
-```
-
-App: http://localhost:5173, API docs: http://localhost:8000/docs
 
 ## Testing
 

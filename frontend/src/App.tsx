@@ -292,21 +292,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
 
           <div style={{ flex: 1 }} />
 
-          {/* User selector — admin only, for testing as different user */}
-          {isAdmin && users.length > 1 && (
-            <FormControl size="small" sx={{ minWidth: 120 }}>
-              <Select
-                value={currentUserId}
-                onChange={e => setCurrentUserId(e.target.value)}
-                variant="standard"
-                disableUnderline
-                sx={{ fontSize: 12 }}
-              >
-                {users.map(u => <MenuItem key={u.id} value={u.id} sx={{ fontSize: 12 }}>{u.username}</MenuItem>)}
-              </Select>
-            </FormControl>
-          )}
-
           {isAdmin && (
             <Tooltip title="Пользователи">
               <IconButton size="small" onClick={() => setShowUsers(true)}>
