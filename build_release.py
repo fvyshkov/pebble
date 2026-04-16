@@ -24,6 +24,7 @@ INCLUDE = [
     "frontend/dist",
     "installer/install.ps1",
     "installer/Install.bat",
+    "Pebble.bat",
     "requirements.txt",
     "start.py",
     "start.bat",
@@ -102,7 +103,7 @@ def build_zip():
                         if not should_exclude(arcname):
                             zf.write(filepath, arcname)
 
-        # Add a top-level launcher that points into the pebble dir
+        # Add a top-level Install.bat that points into the pebble dir
         launcher = (
             '@echo off\r\n'
             'chcp 65001 >nul 2>&1\r\n'
@@ -110,26 +111,6 @@ def build_zip():
             'call Install.bat\r\n'
         )
         zf.writestr("Install.bat", launcher)
-
-        # Add Pebble.bat launcher at top level for post-install use
-        pebble_bat = (
-            '@echo off\r\n'
-            'chcp 65001 >nul 2>&1\r\n'
-            'title Pebble\r\n'
-            'cd /d "%~dp0pebble"\r\n'
-            'if not exist ".venv" (\r\n'
-            '    echo  First run — setting up...\r\n'
-            '    python -m venv .venv\r\n'
-            '    call .venv\\Scripts\\activate.bat\r\n'
-            '    pip install -q -r requirements.txt\r\n'
-            ') else (\r\n'
-            '    call .venv\\Scripts\\activate.bat\r\n'
-            ')\r\n'
-            'start http://localhost:8000\r\n'
-            'python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000\r\n'
-            'pause\r\n'
-        )
-        zf.writestr("Pebble.bat", pebble_bat)
 
     size_mb = os.path.getsize(OUTPUT) / (1024 * 1024)
     print(f"[build] Done! {OUTPUT} ({size_mb:.1f} MB)")

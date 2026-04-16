@@ -204,23 +204,6 @@ $shortcutPath = Join-Path $desktopPath "Pebble.lnk"
 
 $launcherBat = Join-Path $INSTALL_DIR "Pebble.bat"
 
-$batContent = @"
-@echo off
-chcp 65001 >nul 2>&1
-title Pebble
-cd /d "%~dp0"
-
-:: Kill previous instance if running
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000.*LISTENING"') do taskkill /F /PID %%a >nul 2>&1
-
-call .venv\Scripts\activate.bat
-pip install -q -r requirements.txt 2>nul
-start http://localhost:8000
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
-pause
-"@
-Set-Content -Path $launcherBat -Value $batContent -Encoding UTF8
-
 # Create shortcut via COM
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
