@@ -489,11 +489,10 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     }
     if (totalAnalytics > 0) buildLvl(0, {}, [])
 
-    const visRows = miniRows.filter(r => !r.ancestorRecordIds.some(aid => collapsedSet.has(aid)))
     const colLeaves = colAId ? getLeaves(rMap[colAId] || []) : []
 
-    // Fetch only visible cells
-    const coordKeys = computeCoordKeysForRows(visRows, colLeaves, dbOrd, colAId, curPinned)
+    // Fetch ALL cells (including collapsed children) so group sums display correctly
+    const coordKeys = computeCoordKeysForRows(miniRows, colLeaves, dbOrd, colAId, curPinned)
     const cellData = await api.getCellsPartial(sheetId, coordKeys, currentUserId)
     const cellMap: Record<string, string> = {}
     const ruleMap: Record<string, CellRule> = {}
