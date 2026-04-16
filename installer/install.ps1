@@ -120,19 +120,20 @@ if (-not $python) {
 
 # ── Kill old Pebble processes before updating ─────────────────────
 
-# Kill by port
+Write-Step "Stopping any running Pebble..."
+
+# Kill by port 8000
 $existingConn = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
 if ($existingConn) {
-    Write-Step "Stopping Pebble (port 8000)..."
     $existingConn | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
 }
 
-# Kill any python processes running from the Pebble install dir
-Get-Process python*, pip* -ErrorAction SilentlyContinue | Where-Object {
-    $_.Path -and $_.Path -like "*$INSTALL_DIR*"
-} | Stop-Process -Force -ErrorAction SilentlyContinue
+# Kill ALL python/pip processes (safest — user is updating Pebble anyway)
+& taskkill /F /IM python.exe 2>$null
+& taskkill /F /IM pythonw.exe 2>$null
+& taskkill /F /IM pip.exe 2>$null
 
-# Also kill cmd windows titled "Pebble"
+# Kill cmd windows titled "Pebble"
 Get-Process cmd -ErrorAction SilentlyContinue | Where-Object {
     $_.MainWindowTitle -eq "Pebble"
 } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -170,24 +171,19 @@ if ($DOWNLOAD_URL -match "YOUR-SERVER" -or $DOWNLOAD_URL -match "^$") {
     # Clean old installation completely
     if (Test-Path $INSTALL_DIR) {
         Write-Step "Removing old installation..."
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-                Remove-Item $INSTALL_DIR -Recurse -Force -ErrorAction Stop
-                break
-            } catch {
-                if ($attempt -lt 3) {
-                    Write-Host "    Retry $attempt... (files still locked)" -ForegroundColor Yellow
-                    # Kill anything that might hold files
-                    Get-Process python*, pip* -ErrorAction SilentlyContinue | Where-Object {
-                        $_.Path -and $_.Path -like "*Pebble*"
-                    } | Stop-Process -Force -ErrorAction SilentlyContinue
-                    Start-Sleep -Seconds 3
-                } else {
-                    Write-Err "Cannot remove old installation. Close all Pebble windows and try again."
-                    Read-Host "Press Enter to exit"
-                    exit 1
-                }
-            }
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            # Use cmd rmdir — more reliable than PowerShell Remove-Item for locked files
+            & cmd /c "rmdir /s /q `"$INSTALL_DIR`"" 2>$null
+            if (-not (Test-Path $INSTALL_DIR)) { break }
+
+            Write-Host "    Retry $attempt... (files still locked)" -ForegroundColor Yellow
+            & taskkill /F /IM python.exe 2>$null
+            & taskkill /F /IM pythonw.exe 2>$null
+            Start-Sleep -Seconds 3
+        }
+        if (Test-Path $INSTALL_DIR) {
+            Write-Err "Cannot remove old installation. Close all Pebble/Python windows and try again."
+            exit 1
         }
     }
 
