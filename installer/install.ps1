@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Pebble — one-click installer for Windows.
+    Pebble -one-click installer for Windows.
 
 .DESCRIPTION
     Downloads Pebble, installs Python if needed, creates desktop shortcut.
@@ -45,7 +45,7 @@ function Write-Err($msg) {
 
 Write-Host ""
 Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║       Pebble — Installation          ║" -ForegroundColor Cyan
+Write-Host "  ║       Pebble -Installation          ║" -ForegroundColor Cyan
 Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
@@ -153,7 +153,7 @@ if ($DOWNLOAD_URL -match "YOUR-SERVER" -or $DOWNLOAD_URL -match "^$") {
         if (Test-Path $INSTALL_DIR) { Remove-Item $INSTALL_DIR -Recurse -Force }
         Expand-Archive -Path $localZip -DestinationPath $INSTALL_DIR -Force
     } elseif (Test-Path (Join-Path $scriptDir "backend\main.py")) {
-        # We're inside the app directory already — install in-place
+        # We're inside the app directory already -install in-place
         Write-Step "App files found in current directory. Installing in-place..."
         $INSTALL_DIR = $scriptDir
     } else {
@@ -173,7 +173,7 @@ if ($DOWNLOAD_URL -match "YOUR-SERVER" -or $DOWNLOAD_URL -match "^$") {
     if (Test-Path $INSTALL_DIR) {
         Write-Step "Removing old installation..."
         for ($attempt = 1; $attempt -le 5; $attempt++) {
-            # Use cmd rmdir — more reliable than PowerShell Remove-Item for locked files
+            # Use cmd rmdir -more reliable than PowerShell Remove-Item for locked files
             & cmd /c "rmdir /s /q `"$INSTALL_DIR`"" 2>$null
             if (-not (Test-Path $INSTALL_DIR)) { break }
 
@@ -235,7 +235,7 @@ $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $launcherBat
 $shortcut.WorkingDirectory = $INSTALL_DIR
-$shortcut.Description = "Pebble — Financial Modeling"
+$shortcut.Description = "Pebble -Financial Modeling"
 $shortcut.WindowStyle = 7  # Minimized
 $shortcut.Save()
 
@@ -248,7 +248,7 @@ $startShortcut = Join-Path $startMenuDir "Pebble.lnk"
 $shortcut2 = $shell.CreateShortcut($startShortcut)
 $shortcut2.TargetPath = $launcherBat
 $shortcut2.WorkingDirectory = $INSTALL_DIR
-$shortcut2.Description = "Pebble — Financial Modeling"
+$shortcut2.Description = "Pebble -Financial Modeling"
 $shortcut2.WindowStyle = 7
 $shortcut2.Save()
 
