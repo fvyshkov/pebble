@@ -145,34 +145,24 @@ if ($DOWNLOAD_URL -match "YOUR-SERVER" -or $DOWNLOAD_URL -match "^$") {
     Invoke-WebRequest -Uri $DOWNLOAD_URL -OutFile $zipPath
 
     Write-Step "Extracting..."
+
+    # Clean old installation completely
+    if (Test-Path $INSTALL_DIR) {
+        Write-Step "Removing old installation..."
+        Remove-Item $INSTALL_DIR -Recurse -Force
+    }
+
+    # Extract to temp, then move inner 'pebble' folder to INSTALL_DIR
     $tempExtract = "$env:TEMP\pebble-extract"
     if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
     Expand-Archive -Path $zipPath -DestinationPath $tempExtract -Force
     Remove-Item $zipPath -ErrorAction SilentlyContinue
 
-    # The zip contains a 'pebble/' subfolder — move its contents to INSTALL_DIR
     $inner = Join-Path $tempExtract "pebble"
     if (-not (Test-Path $inner)) { $inner = $tempExtract }
 
-    if (Test-Path $INSTALL_DIR) {
-        # Keep .venv if it exists (avoid re-downloading all packages)
-        $oldVenv = Join-Path $INSTALL_DIR ".venv"
-        $keepVenv = Test-Path $oldVenv
-        if ($keepVenv) {
-            $venvBackup = "$env:TEMP\pebble-venv-backup"
-            if (Test-Path $venvBackup) { Remove-Item $venvBackup -Recurse -Force }
-            Move-Item $oldVenv $venvBackup
-        }
-        Remove-Item $INSTALL_DIR -Recurse -Force
-    }
-
     Move-Item $inner $INSTALL_DIR
     Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
-
-    # Restore venv if we backed it up
-    if ($keepVenv -and (Test-Path $venvBackup)) {
-        Move-Item $venvBackup (Join-Path $INSTALL_DIR ".venv")
-    }
 
     Write-Ok "Extracted to $INSTALL_DIR"
 }
