@@ -225,18 +225,8 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
 
   const onRefresh = useCallback(() => setRefreshKey(k => k + 1), [])
 
-  // Auto-calculate model on first sheet load (auto mode)
-  useEffect(() => {
-    if (selection?.type === 'sheet' && selection.modelId && calcMode === 'auto' && !calcedModelsRef.current.has(selection.modelId)) {
-      calcedModelsRef.current.add(selection.modelId)
-      setCalcRunning(true)
-      api.calculateModelStream(selection.modelId, (data) => {
-        if (data.phase === 'start') setCalcProgress({ done: 0, total: data.total_sheets || 1 })
-        else if (data.phase === 'sheet_done') setCalcProgress({ done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet })
-        else if (data.phase === 'done') { setCalcProgress(null); setCalcRunning(false); setRefreshKey(k => k + 1) }
-      }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
-    }
-  }, [selection?.type === 'sheet' ? selection.id : null])
+  // No auto-calculate on first sheet load — imported values from Excel are already correct.
+  // Recalculation only happens when user explicitly edits cells or clicks "Рассчитать".
 
   const onCreated = useCallback((info: { modelId: string; folder: 'sheets' | 'analytics'; id: string; type: 'sheet' | 'analytic' }) => {
     setExpandAfterCreate({ modelId: info.modelId, folder: info.folder, selectId: info.id, selectType: info.type })
@@ -247,13 +237,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const handleImported = useCallback((modelId: string) => {
     setSelection({ type: 'model', id: modelId, modelId })
     setRefreshKey(k => k + 1)
-    // Auto-calculate after import
-    setCalcRunning(true)
-    api.calculateModelStream(modelId, (data) => {
-      if (data.phase === 'start') setCalcProgress({ done: 0, total: data.total_sheets || 1 })
-      else if (data.phase === 'sheet_done') setCalcProgress({ done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet })
-      else if (data.phase === 'done') { setCalcProgress(null); setCalcRunning(false); calcedModelsRef.current.add(modelId); setRefreshKey(k => k + 1) }
-    }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
+    // No auto-recalc after import — Excel values are already correct
   }, [])
 
   // When switching to data/formulas mode, if a sheet is selected — keep it.
