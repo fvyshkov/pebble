@@ -1,0 +1,117 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Build release zip
+        run: python build_release.py
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Delete old 'latest' release
+        run: gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release
+        run: |
+          gh release create latest \
+            pebble-release.zip \
+            --title "Pebble (latest)" \
+            --notes "Auto-built from \`${{ steps.sha.outputs.short }}\` on $(date -u +%Y-%m-%d).
+
+          **Install on Windows:**
+          1. Download \`pebble-release.zip\` below
+          2. Extract and double-click \`Install.bat\`
+
+          **Or run in PowerShell:**
+          \`\`\`
+          powershell -c \"irm https://raw.githubusercontent.com/fvyshkov/pebble/main/installer/install.ps1 | iex\"
+          \`\`\`" \
+            --latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Deploy to public releases repo (for private repo access) ──
+      - name: Push to public releases repo
+        if: ${{ vars.RELEASES_REPO != '' }}
+        env:
+          DEPLOY_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASES_REPO: ${{ vars.RELEASES_REPO }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${DEPLOY_TOKEN}@github.com/${RELEASES_REPO}.git" _releases
+          cp pebble-release.zip _releases/pebble-release.zip
+          cp installer/install.ps1 _releases/install.ps1
+
+          # Generate download page
+          cat > _releases/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html lang="ru">
+          <head>
+            <meta charset="utf-8">
+            <title>Pebble — Download</title>
+            <style>
+              body { font-family: -apple-system, sans-serif; max-width: 600px; margin: 80px auto; padding: 0 20px; }
+              h1 { color: #333; }
+              .btn { display: inline-block; padding: 16px 32px; background: #2563eb; color: white;
+                     text-decoration: none; border-radius: 8px; font-size: 18px; margin: 20px 0; }
+              .btn:hover { background: #1d4ed8; }
+              code { background: #f1f5f9; padding: 2px 8px; border-radius: 4px; font-size: 14px; }
+              .alt { margin-top: 30px; padding: 20px; background: #f8fafc; border-radius: 8px; }
+            </style>
+          </head>
+          <body>
+            <h1>Pebble</h1>
+            <p>Финансовое моделирование</p>
+            <a class="btn" href="pebble-release.zip">Скачать для Windows</a>
+            <p>Скачайте, распакуйте, запустите <code>Install.bat</code></p>
+            <div class="alt">
+              <strong>Или одной командой в PowerShell:</strong><br><br>
+              <code>powershell -c "irm https://RELEASES_URL/install.ps1 | iex"</code>
+            </div>
+          </body>
+          </html>
+          HTMLEOF
+
+          # Replace placeholder with actual URL
+          PAGES_URL="https://$(echo $RELEASES_REPO | cut -d/ -f1).github.io/$(echo $RELEASES_REPO | cut -d/ -f2)"
+          sed -i "s|RELEASES_URL|${PAGES_URL}|g" _releases/index.html
+
+          cd _releases
+          git add -A
+          git diff --cached --quiet || {
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git commit -m "Release ${{ steps.sha.outputs.short }}"
+            git push
+          }

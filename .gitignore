@@ -11,3 +11,5 @@ frontend/dist/
 .llm_cache/
 models.xlsx
 .venv/
+pebble-release.zip
+pebble.zip

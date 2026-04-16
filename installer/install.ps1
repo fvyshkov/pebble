@@ -1,0 +1,238 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Pebble — one-click installer for Windows.
+
+.DESCRIPTION
+    Downloads Pebble, installs Python if needed, creates desktop shortcut.
+
+    Usage (run in PowerShell):
+        irm https://raw.githubusercontent.com/fvyshkov/pebble/main/installer/install.ps1 | iex
+
+    Or from CMD:
+        powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/fvyshkov/pebble/main/installer/install.ps1 | iex"
+#>
+
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"  # Speed up Invoke-WebRequest
+
+# ── Configuration ──────────────────────────────────────────────────
+# Change DOWNLOAD_URL to where you host pebble-release.zip
+$DOWNLOAD_URL = $env:PEBBLE_DOWNLOAD_URL
+if (-not $DOWNLOAD_URL) {
+    $DOWNLOAD_URL = "https://github.com/fvyshkov/pebble/releases/latest/download/pebble-release.zip"
+}
+$INSTALL_DIR = "$env:LOCALAPPDATA\Pebble"
+$PYTHON_VERSION = "3.12.7"
+$PYTHON_URL = "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-amd64.exe"
+
+# ── Helpers ────────────────────────────────────────────────────────
+
+function Write-Step($msg) {
+    Write-Host ""
+    Write-Host "  [Pebble] $msg" -ForegroundColor Cyan
+}
+
+function Write-Ok($msg) {
+    Write-Host "  [OK] $msg" -ForegroundColor Green
+}
+
+function Write-Err($msg) {
+    Write-Host "  [ERROR] $msg" -ForegroundColor Red
+}
+
+# ── Check admin not required ───────────────────────────────────────
+
+Write-Host ""
+Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "  ║       Pebble — Installation          ║" -ForegroundColor Cyan
+Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+
+# ── 1. Install Python if missing ──────────────────────────────────
+
+function Find-Python {
+    # Try python, then py launcher
+    foreach ($cmd in @("python", "py")) {
+        $p = Get-Command $cmd -ErrorAction SilentlyContinue
+        if ($p) {
+            try {
+                $ver = & $p.Source --version 2>&1
+                if ($ver -match "3\.1[0-9]") {
+                    return $p.Source
+                }
+            } catch {}
+        }
+    }
+    # Check common install locations
+    $locations = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+        "$env:ProgramFiles\Python312\python.exe",
+        "$env:ProgramFiles\Python311\python.exe"
+    )
+    foreach ($loc in $locations) {
+        if (Test-Path $loc) { return $loc }
+    }
+    return $null
+}
+
+$python = Find-Python
+if (-not $python) {
+    Write-Step "Python not found. Installing Python $PYTHON_VERSION..."
+
+    $installer = "$env:TEMP\python-installer.exe"
+
+    # Try winget first (faster, no UAC prompt needed for per-user)
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Step "Installing via winget..."
+        & winget install Python.Python.3.12 --accept-source-agreements --accept-package-agreements --silent 2>$null
+
+        # Refresh PATH
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "User") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
+        $python = Find-Python
+    }
+
+    if (-not $python) {
+        Write-Step "Downloading Python installer..."
+        Invoke-WebRequest -Uri $PYTHON_URL -OutFile $installer
+
+        Write-Step "Running Python installer..."
+        Start-Process -FilePath $installer -ArgumentList "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1" -Wait
+        Remove-Item $installer -ErrorAction SilentlyContinue
+
+        # Refresh PATH
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "User") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
+        $python = Find-Python
+    }
+
+    if (-not $python) {
+        Write-Err "Python installation failed. Please install Python 3.10+ manually from https://python.org"
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+    Write-Ok "Python installed: $python"
+} else {
+    Write-Ok "Python found: $python"
+}
+
+# ── 2. Download Pebble ────────────────────────────────────────────
+
+if ($DOWNLOAD_URL -match "YOUR-SERVER" -or $DOWNLOAD_URL -match "^$") {
+    # Local mode: look for zip in same directory as script, or use existing install
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
+    $localZip = Join-Path $scriptDir "pebble-release.zip"
+
+    if (Test-Path $localZip) {
+        Write-Step "Found local pebble-release.zip, extracting..."
+        if (Test-Path $INSTALL_DIR) { Remove-Item $INSTALL_DIR -Recurse -Force }
+        Expand-Archive -Path $localZip -DestinationPath $INSTALL_DIR -Force
+    } elseif (Test-Path (Join-Path $scriptDir "backend\main.py")) {
+        # We're inside the app directory already — install in-place
+        Write-Step "App files found in current directory. Installing in-place..."
+        $INSTALL_DIR = $scriptDir
+    } else {
+        Write-Err "DOWNLOAD_URL not configured and no local pebble-release.zip found."
+        Write-Host "  Set `$env:PEBBLE_DOWNLOAD_URL or place pebble-release.zip next to this script."
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+} else {
+    Write-Step "Downloading Pebble..."
+    $zipPath = "$env:TEMP\pebble-release.zip"
+    Invoke-WebRequest -Uri $DOWNLOAD_URL -OutFile $zipPath
+
+    Write-Step "Extracting..."
+    if (Test-Path $INSTALL_DIR) { Remove-Item $INSTALL_DIR -Recurse -Force }
+    Expand-Archive -Path $zipPath -DestinationPath $INSTALL_DIR -Force
+    Remove-Item $zipPath -ErrorAction SilentlyContinue
+    Write-Ok "Extracted to $INSTALL_DIR"
+}
+
+# ── 3. Create venv & install deps ─────────────────────────────────
+
+$venvDir = Join-Path $INSTALL_DIR ".venv"
+if (-not (Test-Path $venvDir)) {
+    Write-Step "Creating virtual environment..."
+    & $python -m venv $venvDir
+}
+
+$venvPython = Join-Path $venvDir "Scripts\python.exe"
+$venvPip = Join-Path $venvDir "Scripts\pip.exe"
+$reqsFile = Join-Path $INSTALL_DIR "requirements.txt"
+
+if (Test-Path $reqsFile) {
+    Write-Step "Installing dependencies..."
+    & $venvPip install -q -r $reqsFile
+    Write-Ok "Dependencies installed"
+}
+
+# ── 4. Create desktop shortcut ────────────────────────────────────
+
+Write-Step "Creating desktop shortcut..."
+
+$desktopPath = [Environment]::GetFolderPath("Desktop")
+$shortcutPath = Join-Path $desktopPath "Pebble.lnk"
+
+$launcherBat = Join-Path $INSTALL_DIR "Pebble.bat"
+
+# Create the launcher bat if it doesn't exist
+if (-not (Test-Path $launcherBat)) {
+    $batContent = @"
+@echo off
+chcp 65001 >nul 2>&1
+title Pebble
+cd /d "%~dp0"
+call .venv\Scripts\activate.bat
+start http://localhost:8000
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+"@
+    Set-Content -Path $launcherBat -Value $batContent -Encoding UTF8
+}
+
+# Create shortcut via COM
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $launcherBat
+$shortcut.WorkingDirectory = $INSTALL_DIR
+$shortcut.Description = "Pebble — Financial Modeling"
+$shortcut.WindowStyle = 7  # Minimized
+$shortcut.Save()
+
+Write-Ok "Desktop shortcut created"
+
+# ── 5. Create Start Menu shortcut ─────────────────────────────────
+
+$startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+$startShortcut = Join-Path $startMenuDir "Pebble.lnk"
+$shortcut2 = $shell.CreateShortcut($startShortcut)
+$shortcut2.TargetPath = $launcherBat
+$shortcut2.WorkingDirectory = $INSTALL_DIR
+$shortcut2.Description = "Pebble — Financial Modeling"
+$shortcut2.WindowStyle = 7
+$shortcut2.Save()
+
+Write-Ok "Start Menu shortcut created"
+
+# ── Done ───────────────────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Green
+Write-Host "  ║     Pebble installed successfully!   ║" -ForegroundColor Green
+Write-Host "  ║                                      ║" -ForegroundColor Green
+Write-Host "  ║  Double-click 'Pebble' on Desktop    ║" -ForegroundColor Green
+Write-Host "  ║  to start the application.           ║" -ForegroundColor Green
+Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Install location: $INSTALL_DIR" -ForegroundColor Gray
+Write-Host ""
+
+# ── 6. Launch now? ─────────────────────────────────────────────────
+
+$launch = Read-Host "  Start Pebble now? (Y/n)"
+if ($launch -ne "n" -and $launch -ne "N") {
+    Write-Step "Starting Pebble..."
+    Start-Process -FilePath $launcherBat -WorkingDirectory $INSTALL_DIR
+}
