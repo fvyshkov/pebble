@@ -178,19 +178,20 @@ $shortcutPath = Join-Path $desktopPath "Pebble.lnk"
 
 $launcherBat = Join-Path $INSTALL_DIR "Pebble.bat"
 
-# Create the launcher bat if it doesn't exist
-if (-not (Test-Path $launcherBat)) {
-    $batContent = @"
+$batContent = @"
 @echo off
 chcp 65001 >nul 2>&1
 title Pebble
 cd /d "%~dp0"
+
+:: Kill previous instance if running
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000.*LISTENING"') do taskkill /F /PID %%a >nul 2>&1
+
 call .venv\Scripts\activate.bat
 start http://localhost:8000
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 "@
-    Set-Content -Path $launcherBat -Value $batContent -Encoding UTF8
-}
+Set-Content -Path $launcherBat -Value $batContent -Encoding UTF8
 
 # Create shortcut via COM
 $shell = New-Object -ComObject WScript.Shell
@@ -229,10 +230,15 @@ Write-Host ""
 Write-Host "  Install location: $INSTALL_DIR" -ForegroundColor Gray
 Write-Host ""
 
-# ── 6. Launch now? ─────────────────────────────────────────────────
+# ── 6. Kill old instance & launch ──────────────────────────────────
 
-$launch = Read-Host "  Start Pebble now? (Y/n)"
-if ($launch -ne "n" -and $launch -ne "N") {
-    Write-Step "Starting Pebble..."
-    Start-Process -FilePath $launcherBat -WorkingDirectory $INSTALL_DIR
+# Kill any existing Pebble on port 8000
+$existing = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Step "Stopping previous Pebble instance..."
+    $existing | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 1
 }
+
+Write-Step "Starting Pebble..."
+Start-Process -FilePath $launcherBat -WorkingDirectory $INSTALL_DIR
