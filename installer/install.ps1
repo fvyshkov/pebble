@@ -145,9 +145,35 @@ if ($DOWNLOAD_URL -match "YOUR-SERVER" -or $DOWNLOAD_URL -match "^$") {
     Invoke-WebRequest -Uri $DOWNLOAD_URL -OutFile $zipPath
 
     Write-Step "Extracting..."
-    if (Test-Path $INSTALL_DIR) { Remove-Item $INSTALL_DIR -Recurse -Force }
-    Expand-Archive -Path $zipPath -DestinationPath $INSTALL_DIR -Force
+    $tempExtract = "$env:TEMP\pebble-extract"
+    if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
+    Expand-Archive -Path $zipPath -DestinationPath $tempExtract -Force
     Remove-Item $zipPath -ErrorAction SilentlyContinue
+
+    # The zip contains a 'pebble/' subfolder — move its contents to INSTALL_DIR
+    $inner = Join-Path $tempExtract "pebble"
+    if (-not (Test-Path $inner)) { $inner = $tempExtract }
+
+    if (Test-Path $INSTALL_DIR) {
+        # Keep .venv if it exists (avoid re-downloading all packages)
+        $oldVenv = Join-Path $INSTALL_DIR ".venv"
+        $keepVenv = Test-Path $oldVenv
+        if ($keepVenv) {
+            $venvBackup = "$env:TEMP\pebble-venv-backup"
+            if (Test-Path $venvBackup) { Remove-Item $venvBackup -Recurse -Force }
+            Move-Item $oldVenv $venvBackup
+        }
+        Remove-Item $INSTALL_DIR -Recurse -Force
+    }
+
+    Move-Item $inner $INSTALL_DIR
+    Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+
+    # Restore venv if we backed it up
+    if ($keepVenv -and (Test-Path $venvBackup)) {
+        Move-Item $venvBackup (Join-Path $INSTALL_DIR ".venv")
+    }
+
     Write-Ok "Extracted to $INSTALL_DIR"
 }
 
@@ -188,8 +214,10 @@ cd /d "%~dp0"
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000.*LISTENING"') do taskkill /F /PID %%a >nul 2>&1
 
 call .venv\Scripts\activate.bat
+pip install -q -r requirements.txt 2>nul
 start http://localhost:8000
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+pause
 "@
 Set-Content -Path $launcherBat -Value $batContent -Encoding UTF8
 
@@ -241,4 +269,5 @@ if ($existing) {
 }
 
 Write-Step "Starting Pebble..."
-Start-Process -FilePath $launcherBat -WorkingDirectory $INSTALL_DIR
+# Start in a new minimized window that stays open
+Start-Process cmd -ArgumentList "/k", "cd /d `"$INSTALL_DIR`" && `"$launcherBat`"" -WorkingDirectory $INSTALL_DIR -WindowStyle Minimized
