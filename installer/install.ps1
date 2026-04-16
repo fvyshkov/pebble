@@ -128,13 +128,14 @@ if ($existingConn) {
     $existingConn | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
 }
 
-# Kill ALL python/pip/cmd processes that might lock files
+# Kill ALL processes that might lock files in the install dir
 $ErrorActionPreference = "SilentlyContinue"
 taskkill /F /IM python.exe 2>&1 | Out-Null
 taskkill /F /IM pythonw.exe 2>&1 | Out-Null
 taskkill /F /IM pip.exe 2>&1 | Out-Null
+# Kill cmd processes that may have CWD inside Pebble dir (locks the folder)
 Get-Process cmd -ErrorAction SilentlyContinue | Where-Object {
-    $_.MainWindowTitle -eq "Pebble"
+    $_.Id -ne $PID
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 $ErrorActionPreference = "Stop"
 
