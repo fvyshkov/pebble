@@ -293,15 +293,24 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   // Auto-focus grid on mount
   useEffect(() => { if (!loading) gridBoxRef.current?.focus() }, [loading])
   // Arrow keys always focus grid (even if focus is elsewhere)
+  // Global key capture: arrow keys, Enter, Tab, and typing always go to the grid
   useEffect(() => {
     if (loading) return
     const handler = (e: KeyboardEvent) => {
-      if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-        const tag = (e.target as HTMLElement)?.tagName
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-        if (document.activeElement !== gridBoxRef.current) {
-          gridBoxRef.current?.focus()
-        }
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      const gridKeys = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Enter', 'Tab', 'Escape', 'Delete', 'Backspace']
+      const isGridKey = gridKeys.includes(e.key)
+      const isTyping = e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey
+      if ((isGridKey || isTyping) && document.activeElement !== gridBoxRef.current) {
+        gridBoxRef.current?.focus()
+        // Re-dispatch so the grid's own onKeyDown handler picks it up
+        gridBoxRef.current?.dispatchEvent(new KeyboardEvent('keydown', {
+          key: e.key, code: e.code, shiftKey: e.shiftKey,
+          ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey,
+          bubbles: true, cancelable: true,
+        }))
+        e.preventDefault()
       }
     }
     document.addEventListener('keydown', handler)
