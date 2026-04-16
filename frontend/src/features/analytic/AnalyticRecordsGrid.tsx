@@ -93,7 +93,7 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
   const handleAdd = async (parentId: string | null) => {
     const data: Record<string, any> = {}
     if (fields.length > 0) data[fields[0].code] = ''
-    await api.createRecord(analyticId, { parent_id: parentId, sort_order: records.length, data_json: data })
+    const created = await api.createRecord(analyticId, { parent_id: parentId, sort_order: records.length, data_json: data })
     // Expand parent if adding child
     if (parentId) {
       setCollapsed(prev => {
@@ -102,12 +102,29 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
         return next
       })
     }
-    load()
+    // Add locally — no reload needed
+    if (created?.id) {
+      setRecords(prev => [...prev, { id: created.id, analytic_id: analyticId, parent_id: parentId, sort_order: records.length, data_json: JSON.stringify(data) } as AnalyticRecord])
+    }
   }
 
   const handleDelete = async (id: string) => {
     await api.deleteRecord(analyticId, id)
-    load()
+    // Remove locally (including children)
+    setRecords(prev => {
+      const toRemove = new Set<string>([id])
+      let changed = true
+      while (changed) {
+        changed = false
+        for (const r of prev) {
+          if (r.parent_id && toRemove.has(r.parent_id) && !toRemove.has(r.id)) {
+            toRemove.add(r.id)
+            changed = true
+          }
+        }
+      }
+      return prev.filter(r => !toRemove.has(r.id))
+    })
   }
 
   const handleCellChange = (record: AnalyticRecord, fieldCode: string, value: string) => {
