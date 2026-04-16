@@ -489,11 +489,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     }
     if (totalAnalytics > 0) buildLvl(0, {}, [])
 
-    const colLeaves = colAId ? getLeaves(rMap[colAId] || []) : []
-
-    // Fetch ALL cells (including collapsed children) so group sums display correctly
-    const coordKeys = computeCoordKeysForRows(miniRows, colLeaves, dbOrd, colAId, curPinned)
-    const cellData = await api.getCellsPartial(sheetId, coordKeys, currentUserId)
+    // Fetch ALL cells for the sheet so group sums display correctly even when collapsed
+    const cellData = await api.getCells(sheetId, currentUserId)
     const cellMap: Record<string, string> = {}
     const ruleMap: Record<string, CellRule> = {}
     const formulaMap: Record<string, string> = {}
@@ -503,7 +500,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       if (c.formula) formulaMap[c.coord_key] = c.formula
     }
     setCells(cellMap); setCellRules(ruleMap); setFormulas(formulaMap)
-    setLoadedCoordKeys(new Set(coordKeys))
+    setLoadedCoordKeys(new Set(cellData.map(c => c.coord_key)))
     setLoading(false)
   }, [sheetId])
 
