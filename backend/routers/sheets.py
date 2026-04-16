@@ -6,6 +6,21 @@ from backend.db import get_db
 router = APIRouter(prefix="/api/sheets", tags=["sheets"])
 
 
+async def _find_first_leaf(db, analytic_id: str) -> str | None:
+    """Find the first leaf (terminal) record of an analytic."""
+    recs = await db.execute_fetchall(
+        "SELECT id, parent_id FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+        (analytic_id,),
+    )
+    if not recs:
+        return None
+    parent_ids = {r["id"] for r in recs if any(c["parent_id"] == r["id"] for c in recs)}
+    for r in recs:
+        if r["id"] not in parent_ids:
+            return r["id"]
+    return recs[0]["id"]
+
+
 class SheetIn(BaseModel):
     model_id: str | None = None
     name: str = ""
@@ -113,6 +128,19 @@ async def add_sheet_analytic(sheet_id: str, body: SheetAnalyticIn):
         "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_fixed, fixed_record_id) VALUES (?,?,?,?,?,?)",
         (said, sheet_id, body.analytic_id, body.sort_order, int(body.is_fixed), body.fixed_record_id),
     )
+
+    # Migrate existing cell data: append first leaf record of new analytic to coord_keys
+    first_leaf = await _find_first_leaf(db, body.analytic_id)
+    if first_leaf:
+        cells = await db.execute_fetchall(
+            "SELECT id, coord_key FROM cell_data WHERE sheet_id = ?", (sheet_id,)
+        )
+        for c in cells:
+            new_key = c["coord_key"] + "|" + first_leaf
+            await db.execute(
+                "UPDATE cell_data SET coord_key = ? WHERE id = ?", (new_key, c["id"])
+            )
+
     await db.commit()
     row = await db.execute_fetchall("SELECT * FROM sheet_analytics WHERE id = ?", (said,))
     return dict(row[0])
@@ -133,6 +161,46 @@ async def update_sheet_analytic(sheet_id: str, sa_id: str, body: SheetAnalyticIn
 @router.delete("/{sheet_id}/analytics/{sa_id}")
 async def remove_sheet_analytic(sheet_id: str, sa_id: str):
     db = get_db()
+
+    # Get the analytic being removed and current binding order
+    sa_row = await db.execute_fetchall("SELECT analytic_id FROM sheet_analytics WHERE id = ?", (sa_id,))
+    if not sa_row:
+        return {"ok": True}
+    removing_aid = sa_row[0]["analytic_id"]
+
+    # Get all analytic IDs in order for this sheet
+    bindings = await db.execute_fetchall(
+        "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
+    )
+    order = [b["analytic_id"] for b in bindings]
+
+    # Find the position of the analytic being removed
+    if removing_aid in order:
+        pos = order.index(removing_aid)
+        # Get all record IDs for this analytic (to identify which part of coord_key to strip)
+        rec_ids = set()
+        recs = await db.execute_fetchall(
+            "SELECT id FROM analytic_records WHERE analytic_id = ?", (removing_aid,)
+        )
+        for r in recs:
+            rec_ids.add(r["id"])
+
+        # Strip the part from coord_keys
+        cells = await db.execute_fetchall(
+            "SELECT id, coord_key FROM cell_data WHERE sheet_id = ?", (sheet_id,)
+        )
+        for c in cells:
+            parts = c["coord_key"].split("|")
+            if pos < len(parts) and parts[pos] in rec_ids:
+                new_parts = parts[:pos] + parts[pos + 1:]
+                if new_parts:
+                    await db.execute(
+                        "UPDATE cell_data SET coord_key = ? WHERE id = ?",
+                        ("|".join(new_parts), c["id"]),
+                    )
+                else:
+                    await db.execute("DELETE FROM cell_data WHERE id = ?", (c["id"],))
+
     await db.execute("DELETE FROM sheet_analytics WHERE id = ? AND sheet_id = ?", (sa_id, sheet_id))
     await db.commit()
     return {"ok": True}
