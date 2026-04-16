@@ -128,15 +128,15 @@ if ($existingConn) {
     $existingConn | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
 }
 
-# Kill ALL python/pip processes (safest — user is updating Pebble anyway)
-& taskkill /F /IM python.exe 2>$null
-& taskkill /F /IM pythonw.exe 2>$null
-& taskkill /F /IM pip.exe 2>$null
-
-# Kill cmd windows titled "Pebble"
+# Kill ALL python/pip/cmd processes that might lock files
+$ErrorActionPreference = "SilentlyContinue"
+taskkill /F /IM python.exe 2>&1 | Out-Null
+taskkill /F /IM pythonw.exe 2>&1 | Out-Null
+taskkill /F /IM pip.exe 2>&1 | Out-Null
 Get-Process cmd -ErrorAction SilentlyContinue | Where-Object {
     $_.MainWindowTitle -eq "Pebble"
 } | Stop-Process -Force -ErrorAction SilentlyContinue
+$ErrorActionPreference = "Stop"
 
 Start-Sleep -Seconds 3
 
