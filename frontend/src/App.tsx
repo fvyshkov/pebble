@@ -235,7 +235,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const isSheetSelected = selection?.type === 'sheet'
   const isDataMode = mode === 'data' || mode === 'formulas'
   const currentUser = users.find(u => u.id === currentUserId)
-  const isAdmin = !!currentUser?.can_admin
+  const isAdmin = !!authUser?.can_admin || !!currentUser?.can_admin
 
   // Non-admin users can only use data mode
   useEffect(() => {
