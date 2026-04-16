@@ -118,14 +118,26 @@ if (-not $python) {
     Write-Ok "Python found: $python"
 }
 
-# ── Kill old Pebble process before updating ───────────────────────
+# ── Kill old Pebble processes before updating ─────────────────────
 
+# Kill by port
 $existingConn = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
 if ($existingConn) {
-    Write-Step "Stopping running Pebble instance..."
+    Write-Step "Stopping Pebble (port 8000)..."
     $existingConn | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Seconds 2
 }
+
+# Kill any python processes running from the Pebble install dir
+Get-Process python*, pip* -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and $_.Path -like "*$INSTALL_DIR*"
+} | Stop-Process -Force -ErrorAction SilentlyContinue
+
+# Also kill cmd windows titled "Pebble"
+Get-Process cmd -ErrorAction SilentlyContinue | Where-Object {
+    $_.MainWindowTitle -eq "Pebble"
+} | Stop-Process -Force -ErrorAction SilentlyContinue
+
+Start-Sleep -Seconds 3
 
 # ── 2. Download Pebble ────────────────────────────────────────────
 
@@ -158,7 +170,25 @@ if ($DOWNLOAD_URL -match "YOUR-SERVER" -or $DOWNLOAD_URL -match "^$") {
     # Clean old installation completely
     if (Test-Path $INSTALL_DIR) {
         Write-Step "Removing old installation..."
-        Remove-Item $INSTALL_DIR -Recurse -Force
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                Remove-Item $INSTALL_DIR -Recurse -Force -ErrorAction Stop
+                break
+            } catch {
+                if ($attempt -lt 3) {
+                    Write-Host "    Retry $attempt... (files still locked)" -ForegroundColor Yellow
+                    # Kill anything that might hold files
+                    Get-Process python*, pip* -ErrorAction SilentlyContinue | Where-Object {
+                        $_.Path -and $_.Path -like "*Pebble*"
+                    } | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 3
+                } else {
+                    Write-Err "Cannot remove old installation. Close all Pebble windows and try again."
+                    Read-Host "Press Enter to exit"
+                    exit 1
+                }
+            }
+        }
     }
 
     # Extract to temp, then move inner 'pebble' folder to INSTALL_DIR
