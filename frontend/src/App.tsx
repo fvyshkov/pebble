@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import {
   IconButton, Tooltip, Badge, Select, MenuItem, FormControl,
   Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, CircularProgress,
-  ToggleButton, ToggleButtonGroup, Typography, Box,
+  ToggleButton, ToggleButtonGroup, Typography, Box, Chip,
 } from '@mui/material'
 import RefreshOutlined from '@mui/icons-material/RefreshOutlined'
 import MenuOutlined from '@mui/icons-material/MenuOutlined'
@@ -13,6 +13,7 @@ import FunctionsOutlined from '@mui/icons-material/FunctionsOutlined'
 import PeopleOutlined from '@mui/icons-material/PeopleOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import LogoutOutlined from '@mui/icons-material/LogoutOutlined'
+import CalculateOutlined from '@mui/icons-material/CalculateOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
@@ -199,6 +200,12 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const [expandAfterCreate, setExpandAfterCreate] = useState<any>(null)
   const [users, setUsers] = useState<any[]>([])
   const [currentUserId, setCurrentUserId] = useState(authUser?.id || '')
+  const [calcMode, setCalcMode] = useState<'auto' | 'manual'>(() =>
+    (localStorage.getItem('pebble_calcMode') as 'auto' | 'manual') || 'auto'
+  )
+  const [calcRunning, setCalcRunning] = useState(false)
+  const [calcProgress, setCalcProgress] = useState<{ done: number; total: number; sheet?: string } | null>(null)
+  const calcedModelsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     api.listUsers().then(u => {
@@ -213,7 +220,23 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
     })
   }, [showUsers])
 
+  // Persist calcMode to localStorage
+  useEffect(() => { localStorage.setItem('pebble_calcMode', calcMode) }, [calcMode])
+
   const onRefresh = useCallback(() => setRefreshKey(k => k + 1), [])
+
+  // Auto-calculate model on first sheet load (auto mode)
+  useEffect(() => {
+    if (selection?.type === 'sheet' && selection.modelId && calcMode === 'auto' && !calcedModelsRef.current.has(selection.modelId)) {
+      calcedModelsRef.current.add(selection.modelId)
+      setCalcRunning(true)
+      api.calculateModelStream(selection.modelId, (data) => {
+        if (data.phase === 'start') setCalcProgress({ done: 0, total: data.total_sheets || 1 })
+        else if (data.phase === 'sheet_done') setCalcProgress({ done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet })
+        else if (data.phase === 'done') { setCalcProgress(null); setCalcRunning(false); setRefreshKey(k => k + 1) }
+      }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
+    }
+  }, [selection?.type === 'sheet' ? selection.id : null])
 
   const onCreated = useCallback((info: { modelId: string; folder: 'sheets' | 'analytics'; id: string; type: 'sheet' | 'analytic' }) => {
     setExpandAfterCreate({ modelId: info.modelId, folder: info.folder, selectId: info.id, selectType: info.type })
@@ -224,6 +247,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const handleImported = useCallback((modelId: string) => {
     setSelection({ type: 'model', id: modelId, modelId })
     setRefreshKey(k => k + 1)
+    // Auto-calculate after import
+    setCalcRunning(true)
+    api.calculateModelStream(modelId, (data) => {
+      if (data.phase === 'start') setCalcProgress({ done: 0, total: data.total_sheets || 1 })
+      else if (data.phase === 'sheet_done') setCalcProgress({ done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet })
+      else if (data.phase === 'done') { setCalcProgress(null); setCalcRunning(false); calcedModelsRef.current.add(modelId); setRefreshKey(k => k + 1) }
+    }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
   }, [])
 
   // When switching to data/formulas mode, if a sheet is selected — keep it.
@@ -290,6 +320,40 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             </Tooltip>
           )}
 
+          {/* Calc mode toggle + calculate button */}
+          <Tooltip title={calcMode === 'auto' ? 'Авто-расчёт (при каждом сохранении)' : 'Ручной расчёт (по кнопке)'}>
+            <Chip
+              size="small"
+              label={calcMode === 'auto' ? 'авто' : 'вручную'}
+              variant={calcMode === 'auto' ? 'filled' : 'outlined'}
+              color={calcMode === 'auto' ? 'success' : 'default'}
+              onClick={() => setCalcMode(prev => prev === 'auto' ? 'manual' : 'auto')}
+              sx={{ fontSize: 11, cursor: 'pointer' }}
+            />
+          </Tooltip>
+          {calcMode === 'manual' && selection?.modelId && (
+            <Tooltip title="Рассчитать все формулы">
+              <Button
+                size="small"
+                variant="outlined"
+                disabled={calcRunning}
+                startIcon={calcRunning ? <CircularProgress size={12} /> : <CalculateOutlined fontSize="small" />}
+                onClick={async () => {
+                  setCalcRunning(true)
+                  setCalcProgress({ done: 0, total: 1 })
+                  await api.calculateModelStream(selection.modelId, (data) => {
+                    if (data.phase === 'start') setCalcProgress({ done: 0, total: data.total_sheets || 1 })
+                    else if (data.phase === 'sheet_done') setCalcProgress({ done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet })
+                    else if (data.phase === 'done') { setCalcProgress(null); setCalcRunning(false); setRefreshKey(k => k + 1) }
+                  }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
+                }}
+                sx={{ fontSize: 11, textTransform: 'none', minWidth: 0, py: 0, px: 1 }}
+              >
+                {calcRunning && calcProgress ? `${calcProgress.done}/${calcProgress.total}` : 'Рассчитать'}
+              </Button>
+            </Tooltip>
+          )}
+
           <div style={{ flex: 1 }} />
 
           {isAdmin && (
@@ -333,6 +397,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               sheetId={selection.id} modelId={selection.modelId}
               currentUserId={currentUserId}
               mode={mode === 'formulas' ? 'settings' : 'data'}
+              calcMode={calcMode}
             />
           ) : (
             <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>

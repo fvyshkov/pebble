@@ -245,9 +245,10 @@ interface Props {
   sheetId: string; modelId: string
   currentUserId?: string
   mode?: 'data' | 'settings'  // data = view/edit values, settings = cell rules/formulas
+  calcMode?: 'auto' | 'manual'
 }
 
-export default function PivotGrid({ sheetId, modelId, currentUserId, mode: externalMode }: Props) {
+export default function PivotGrid({ sheetId, modelId, currentUserId, mode: externalMode, calcMode = 'auto' }: Props) {
   const [bindings, setBindings] = useState<SheetAnalytic[]>([])
   const [analyticsMap, setAnalyticsMap] = useState<Record<string, Analytic>>({})
   const [recordsByAnalytic, setRecordsByAnalytic] = useState<Record<string, RecordNode[]>>({})
@@ -278,7 +279,6 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null)
   const [historyItems, setHistoryItems] = useState<any[]>([])
   const [hasHistory, setHasHistory] = useState(false)
-  const [calcMode, setCalcMode] = useState<'auto' | 'manual'>('manual')
   const [calcProgress, setCalcProgress] = useState<{ running: boolean; done: number; total: number; sheet?: string } | null>(null)
   const [loadedCoordKeys, setLoadedCoordKeys] = useState<Set<string>>(new Set())
   const [allowedRecords, setAllowedRecords] = useState<Record<string, string[]>>({})
@@ -400,7 +400,6 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       if (vs.colWidths) setColWidths(vs.colWidths)
       if (vs.firstColWidth) setFirstColWidth(vs.firstColWidth)
       // collapsedRows no longer restored — always start fully collapsed
-      if (vs.calcMode) setCalcMode(vs.calcMode)
     } catch {
       setOrder(defaultOrder)
       setColLevelToggles({ 0: true, 1: true, 2: true, 3: true })
@@ -651,10 +650,9 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         order, colLevelToggles, pinned,
         colWidths, firstColWidth,
         collapsedRows: Array.from(collapsedRows),
-        calcMode,
       })
     }, 500)
-  }, [order, colLevelToggles, pinned, colWidths, firstColWidth, collapsedRows, sheetId, loading, calcMode])
+  }, [order, colLevelToggles, pinned, colWidths, firstColWidth, collapsedRows, sheetId, loading])
 
   const analyticNames = useMemo(() => {
     const m: Record<string, string> = {}; for (const [id, a] of Object.entries(analyticsMap)) m[id] = a.name; return m
@@ -1170,46 +1168,9 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           </IconButton>
         </Tooltip>
 
-        {/* Calc mode toggle + calculate button */}
-        <Tooltip title={calcMode === 'auto' ? 'Авто-расчёт (при каждом сохранении)' : 'Расчёт по запросу'}>
-          <Chip
-            size="small"
-            label={calcMode === 'auto' ? 'авто' : 'вручную'}
-            variant={calcMode === 'auto' ? 'filled' : 'outlined'}
-            color={calcMode === 'auto' ? 'success' : 'default'}
-            onClick={() => setCalcMode(prev => prev === 'auto' ? 'manual' : 'auto')}
-            sx={{ fontSize: 11, cursor: 'pointer' }}
-          />
-        </Tooltip>
-        {calcMode === 'manual' && (
-          <Tooltip title="Рассчитать все формулы">
-            <Button
-              size="small"
-              variant="outlined"
-              disabled={!!calcProgress?.running}
-              startIcon={<CalculateOutlined fontSize="small" />}
-              onClick={async () => {
-                setCalcProgress({ running: true, done: 0, total: 1 })
-                await api.calculateModelStream(modelId, (data) => {
-                  if (data.phase === 'start') {
-                    setCalcProgress({ running: true, done: 0, total: data.total_sheets || 1, sheet: '' })
-                  } else if (data.phase === 'sheet_done') {
-                    setCalcProgress({ running: true, done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet })
-                  } else if (data.phase === 'done') {
-                    setCalcProgress(null)
-                  }
-                })
-                // Reload visible cells after calc
-                reloadCells()
-              }}
-              sx={{ fontSize: 11, textTransform: 'none', minWidth: 0, py: 0, px: 1 }}
-            >
-              Рассчитать
-            </Button>
-          </Tooltip>
-        )}
+        {/* Calculate button (always available for manual recalc of current sheet) */}
         {calcMode === 'auto' && (
-          <Tooltip title="Рассчитать формулы">
+          <Tooltip title="Рассчитать формулы листа">
             <IconButton size="small" onClick={async () => {
               await api.calculateSheet(sheetId)
               reloadCells()
