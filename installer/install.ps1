@@ -118,6 +118,15 @@ if (-not $python) {
     Write-Ok "Python found: $python"
 }
 
+# ── Kill old Pebble process before updating ───────────────────────
+
+$existingConn = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
+if ($existingConn) {
+    Write-Step "Stopping running Pebble instance..."
+    $existingConn | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 2
+}
+
 # ── 2. Download Pebble ────────────────────────────────────────────
 
 if ($DOWNLOAD_URL -match "YOUR-SERVER" -or $DOWNLOAD_URL -match "^$") {
@@ -231,15 +240,7 @@ Write-Host ""
 Write-Host "  Install location: $INSTALL_DIR" -ForegroundColor Gray
 Write-Host ""
 
-# ── 6. Kill old instance & launch ──────────────────────────────────
-
-# Kill any existing Pebble on port 8000
-$existing = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Step "Stopping previous Pebble instance..."
-    $existing | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Seconds 1
-}
+# ── 6. Launch ─────────────────────────────────────────────────────
 
 Write-Step "Starting Pebble..."
 # Start in a new minimized window that stays open
