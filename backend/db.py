@@ -155,13 +155,13 @@ async def init_db():
         except Exception:
             pass
     # Ensure default admin user exists
-    existing = await _db.execute("SELECT id FROM users WHERE username = 'Админ'")
+    existing = await _db.execute("SELECT id FROM users WHERE username = 'admin'")
     row = await existing.fetchone()
     if not row:
         import uuid
         admin_id = str(uuid.uuid4())
         await _db.execute(
-            "INSERT INTO users (id, username, password, can_admin) VALUES (?, 'Админ', 'admin', 1)",
+            "INSERT INTO users (id, username, password, can_admin) VALUES (?, 'admin', 'admin', 1)",
             (admin_id,),
         )
     # Ensure 'admin' user has can_admin flag
