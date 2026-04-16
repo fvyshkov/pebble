@@ -702,8 +702,14 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     else:
                         formula_text = formula_info.get("formula", "")
                 else:
-                    rule = "manual"
-                    formula_text = ""
+                    # Fallback: check Excel formula workbook directly
+                    excel_formula = ws_f.cell(row_num, col_num).value
+                    if isinstance(excel_formula, str) and excel_formula.startswith("="):
+                        rule = "formula"
+                        formula_text = excel_formula  # raw Excel formula as reference
+                    else:
+                        rule = "manual"
+                        formula_text = ""
 
                 coord_key = f"{period_rid}|{indicator_rid}"
                 value_str = str(val)
@@ -982,8 +988,14 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         else:
                             formula_text = formula_info.get("formula", "")
                     else:
-                        rule = "manual"
-                        formula_text = ""
+                        # Fallback: check Excel formula workbook directly
+                        excel_formula = ws_f.cell(row_num, col_num).value
+                        if isinstance(excel_formula, str) and excel_formula.startswith("="):
+                            rule = "formula"
+                            formula_text = excel_formula
+                        else:
+                            rule = "manual"
+                            formula_text = ""
                     try:
                         await db.execute(
                             "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
