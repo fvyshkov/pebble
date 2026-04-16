@@ -254,7 +254,9 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             gk = (sid, c["coord_key"])
             global_cells[gk] = c["value"] or ""
             if c["rule"] == "formula" and c["formula"]:
-                global_formulas[gk] = c["formula"]
+                # Skip raw Excel formulas (starting with =) — they can't be evaluated
+                if not c["formula"].startswith("="):
+                    global_formulas[gk] = c["formula"]
 
     # Track original DB cell keys (before computation adds synthetic ones)
     _original_cell_keys = set(global_cells.keys())
