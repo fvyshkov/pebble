@@ -12,6 +12,7 @@ import { usePending } from '../../store/PendingContext'
 
 interface Props {
   analyticId: string
+  modelId: string
   onRefresh: () => void
 }
 
@@ -21,9 +22,10 @@ const PERIOD_TYPES = [
   { key: 'month', label: 'Месяц' },
 ]
 
-export default function AnalyticSettings({ analyticId, onRefresh }: Props) {
+export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Props) {
   const [data, setData] = useState<Analytic | null>(null)
   const [iconOpen, setIconOpen] = useState(false)
+  const [sheetStatus, setSheetStatus] = useState<string>('')
   const { addOp, getOverrides } = usePending()
 
   useEffect(() => {
@@ -185,6 +187,52 @@ export default function AnalyticSettings({ analyticId, onRefresh }: Props) {
           </Button>
         </Box>
       )}
+
+      {/* Add/remove from all sheets */}
+      <Box sx={{ display: 'flex', gap: 1, mt: 3, mb: 1 }}>
+        <Button
+          variant="outlined" size="small"
+          startIcon={<Icons.PlaylistAddOutlined />}
+          onClick={async () => {
+            const sheets = await api.listSheets(modelId)
+            let added = 0
+            for (const sheet of sheets) {
+              const existing = await api.listSheetAnalytics(sheet.id)
+              if (!existing.some((sa: any) => sa.analytic_id === analyticId)) {
+                await api.addSheetAnalytic(sheet.id, { analytic_id: analyticId, sort_order: existing.length })
+                added++
+              }
+            }
+            setSheetStatus(added > 0 ? `Добавлено в ${added} лист(ов)` : 'Уже во всех листах')
+            setTimeout(() => setSheetStatus(''), 3000)
+          }}
+          sx={{ textTransform: 'none', fontSize: 12 }}
+        >
+          Добавить во все листы
+        </Button>
+        <Button
+          variant="outlined" size="small" color="warning"
+          startIcon={<Icons.PlaylistRemoveOutlined />}
+          onClick={async () => {
+            const sheets = await api.listSheets(modelId)
+            let removed = 0
+            for (const sheet of sheets) {
+              const existing = await api.listSheetAnalytics(sheet.id)
+              const sa = existing.find((s: any) => s.analytic_id === analyticId)
+              if (sa) {
+                await api.removeSheetAnalytic(sheet.id, sa.id)
+                removed++
+              }
+            }
+            setSheetStatus(removed > 0 ? `Удалено из ${removed} лист(ов)` : 'Нет ни в одном листе')
+            setTimeout(() => setSheetStatus(''), 3000)
+          }}
+          sx={{ textTransform: 'none', fontSize: 12 }}
+        >
+          Удалить со всех листов
+        </Button>
+      </Box>
+      {sheetStatus && <Typography variant="caption" color="success.main">{sheetStatus}</Typography>}
 
       <IconPickerDialog
         open={iconOpen}

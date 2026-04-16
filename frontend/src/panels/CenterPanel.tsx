@@ -28,7 +28,7 @@ export default function CenterPanel({ selection, onRefresh }: Props) {
       )}
       {selection.type === 'analytic' && (
         <>
-          <AnalyticSettings analyticId={selection.id} onRefresh={onInnerRefresh} />
+          <AnalyticSettings analyticId={selection.id} modelId={selection.modelId} onRefresh={onInnerRefresh} />
           <AnalyticFields analyticId={selection.id} key={`fields-${innerKey}`} />
           <AnalyticRecordsGrid analyticId={selection.id} key={`records-${innerKey}`} />
         </>
