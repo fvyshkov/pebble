@@ -686,6 +686,13 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 if val is None:
                     continue
 
+                # Skip non-numeric strings (month codes like m1/m2, labels, etc.)
+                if isinstance(val, str):
+                    try:
+                        val = float(val.replace(",", ".").replace(" ", ""))
+                    except (ValueError, AttributeError):
+                        continue
+
                 # Determine rule and formula from Claude analysis
                 if formula_info:
                     rule = "formula"
@@ -961,6 +968,12 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     val = ws_d.cell(row_num, col_num).value
                     if val is None:
                         continue
+                    # Skip non-numeric strings (month codes like m1/m2, labels, etc.)
+                    if isinstance(val, str):
+                        try:
+                            val = float(val.replace(",", ".").replace(" ", ""))
+                        except (ValueError, AttributeError):
+                            continue
                     if formula_info:
                         rule = "formula"
                         is_first = (period_rid == first_period_rid)
