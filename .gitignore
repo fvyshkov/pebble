@@ -17,3 +17,4 @@ pebble.zip
 .secrets.local
 save
 frontend/tsconfig.tsbuildinfo
+.github/workflows/
