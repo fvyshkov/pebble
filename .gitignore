@@ -13,3 +13,6 @@ models.xlsx
 .venv/
 pebble-release.zip
 pebble.zip
+
+# local secrets (never commit)
+.secrets.local

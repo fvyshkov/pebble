@@ -1,0 +1,19 @@
+# Render.com blueprint for Pebble.
+# Deploys backend (FastAPI) + built frontend as a single web service.
+# Persistent disk mounted at /data keeps pebble.db across deploys.
+services:
+  - type: web
+    name: pebble
+    runtime: docker
+    plan: starter            # $7/mo; use "free" if you prefer (but it sleeps)
+    region: frankfurt
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /api/models
+    disk:
+      name: pebble-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PEBBLE_DB
+        value: /data/pebble.db
