@@ -14,6 +14,7 @@ import PeopleOutlined from '@mui/icons-material/PeopleOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import LogoutOutlined from '@mui/icons-material/LogoutOutlined'
 import CalculateOutlined from '@mui/icons-material/CalculateOutlined'
+import SmartToyOutlined from '@mui/icons-material/SmartToyOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
@@ -21,6 +22,7 @@ import CenterPanel from './panels/CenterPanel'
 import Splitter from './components/Splitter'
 import UsersDialog from './components/UsersDialog'
 import PivotGrid from './features/sheet/PivotGrid'
+import ChatPanel from './features/chat/ChatPanel'
 import { PendingProvider, usePending } from './store/PendingContext'
 import * as api from './api'
 import './App.css'
@@ -205,6 +207,8 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   )
   const [calcRunning, setCalcRunning] = useState(false)
   const [calcProgress, setCalcProgress] = useState<{ done: number; total: number; sheet?: string } | null>(null)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatImportFile, setChatImportFile] = useState<File | null>(null)
   const calcedModelsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
@@ -348,6 +352,17 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             </Tooltip>
           )}
 
+          <Tooltip title={chatOpen ? 'Скрыть AI-чат' : 'AI-помощник'}>
+            <IconButton
+              size="small"
+              onClick={() => setChatOpen(v => !v)}
+              data-testid="chat-toggle"
+              sx={{ color: chatOpen ? '#1976d2' : undefined }}
+            >
+              <SmartToyOutlined fontSize="small" />
+            </IconButton>
+          </Tooltip>
+
           {authUser && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 1 }}>
               <Typography sx={{ fontSize: 13, color: '#555' }}>{authUser.username}</Typography>
@@ -373,25 +388,53 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
           </>}
 
           {/* Center area: settings or pivot grid */}
-          {mode === 'settings' ? (
-            <CenterPanel selection={selection} onRefresh={onRefresh} />
-          ) : isSheetSelected ? (
-            <PivotGrid
-              key={`${selection.id}-${refreshKey}`}
-              sheetId={selection.id} modelId={selection.modelId}
-              currentUserId={currentUserId}
-              mode={mode === 'formulas' ? 'settings' : 'data'}
-              calcMode={calcMode}
-            />
-          ) : (
-            <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
-              Выберите лист для просмотра данных
-            </div>
-          )}
+          <div style={{ flex: 1, display: 'flex', minWidth: 0 }}>
+            {mode === 'settings' ? (
+              <CenterPanel selection={selection} onRefresh={onRefresh} />
+            ) : isSheetSelected ? (
+              <PivotGrid
+                key={`${selection.id}-${refreshKey}`}
+                sheetId={selection.id} modelId={selection.modelId}
+                currentUserId={currentUserId}
+                mode={mode === 'formulas' ? 'settings' : 'data'}
+                calcMode={calcMode}
+              />
+            ) : (
+              <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
+                Выберите лист для просмотра данных
+              </div>
+            )}
+          </div>
+
+          {/* Right-docked AI chat — pushes other content via flex, not overlay */}
+          <ChatPanel
+            open={chatOpen}
+            onClose={() => setChatOpen(false)}
+            context={{
+              current_model_id: selection?.modelId ?? null,
+              current_sheet_id: isSheetSelected ? selection!.id : null,
+              user_id: currentUserId || null,
+            }}
+            onOpenSheet={(modelId, sheetId) => {
+              setSelection({ type: 'sheet', id: sheetId, modelId })
+              if (mode === 'settings') setMode('data')
+            }}
+            onSwitchMode={m => setMode(m)}
+            onImportExcel={file => setChatImportFile(file)}
+            onRefreshData={onRefresh}
+          />
         </div>
 
         <UsersDialog open={showUsers} onClose={() => setShowUsers(false)} />
         <ImportDialog open={showImport} onClose={() => setShowImport(false)} onImported={handleImported} />
+        {/* Excel dropped into chat — open the import dialog pre-filled */}
+        {chatImportFile && (
+          <ImportDialog
+            open={true}
+            onClose={() => setChatImportFile(null)}
+            onImported={(mid) => { handleImported(mid); setChatImportFile(null) }}
+          />
+        )}
       </div>
     </PendingProvider>
   )

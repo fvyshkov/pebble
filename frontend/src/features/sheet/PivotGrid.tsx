@@ -161,6 +161,36 @@ function PivotCell({ value, onChange, dataType, editable, forceEdit, onStopEdit 
     }
   }
 
+  // Commit current edit and move focus to adjacent cell in a given direction.
+  // For vertical moves keep the same column index; for horizontal, step within row.
+  // Clicks the cell's <td> (not the inner editable div), so non-editable cells
+  // still receive focus — matching Excel behavior.
+  const moveInDirection = (e: React.KeyboardEvent, dx: number, dy: number) => {
+    e.preventDefault()
+    commit()
+    const td = (e.target as HTMLElement).closest('td')
+    if (!td) return
+    const row = td.closest('tr')
+    if (!row) return
+    const cells = Array.from(row.querySelectorAll('td'))
+    const colIdx = cells.indexOf(td)
+    if (dy === 0) {
+      // Horizontal: move within current row
+      const nextIdx = colIdx + dx
+      if (nextIdx < 1 || nextIdx >= cells.length) return // 0 is label column
+      setTimeout(() => cells[nextIdx].click(), 0)
+      return
+    }
+    // Vertical: find sibling row, same column index
+    const allRows = Array.from(row.closest('tbody')?.querySelectorAll('tr') || [])
+    const rowIdx = allRows.indexOf(row)
+    const nextRowIdx = rowIdx + dy
+    if (nextRowIdx < 0 || nextRowIdx >= allRows.length) return
+    const nextRow = allRows[nextRowIdx]
+    const nextCell = nextRow.querySelectorAll('td')[colIdx]
+    if (nextCell) setTimeout(() => (nextCell as HTMLElement).click(), 0)
+  }
+
   return (
     <input
       ref={inputRef}
@@ -171,6 +201,12 @@ function PivotCell({ value, onChange, dataType, editable, forceEdit, onStopEdit 
         if (e.key === 'Tab') { moveToNext(e, e.shiftKey) }
         else if (e.key === 'Enter') { commit() }
         else if (e.key === 'Escape') { setLocal(value); setEditing(false) }
+        // Excel-style: arrows commit the current edit and move focus.
+        // Ctrl+Arrow is handled globally (jump-to-next-nonempty) — don't hijack.
+        else if (!e.ctrlKey && !e.metaKey && e.key === 'ArrowDown') { moveInDirection(e, 0, 1) }
+        else if (!e.ctrlKey && !e.metaKey && e.key === 'ArrowUp') { moveInDirection(e, 0, -1) }
+        else if (!e.ctrlKey && !e.metaKey && e.key === 'ArrowRight') { moveInDirection(e, 1, 0) }
+        else if (!e.ctrlKey && !e.metaKey && e.key === 'ArrowLeft') { moveInDirection(e, -1, 0) }
       }}
       style={{
         width: '100%', border: 'none', outline: 'none', padding: '4px 6px',
@@ -271,6 +307,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [colLevelToggles, setColLevelToggles] = useState<Record<number, boolean>>({})
   // Focus state: [rowIndex, colIndex] in the data grid — always has a focused cell
   const [focusCell, setFocusCell] = useState<[number, number]>([0, 0])
+  const focusCellRef = useRef<[number, number]>([0, 0])
+  useEffect(() => { focusCellRef.current = focusCell }, [focusCell])
   const [selAnchor, setSelAnchor] = useState<[number, number] | null>(null) // selection anchor for shift+arrows
   const [editingCell, setEditingCell] = useState(false)
   const gridRef = useRef<HTMLTableElement>(null)
@@ -670,32 +708,16 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
 
   const isNumeric = dataType !== 'string'
   const colAnalyticId = order[0]
+
+  // Pinned analytics (leaf OR group) are fully removed from the row tree.
+  // Their value is fixed to the chosen record (shown as a Chip in the toolbar);
+  // makeCoordKey substitutes pinned[aId] when building cell keys.
   const pinnedEntries = order.slice(1).filter(id => !!pinned[id])
+  const rowAnalyticIds = order.slice(1).filter(id => !pinned[id])
 
-  // Pinned leaf analytics are fully fixed — remove from rows
-  // Pinned group analytics stay in rows but with filtered tree (pinned node + descendants)
-  const pinnedGroupIds = useMemo(() => {
-    const s = new Set<string>()
-    for (const aId of pinnedEntries) {
-      const tree = recordsByAnalytic[aId] || []
-      const node = findNodeById(tree, pinned[aId])
-      if (node && node.children.length > 0) s.add(aId)
-    }
-    return s
-  }, [pinnedEntries, pinned, recordsByAnalytic])
-
-  const rowAnalyticIds = order.slice(1).filter(id => !pinned[id] || pinnedGroupIds.has(id))
-
-  // Build filtered record trees for pinned group analytics
+  // Build filtered record trees (permissions only — pinned analytics are not in rows).
   const filteredRecordsByAnalytic = useMemo(() => {
     const result: Record<string, RecordNode[]> = { ...recordsByAnalytic }
-    // Filter by pinned groups
-    for (const aId of pinnedGroupIds) {
-      const tree = recordsByAnalytic[aId] || []
-      const node = findNodeById(tree, pinned[aId])
-      if (node) result[aId] = [node]
-    }
-    // Filter by allowed records (permission-based)
     for (const [aId, allowedIds] of Object.entries(allowedRecords)) {
       if (!result[aId]) continue
       const allowed = new Set(allowedIds)
@@ -706,9 +728,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
       result[aId] = filterTree(result[aId])
     }
     return result
-  }, [recordsByAnalytic, pinnedGroupIds, pinned, allowedRecords])
-
-  const hasPinnedGroup = pinnedGroupIds.size > 0
+  }, [recordsByAnalytic, allowedRecords])
   const colTree = recordsByAnalytic[colAnalyticId] || []
   const colDepth = maxDepth(colTree)
 
@@ -816,7 +836,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         const isLastAnalytic = ai === totalAnalytics - 1
         // A leaf node in its analytic that has a sub-analytic beneath it can also be collapsed
         const canCollapse = hasChildren || (!hasChildren && !isLastAnalytic)
-        const isGroup = hasChildren || !isLastAnalytic || hasPinnedGroup
+        const isGroup = hasChildren || !isLastAnalytic
         const indent = baseIndent + level
         const allAncestors = [...ancestors, ...parentChain]
 
@@ -838,7 +858,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     if (totalAnalytics > 0) buildLevel(0, {}, 0, [])
     else result.push({ recordIds: {}, label: '', indent: 0, isGroup: false, analyticId: '', ancestorRecordIds: [], hasChildren: false, canCollapse: false })
     return result
-  }, [rowAnalyticIds, filteredRecordsByAnalytic, hasPinnedGroup])
+  }, [rowAnalyticIds, filteredRecordsByAnalytic])
 
   // Filter rows by collapse state
   const visibleRows = useMemo(() => {
@@ -1088,6 +1108,85 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
     }
   }, [editingCell, selRange, visibleRows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId, reloadCells, calcMode])
 
+  // Excel-style fill: Ctrl+D replicates the top row of the selection down;
+  // Ctrl+R replicates the left column of the selection right. Only writes to
+  // editable (manual-rule) cells; skips sum/formula/sum-columns.
+  // If selection is a single cell, falls back to (focusCell .. last row/col in row/col dim) — that's
+  // unusual for Excel; keeping behavior conservative: require an explicit range.
+  const handleFill = useCallback(async (direction: 'down' | 'right') => {
+    if (editingCell) return
+    const { r1, c1, r2, c2 } = selRange
+    if (r1 === r2 && c1 === c2) return // no range → nothing to fill
+    const toSave: { coord_key: string; value: string; data_type: string; user_id?: string }[] = []
+    const newCells = { ...cells }
+    for (let ri = r1; ri <= r2; ri++) {
+      for (let ci = c1; ci <= c2; ci++) {
+        if (direction === 'down' && ri === r1) continue      // top row is source
+        if (direction === 'right' && ci === c1) continue     // left col is source
+        const srcRi = direction === 'down' ? r1 : ri
+        const srcCi = direction === 'right' ? c1 : ci
+        const srcRow = visibleRows[srcRi]; const srcCol = displayCols[srcCi]
+        const dstRow = visibleRows[ri]; const dstCol = displayCols[ci]
+        if (!srcRow || !srcCol || !dstRow || !dstCol) continue
+        if (dstCol.isSum) continue
+        const dstKey = makeCoordKey(dstRow.recordIds, dstCol.node.record.id)
+        const rule = resolveRule(dstKey, dstRow.isGroup)
+        if (rule !== 'manual') continue
+        const srcKey = makeCoordKey(srcRow.recordIds, srcCol.node.record.id)
+        const val = cells[srcKey] ?? ''
+        newCells[dstKey] = val
+        toSave.push({ coord_key: dstKey, value: val, data_type: dataType, user_id: currentUserId })
+      }
+    }
+    setCells(newCells)
+    if (toSave.length > 0) {
+      const noRecalc = calcMode === 'manual'
+      await api.saveCells(sheetId, toSave, noRecalc)
+      if (!noRecalc) reloadCells()
+    }
+  }, [editingCell, selRange, visibleRows, displayCols, cells, makeCoordKey, dataType, currentUserId, sheetId, reloadCells, calcMode])
+
+  // Ctrl+Arrow — jump to next non-empty cell in the given direction,
+  // mimicking Excel. If the current cell is non-empty, jump to the last
+  // non-empty in that run; otherwise jump to the next non-empty start.
+  const jumpToNonEmpty = useCallback((dr: number, dc: number) => {
+    const [fr, fc] = focusCellRef.current
+    const totalRows = visibleRows.length
+    const totalCols = displayCols.length
+    const valAt = (ri: number, ci: number): string => {
+      const row = visibleRows[ri]; const col = displayCols[ci]
+      if (!row || !col) return ''
+      if (col.isSum) return '' // sum cells treated as empty for navigation
+      const k = makeCoordKey(row.recordIds, col.node.record.id)
+      return cells[k] ?? ''
+    }
+    const inBounds = (r: number, c: number) => r >= 0 && r < totalRows && c >= 0 && c < totalCols
+    const currentNonEmpty = valAt(fr, fc) !== ''
+    let r = fr + dr, c = fc + dc
+    if (!inBounds(r, c)) return [fr, fc] as [number, number]
+    if (currentNonEmpty) {
+      // Walk until we hit an empty cell; stop at the last non-empty one
+      let lastNonEmpty: [number, number] = [fr, fc]
+      while (inBounds(r, c) && valAt(r, c) !== '') {
+        lastNonEmpty = [r, c]
+        r += dr; c += dc
+      }
+      // If the neighbour was empty from the start, continue until next non-empty
+      if (lastNonEmpty[0] === fr && lastNonEmpty[1] === fc) {
+        while (inBounds(r, c) && valAt(r, c) === '') { r += dr; c += dc }
+        return inBounds(r, c) ? [r, c] : lastNonEmpty
+      }
+      return lastNonEmpty
+    }
+    // Current empty → skip empties, land on first non-empty
+    while (inBounds(r, c) && valAt(r, c) === '') { r += dr; c += dc }
+    if (inBounds(r, c)) return [r, c] as [number, number]
+    // No non-empty found → jump to edge
+    const edgeR = dr > 0 ? totalRows - 1 : dr < 0 ? 0 : fr
+    const edgeC = dc > 0 ? totalCols - 1 : dc < 0 ? 0 : fc
+    return [edgeR, edgeC] as [number, number]
+  }, [visibleRows, displayCols, cells, makeCoordKey])
+
   // ─── Context menu + history ───
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; coordKey: string } | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -1109,19 +1208,31 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   }
 
   // ─── Save (auto-recalc on backend, then reload) ───
-  const handleCellSave = async (coordKey: string, value: string) => {
+  const handleCellSave = useCallback(async (coordKey: string, value: string) => {
     setCells(prev => ({ ...prev, [coordKey]: value }))
     const noRecalc = calcMode === 'manual'
     await api.saveCells(sheetId, [{ coord_key: coordKey, value, data_type: dataType, user_id: currentUserId }], noRecalc)
     if (!noRecalc) reloadCells()
-  }
+  }, [sheetId, dataType, currentUserId, calcMode, reloadCells])
 
   const handleReorder = (newOrder: string[]) => {
     setOrder(newOrder)
     if (pinned[newOrder[0]]) setPinned(prev => { const n = { ...prev }; delete n[newOrder[0]]; return n })
   }
-  const handlePin = (aId: string, rId: string) => setPinned(prev => ({ ...prev, [aId]: rId }))
-  const handleUnpin = (aId: string) => setPinned(prev => { const n = { ...prev }; delete n[aId]; return n })
+  const handlePin = useCallback((aId: string, rId: string) => setPinned(prev => ({ ...prev, [aId]: rId })), [])
+  const handleUnpin = useCallback((aId: string) => setPinned(prev => { const n = { ...prev }; delete n[aId]; return n }), [])
+
+  // Single stable cell-click handler — avoid allocating one closure per (row, col) on every render.
+  const handleCellClick = useCallback((ri: number, ci: number, shiftKey: boolean) => {
+    if (shiftKey) {
+      setSelAnchor(prev => prev ?? [focusCellRef.current[0], focusCellRef.current[1]])
+      setFocusCell([ri, ci])
+    } else {
+      setSelAnchor(null)
+      setFocusCell([ri, ci])
+    }
+    setEditingCell(false)
+  }, [])
 
   if (loading) return (
     <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: '#fafafa' }}>
@@ -1305,21 +1416,33 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
             setFocusCell([nr, nc])
           }
           switch (e.key) {
-            case 'ArrowDown': e.preventDefault(); moveWithSelection(Math.min(fr + 1, totalRows - 1), fc); break
-            case 'ArrowUp': e.preventDefault(); moveWithSelection(Math.max(fr - 1, 0), fc); break
+            case 'ArrowDown':
+              e.preventDefault()
+              if (e.ctrlKey || e.metaKey) { const [nr, nc] = jumpToNonEmpty(1, 0); moveWithSelection(nr, nc) }
+              else { moveWithSelection(Math.min(fr + 1, totalRows - 1), fc) }
+              break
+            case 'ArrowUp':
+              e.preventDefault()
+              if (e.ctrlKey || e.metaKey) { const [nr, nc] = jumpToNonEmpty(-1, 0); moveWithSelection(nr, nc) }
+              else { moveWithSelection(Math.max(fr - 1, 0), fc) }
+              break
             case 'ArrowRight':
               e.preventDefault()
-              if ((e.metaKey || e.ctrlKey) && visibleRows[fr]?.canCollapse && visibleRows[fr]?.ownRecordId && collapsedRows.has(visibleRows[fr].ownRecordId!)) {
+              if (e.altKey && visibleRows[fr]?.canCollapse && visibleRows[fr]?.ownRecordId && collapsedRows.has(visibleRows[fr].ownRecordId!)) {
                 toggleRowCollapse(visibleRows[fr].ownRecordId!)
-              } else if (!e.metaKey && !e.ctrlKey) {
+              } else if (e.ctrlKey || e.metaKey) {
+                const [nr, nc] = jumpToNonEmpty(0, 1); moveWithSelection(nr, nc)
+              } else {
                 moveWithSelection(fr, Math.min(fc + 1, totalCols - 1))
               }
               break
             case 'ArrowLeft':
               e.preventDefault()
-              if ((e.metaKey || e.ctrlKey) && visibleRows[fr]?.canCollapse && visibleRows[fr]?.ownRecordId && !collapsedRows.has(visibleRows[fr].ownRecordId!)) {
+              if (e.altKey && visibleRows[fr]?.canCollapse && visibleRows[fr]?.ownRecordId && !collapsedRows.has(visibleRows[fr].ownRecordId!)) {
                 toggleRowCollapse(visibleRows[fr].ownRecordId!)
-              } else if (!e.metaKey && !e.ctrlKey) {
+              } else if (e.ctrlKey || e.metaKey) {
+                const [nr, nc] = jumpToNonEmpty(0, -1); moveWithSelection(nr, nc)
+              } else {
                 moveWithSelection(fr, Math.max(fc - 1, 0))
               }
               break
@@ -1344,6 +1467,14 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                 setSelAnchor([0, 0])
                 setFocusCell([totalRows - 1, totalCols - 1])
               }
+              break
+            case 'd':
+            case 'D':
+              if (e.ctrlKey || e.metaKey) { e.preventDefault(); handleFill('down') }
+              break
+            case 'r':
+            case 'R':
+              if (e.ctrlKey || e.metaKey) { e.preventDefault(); handleFill('right') }
               break
             default:
               // Start typing immediately enters edit mode
@@ -1451,15 +1582,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   const isSel = isSelected(ri, ci)
                   const focusBorder = isFocused ? '2px solid #1976d2' : isSel ? '1px solid #90caf9' : '1px solid #e0e0e0'
                   const selBg = isSel && !isFocused ? 'rgba(25,118,210,0.08)' : undefined
-                  const cellClick = (e: React.MouseEvent) => {
-                    if (e.shiftKey) {
-                      if (!selAnchor) setSelAnchor([focusCell[0], focusCell[1]])
-                      setFocusCell([ri, ci])
-                    } else {
-                      setSelAnchor(null); setFocusCell([ri, ci])
-                    }
-                    setEditingCell(false)
-                  }
+                  const cellClick = (e: React.MouseEvent) => handleCellClick(ri, ci, e.shiftKey)
 
                   // For sum columns: show aggregated value (data mode) or label (settings mode)
                   if (col.isSum) {

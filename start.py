@@ -81,39 +81,139 @@ def find_npm():
                 return candidate
     return None
 
-def install_node():
-    """Install Node.js automatically."""
-    print("[Pebble] Node.js not found. Installing...")
+NODE_MIN = 18
+NODE_MAX = 22  # LTS versions: 18, 20, 22 — avoid odd/bleeding-edge releases
+
+def _find_node():
+    """Return path to node executable, checking common Windows paths too."""
+    node = shutil.which("node")
+    if node:
+        return node
     if sys.platform == "win32":
-        # Download and install Node.js LTS via MSI (silent)
-        import urllib.request
-        url = "https://nodejs.org/dist/v22.15.0/node-v22.15.0-x64.msi"
-        msi = os.path.join(os.environ.get("TEMP", "."), "node-install.msi")
-        print(f"[Pebble] Downloading Node.js from {url}...")
-        urllib.request.urlretrieve(url, msi)
-        print("[Pebble] Installing Node.js (this may take a minute)...")
-        subprocess.check_call(["msiexec", "/i", msi, "/qn", "/norestart"])
-        os.remove(msi)
-        # Add to PATH for current process
+        for d in [
+            os.path.expandvars(r"%ProgramFiles%\nodejs"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\nodejs"),
+        ]:
+            candidate = os.path.join(d, "node.exe")
+            if os.path.isfile(candidate):
+                # Add to PATH so child processes (npm) also see it
+                if d not in os.environ["PATH"]:
+                    os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
+                return candidate
+    return None
+
+def get_node_version():
+    """Return (major_version, node_path) or (None, None)."""
+    node = _find_node()
+    if not node:
+        return None, None
+    try:
+        out = subprocess.check_output([node, "--version"], text=True).strip()
+        return int(out.lstrip("v").split(".")[0]), node
+    except Exception:
+        return None, None
+
+def _refresh_win_path():
+    """On Windows, re-read the system/user PATH from the registry so the
+    current process sees freshly-installed programs (winget doesn't update
+    the running shell's PATH)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        parts = []
+        for root, sub in [
+            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+            (winreg.HKEY_CURRENT_USER, r"Environment"),
+        ]:
+            try:
+                with winreg.OpenKey(root, sub) as key:
+                    val, _ = winreg.QueryValueEx(key, "Path")
+                    parts.append(val)
+            except FileNotFoundError:
+                pass
+        if parts:
+            os.environ["PATH"] = os.pathsep.join(parts)
+    except Exception:
+        pass
+
+def install_node():
+    """Install Node.js LTS automatically."""
+    print("[Pebble] Installing Node.js LTS...")
+    if sys.platform == "win32":
+        if shutil.which("winget"):
+            # Uninstall any incompatible version first
+            print("[Pebble] Removing old Node.js (if any)...")
+            subprocess.run(["winget", "uninstall", "OpenJS.NodeJS",
+                            "--accept-source-agreements", "--silent"],
+                           capture_output=True)
+            subprocess.run(["winget", "uninstall", "OpenJS.NodeJS.LTS",
+                            "--accept-source-agreements", "--silent"],
+                           capture_output=True)
+            print("[Pebble] Installing Node.js LTS via winget...")
+            subprocess.check_call(["winget", "install", "OpenJS.NodeJS.LTS",
+                                   "--accept-source-agreements",
+                                   "--accept-package-agreements"])
+        else:
+            print("[Pebble] ERROR: winget not found. Install Node.js LTS manually: https://nodejs.org")
+            sys.exit(1)
+        # Refresh PATH from registry so we see the new install
+        _refresh_win_path()
+        # Also add default location explicitly
         node_dir = os.path.expandvars(r"%ProgramFiles%\nodejs")
-        if node_dir not in os.environ["PATH"]:
+        if os.path.isdir(node_dir) and node_dir not in os.environ["PATH"]:
             os.environ["PATH"] = node_dir + os.pathsep + os.environ["PATH"]
     elif sys.platform == "darwin":
         if shutil.which("brew"):
-            subprocess.check_call(["brew", "install", "node"])
+            subprocess.check_call(["brew", "install", "node@20"])
         else:
-            print("[Pebble] ERROR: Install Node.js from https://nodejs.org")
+            print("[Pebble] ERROR: Install Node.js LTS from https://nodejs.org")
             sys.exit(1)
     else:
-        # Linux — try common package managers
+        # Linux — use NodeSource for proper LTS version
         if shutil.which("apt-get"):
             subprocess.check_call(["sudo", "apt-get", "update", "-qq"])
-            subprocess.check_call(["sudo", "apt-get", "install", "-y", "-qq", "nodejs", "npm"])
+            subprocess.check_call(["sudo", "apt-get", "install", "-y", "-qq",
+                                   "ca-certificates", "curl", "gnupg"])
+            subprocess.check_call(
+                "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -",
+                shell=True)
+            subprocess.check_call(["sudo", "apt-get", "install", "-y", "-qq", "nodejs"])
         elif shutil.which("dnf"):
-            subprocess.check_call(["sudo", "dnf", "install", "-y", "nodejs", "npm"])
+            subprocess.check_call(
+                "curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -",
+                shell=True)
+            subprocess.check_call(["sudo", "dnf", "install", "-y", "nodejs"])
         else:
-            print("[Pebble] ERROR: Install Node.js from https://nodejs.org")
+            print("[Pebble] ERROR: Install Node.js LTS from https://nodejs.org")
             sys.exit(1)
+
+def ensure_node():
+    """Make sure a compatible Node.js is available; install if needed."""
+    ver, _ = get_node_version()
+    need_install = ver is None or ver < NODE_MIN or ver > NODE_MAX
+    if need_install:
+        if ver is not None:
+            print(f"[Pebble] Node.js v{ver} detected — need v{NODE_MIN}-{NODE_MAX} (LTS).")
+        install_node()
+        # Wipe node_modules — native modules built for wrong Node ABI
+        node_modules = os.path.join(FRONTEND, "node_modules")
+        if os.path.isdir(node_modules):
+            print("[Pebble] Removing old node_modules (incompatible)...")
+            shutil.rmtree(node_modules, ignore_errors=True)
+    # Verify node actually works
+    ver2, node_path = get_node_version()
+    if ver2 is None or ver2 < NODE_MIN or ver2 > NODE_MAX:
+        print(f"[Pebble] ERROR: Node.js LTS not available (found: v{ver2}).")
+        print("[Pebble] Please install Node.js LTS (v20) manually: https://nodejs.org")
+        sys.exit(1)
+    print(f"[Pebble] Using Node.js v{ver2} ({node_path})")
+    npm = find_npm()
+    if not npm:
+        print("[Pebble] ERROR: npm not found.")
+        print("[Pebble] Please install Node.js LTS manually: https://nodejs.org")
+        sys.exit(1)
+    return npm
 
 def ensure_frontend():
     """Build frontend if dist/ doesn't exist."""
@@ -122,14 +222,7 @@ def ensure_frontend():
 
     print("[Pebble] Frontend not built — building now...")
 
-    npm = find_npm()
-    if not npm:
-        install_node()
-        npm = find_npm()
-        if not npm:
-            print("[Pebble] ERROR: npm still not found after install.")
-            print("[Pebble] Please install Node.js manually: https://nodejs.org")
-            sys.exit(1)
+    npm = ensure_node()
 
     # npm install
     node_modules = os.path.join(FRONTEND, "node_modules")

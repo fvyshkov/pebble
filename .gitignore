@@ -15,3 +15,5 @@ pebble.zip
 
 # local secrets (never commit)
 .secrets.local
+save
+frontend/tsconfig.tsbuildinfo

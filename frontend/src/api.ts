@@ -218,3 +218,18 @@ export const importExcel = (analyticId: string, file: File) => {
   fd.append('file', file)
   return fetch(`${BASE}/excel/analytics/${analyticId}/import`, { method: 'POST', body: fd }).then(r => json<AnalyticRecord[]>(r))
 }
+
+// Chat
+export interface ChatAction {
+  type: string
+  [k: string]: any
+}
+export const chatMessage = (
+  messages: { role: string; content: any }[],
+  context: { current_model_id?: string | null; current_sheet_id?: string | null; user_id?: string | null },
+) =>
+  fetch(`${BASE}/chat/message`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, context }),
+  }).then(r => json<{ message: string; actions: ChatAction[] }>(r))
