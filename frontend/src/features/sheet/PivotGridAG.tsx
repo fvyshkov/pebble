@@ -15,6 +15,10 @@ import {
   type ColDef,
   type ColGroupDef,
   type CellValueChangedEvent,
+  type GridApi,
+  type GridReadyEvent,
+  type FirstDataRenderedEvent,
+  type RowGroupOpenedEvent,
 } from 'ag-grid-community'
 import {
   AllEnterpriseModule,
@@ -80,6 +84,11 @@ export default function PivotGridAG({ sheetId, currentUserId }: Props) {
   const analyticsRef = useRef<Record<string, Analytic>>({})
   const rowAIdsRef = useRef<string[]>([])
   const dbOrdRef = useRef<string[]>([])
+  // Lazy-load infrastructure
+  const gridApiRef = useRef<GridApi | null>(null)
+  const loadedKeysRef = useRef<Set<string>>(new Set())
+  const cellMapRef = useRef<Record<string, string>>({})
+  const colLeafIdsRef = useRef<string[]>([])
 
   // ── Data load ────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
@@ -177,14 +186,11 @@ export default function PivotGridAG({ sheetId, currentUserId }: Props) {
       ]
       setColumnDefs(defs)
 
-      // ── Cells ──
-      const cellData = await api.getCells(sheetId, currentUserId)
-      const cellMap: Record<string, string> = {}
-      for (const c of cellData) cellMap[c.coord_key] = c.value ?? ''
-
       // ── Row data: cartesian product of row leaves ──
       // Build combinations of leaf records for each row analytic (ignoring hierarchy —
       // AG Grid handles grouping from the r_<aId> fields).
+      // NOTE: cell values are NOT fetched here — they load lazily on row group
+      // expansion via onRowGroupOpened / onFirstDataRendered below.
       const rowLeaves: RecordNode[][] = rowAIds.map(aId => getLeaves(rMap[aId] || []))
       const cartesian = (lists: RecordNode[][]): RecordNode[][] => {
         if (lists.length === 0) return [[]]
@@ -193,6 +199,22 @@ export default function PivotGridAG({ sheetId, currentUserId }: Props) {
         const out: RecordNode[][] = []
         for (const h of head) for (const r of restProd) out.push([h, ...r])
         return out
+      }
+
+      // Reset lazy-load state for the new sheet
+      cellMapRef.current = {}
+      loadedKeysRef.current = new Set()
+      colLeafIdsRef.current = colLeaves.map(l => l.record.id)
+
+      // Upfront fetch of all cells for this sheet. This populates the full
+      // cellMap so lookups with right-truncated keys work without requiring
+      // multiple round-trips. Cells are small enough that this is fine for
+      // Phase 1; true lazy loading can be re-introduced once cell granularity
+      // matches AG Grid's cartesian leaf model.
+      const cellData = await api.getCells(sheetId, currentUserId)
+      for (const c of cellData) {
+        cellMapRef.current[c.coord_key] = c.value ?? ''
+        loadedKeysRef.current.add(c.coord_key)
       }
 
       const combos = cartesian(rowLeaves)
@@ -207,16 +229,23 @@ export default function PivotGridAG({ sheetId, currentUserId }: Props) {
         })
 
         for (const leaf of colLeaves) {
-          // coord_key = join of record ids in dbOrd order
+          // coord_key = join of record ids in dbOrd order. Cells in the DB
+          // may be stored at a lower granularity (e.g. only period × Показатели)
+          // — try progressive right-truncation on lookup.
           const parts: string[] = []
           for (const aId of dbOrd) {
             if (aId === colAId) parts.push(leaf.record.id)
             else if (pinned[aId]) parts.push(pinned[aId])
             else if (rowRecordIds[aId]) parts.push(rowRecordIds[aId])
           }
-          const coordKey = parts.join('|')
-          row[`p_${leaf.record.id}`] = cellMap[coordKey] ?? ''
-          row[`__coord_${leaf.record.id}`] = coordKey
+          let v = ''
+          for (let n = parts.length; n >= 2; n--) {
+            const k = parts.slice(0, n).join('|')
+            if (cellMapRef.current[k] !== undefined) { v = cellMapRef.current[k]; break }
+          }
+          row[`p_${leaf.record.id}`] = v
+          row[`__coord_${leaf.record.id}`] = parts.join('|')
+          row[`__parts_${leaf.record.id}`] = parts
         }
         rows.push(row)
       }
@@ -230,6 +259,103 @@ export default function PivotGridAG({ sheetId, currentUserId }: Props) {
   }, [sheetId, currentUserId])
 
   useEffect(() => { load() }, [load])
+
+  // ── Lazy cell loader ─────────────────────────────────────────────────────
+  // Fetches cells for the given row nodes (leaves only) × all column leaves,
+  // deduping against already-loaded coord keys. Refreshes affected rows.
+  const fetchCellsForRows = useCallback(async (rowNodes: any[]) => {
+    if (rowNodes.length === 0) return
+    const leafIds = colLeafIdsRef.current
+    if (leafIds.length === 0) return
+    // Build full list of candidate keys: for each (row × leaf) we query the
+    // full-length key and all right-truncations down to length 2 — the DB may
+    // store cells at a coarser granularity.
+    const keysToLoad = new Set<string>()
+    for (const node of rowNodes) {
+      const data = node.data
+      if (!data) continue
+      for (const leafId of leafIds) {
+        const parts: string[] | undefined = data[`__parts_${leafId}`]
+        if (!parts || parts.length < 2) continue
+        for (let n = parts.length; n >= 2; n--) {
+          const k = parts.slice(0, n).join('|')
+          if (!loadedKeysRef.current.has(k)) keysToLoad.add(k)
+        }
+      }
+    }
+    if (keysToLoad.size === 0) return
+    const keysArr = Array.from(keysToLoad)
+    try {
+      const cellData = await api.getCellsPartial(sheetId, keysArr, currentUserId)
+      for (const c of cellData) cellMapRef.current[c.coord_key] = c.value ?? ''
+      for (const k of keysArr) loadedKeysRef.current.add(k)
+      // Merge values into rows: for each (row × leaf) pick the first matching
+      // key from longest to shortest (more specific wins).
+      const toUpdate: any[] = []
+      for (const node of rowNodes) {
+        const data = node.data
+        if (!data) continue
+        let changed = false
+        for (const leafId of leafIds) {
+          const parts: string[] | undefined = data[`__parts_${leafId}`]
+          if (!parts) continue
+          let v: string | undefined
+          for (let n = parts.length; n >= 2; n--) {
+            const k = parts.slice(0, n).join('|')
+            if (cellMapRef.current[k] !== undefined) { v = cellMapRef.current[k]; break }
+          }
+          if (v !== undefined && data[`p_${leafId}`] !== v) {
+            data[`p_${leafId}`] = v
+            changed = true
+          }
+        }
+        if (changed) toUpdate.push(data)
+      }
+      if (toUpdate.length > 0 && gridApiRef.current) {
+        // Mutating row data in place requires an explicit refresh — applyTransaction
+        // on grouped client-side rows is unreliable. Refresh cells directly.
+        gridApiRef.current.refreshCells({ force: true })
+      }
+    } catch (err: any) {
+      setError(`Не удалось загрузить ячейки: ${err?.message || err}`)
+    }
+  }, [sheetId, currentUserId])
+
+  const onGridReady = useCallback((e: GridReadyEvent) => {
+    gridApiRef.current = e.api
+  }, [])
+
+  // Collect leaf nodes currently displayed (respects collapse state) and load
+  // their cells. Used by both onFirstDataRendered and onRowGroupOpened.
+  const loadVisibleCells = useCallback((api: GridApi) => {
+    const visibleLeaves: any[] = []
+    const total = api.getDisplayedRowCount()
+    for (let i = 0; i < total; i++) {
+      const node = api.getDisplayedRowAtIndex(i)
+      if (node && !node.group && node.data) visibleLeaves.push(node)
+    }
+    if (visibleLeaves.length > 0) fetchCellsForRows(visibleLeaves)
+  }, [fetchCellsForRows])
+
+  const onFirstDataRendered = useCallback((e: FirstDataRenderedEvent) => {
+    loadVisibleCells(e.api)
+  }, [loadVisibleCells])
+
+  const onRowGroupOpened = useCallback((e: RowGroupOpenedEvent) => {
+    if (!e.expanded || !e.node) return
+    // Walk all leaf descendants of the opened node regardless of whether
+    // deeper groups are still collapsed — this pre-loads cells so further
+    // drill-down is instant (matches legacy PivotGrid behaviour).
+    const leaves: any[] = []
+    const walk = (n: any) => {
+      if (!n) return
+      if (!n.group && n.data) { leaves.push(n); return }
+      const kids = n.childrenAfterGroup || n.allLeafChildren || []
+      for (const c of kids) walk(c)
+    }
+    walk(e.node)
+    if (leaves.length > 0) fetchCellsForRows(leaves)
+  }, [fetchCellsForRows])
 
   // ── Cell edit → save ─────────────────────────────────────────────────────
   const onCellValueChanged = useCallback(async (e: CellValueChangedEvent) => {
@@ -276,13 +402,15 @@ export default function PivotGridAG({ sheetId, currentUserId }: Props) {
           rowData={rowData}
           columnDefs={columnDefs}
           onCellValueChanged={onCellValueChanged}
+          onGridReady={onGridReady}
+          onFirstDataRendered={onFirstDataRendered}
+          onRowGroupOpened={onRowGroupOpened}
           animateRows={false}
           stopEditingWhenCellsLoseFocus
           singleClickEdit={false}
           enterNavigatesVertically
           enterNavigatesVerticallyAfterEdit
-          enableRangeSelection
-          enableFillHandle
+          cellSelection={{ handle: { mode: 'fill' } }}
           undoRedoCellEditing
           undoRedoCellEditingLimit={50}
           suppressRowHoverHighlight={false}
