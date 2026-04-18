@@ -14,5 +14,4 @@ frontend/dist
 pebble-release.zip
 pebble.zip
 .secrets.local
-.env
 tests
