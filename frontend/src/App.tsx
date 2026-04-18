@@ -22,6 +22,7 @@ import CenterPanel from './panels/CenterPanel'
 import Splitter from './components/Splitter'
 import UsersDialog from './components/UsersDialog'
 import PivotGrid from './features/sheet/PivotGrid'
+import PivotGridAG from './features/sheet/PivotGridAG'
 import ChatPanel from './features/chat/ChatPanel'
 import { PendingProvider, usePending } from './store/PendingContext'
 import * as api from './api'
@@ -209,6 +210,12 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const [calcProgress, setCalcProgress] = useState<{ done: number; total: number; sheet?: string } | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
   const [chatImportFile, setChatImportFile] = useState<File | null>(null)
+  const [useAgGrid, setUseAgGrid] = useState<boolean>(
+    () => localStorage.getItem('pebble_useAgGrid') === '1'
+  )
+  useEffect(() => {
+    localStorage.setItem('pebble_useAgGrid', useAgGrid ? '1' : '0')
+  }, [useAgGrid])
   const calcedModelsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
@@ -352,6 +359,17 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             </Tooltip>
           )}
 
+          <Tooltip title={useAgGrid ? 'Переключиться на старый grid' : 'Переключиться на AG Grid (бета)'}>
+            <IconButton
+              size="small"
+              onClick={() => setUseAgGrid(v => !v)}
+              data-testid="aggrid-toggle"
+              sx={{ color: useAgGrid ? '#1976d2' : undefined, fontSize: 12 }}
+            >
+              <span style={{ fontWeight: 700, fontSize: 11 }}>{useAgGrid ? 'AG' : 'old'}</span>
+            </IconButton>
+          </Tooltip>
+
           <Tooltip title={chatOpen ? 'Скрыть AI-чат' : 'AI-помощник'}>
             <IconButton
               size="small"
@@ -392,13 +410,21 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             {mode === 'settings' ? (
               <CenterPanel selection={selection} onRefresh={onRefresh} />
             ) : isSheetSelected ? (
-              <PivotGrid
-                key={`${selection.id}-${refreshKey}`}
-                sheetId={selection.id} modelId={selection.modelId}
-                currentUserId={currentUserId}
-                mode={mode === 'formulas' ? 'settings' : 'data'}
-                calcMode={calcMode}
-              />
+              useAgGrid ? (
+                <PivotGridAG
+                  key={`ag-${selection.id}-${refreshKey}`}
+                  sheetId={selection.id} modelId={selection.modelId}
+                  currentUserId={currentUserId}
+                />
+              ) : (
+                <PivotGrid
+                  key={`${selection.id}-${refreshKey}`}
+                  sheetId={selection.id} modelId={selection.modelId}
+                  currentUserId={currentUserId}
+                  mode={mode === 'formulas' ? 'settings' : 'data'}
+                  calcMode={calcMode}
+                />
+              )
             ) : (
               <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
                 Выберите лист для просмотра данных
