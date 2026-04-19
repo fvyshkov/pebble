@@ -74,6 +74,23 @@ export const removeSheetAnalytic = (sheetId: string, saId: string) =>
 export const reorderSheetAnalytics = (sheetId: string, orderedIds: string[]) =>
   fetch(`${BASE}/sheets/${sheetId}/analytics-reorder`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ordered_ids: orderedIds }) }).then(r => json<any>(r))
 
+// Main analytic + indicator formula rules
+export const getMainAnalytic = (sheetId: string) =>
+  fetch(`${BASE}/sheets/${sheetId}/main-analytic`).then(r => json<{ analytic_id: string | null }>(r))
+export const setMainAnalytic = (sheetId: string, analyticId: string) =>
+  fetch(`${BASE}/sheets/${sheetId}/main-analytic`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ analytic_id: analyticId }) }).then(r => json<any>(r))
+
+export interface ScopedRule { id?: string; scope: Record<string, string>; priority: number; formula: string }
+export interface IndicatorRules { leaf: string; consolidation: string; scoped: ScopedRule[] }
+export const getIndicatorRules = (sheetId: string, indicatorId: string) =>
+  fetch(`${BASE}/sheets/${sheetId}/indicators/${indicatorId}/rules`).then(r => json<IndicatorRules>(r))
+export const putIndicatorRules = (sheetId: string, indicatorId: string, data: IndicatorRules) =>
+  fetch(`${BASE}/sheets/${sheetId}/indicators/${indicatorId}/rules`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => json<any>(r))
+export const promoteCellToRule = (sheetId: string, indicatorId: string, coordKey: string, formula: string, priority = 100) =>
+  fetch(`${BASE}/sheets/${sheetId}/indicators/${indicatorId}/rules/promote-cell`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ coord_key: coordKey, formula, priority }) }).then(r => json<any>(r))
+export const getResolvedFormulas = (sheetId: string, coordKeys: string[]) =>
+  fetch(`${BASE}/sheets/${sheetId}/cells/resolved-formulas`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ coord_keys: coordKeys }) }).then(r => json<{ coord_key: string; formula: string; source: string; kind: string }[]>(r))
+
 // View settings
 export const getViewSettings = (sheetId: string) =>
   fetch(`${BASE}/sheets/${sheetId}/view-settings`).then(r => json<any>(r))

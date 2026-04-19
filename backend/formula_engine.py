@@ -17,6 +17,7 @@ All references resolve by EXACT name match (case-insensitive). No fuzzy matching
 import re
 import json
 import math
+import itertools
 from typing import Any
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────
@@ -207,15 +208,17 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         if "результат" in nl: sheet_name_to_id["pl"] = sid
 
         bindings = await db.execute_fetchall(
-            "SELECT sa.analytic_id, sa.sort_order, a.name as analytic_name, a.is_periods "
+            "SELECT sa.analytic_id, sa.sort_order, a.name as analytic_name, a.is_periods, sa.is_main "
             "FROM sheet_analytics sa JOIN analytics a ON a.id = sa.analytic_id "
             "WHERE sa.sheet_id = ? ORDER BY sa.sort_order", (sid,))
 
         ordered_aids = [b["analytic_id"] for b in bindings]
         analytic_name_to_id = {b["analytic_name"]: b["analytic_id"] for b in bindings}
         record_by_id = {}
+        children_by_rid: dict[str, list[str]] = {}
         name_to_rids = {}  # {analytic_id: {name_lower: [record_ids]}}
         period_aid = None
+        main_aid = next((b["analytic_id"] for b in bindings if b["is_main"]), None)
 
         for b in bindings:
             aid = b["analytic_id"]
@@ -229,6 +232,10 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 name = data.get("name", "")
                 # Index by lowercase for case-insensitive exact match
                 nmap.setdefault(name.lower(), []).append(r["id"])
+                # Build parent→children index (scoped to this sheet's records)
+                pid = r.get("parent_id")
+                if pid:
+                    children_by_rid.setdefault(pid, []).append(r["id"])
             name_to_rids[aid] = nmap
 
             if b["is_periods"]:
@@ -240,12 +247,32 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                     for i in range(1, len(period_order)):
                         prev_period[period_order[i]] = period_order[i - 1]
 
+        # Indicator formula rules for this sheet, indexed by indicator_id.
+        rules_by_indicator: dict[str, list[dict]] = {}
+        for r in await db.execute_fetchall(
+                "SELECT id, indicator_id, kind, scope_json, priority, formula "
+                "FROM indicator_formula_rules WHERE sheet_id = ?", (sid,)):
+            try:
+                scope = json.loads(r["scope_json"]) if r["scope_json"] else {}
+            except Exception:
+                scope = {}
+            rules_by_indicator.setdefault(r["indicator_id"], []).append({
+                "id": r["id"],
+                "kind": r["kind"],
+                "scope": scope,
+                "priority": r["priority"] or 0,
+                "formula": r["formula"] or "",
+            })
+
         sheet_meta[sid] = {
             "ordered_aids": ordered_aids,
             "name_to_rids": name_to_rids,
             "record_by_id": record_by_id,
+            "children_by_rid": children_by_rid,
             "period_aid": period_aid,
+            "main_aid": main_aid,
             "analytic_name_to_id": analytic_name_to_id,
+            "rules_by_indicator": rules_by_indicator,
             "name": sname,
         }
 
@@ -264,6 +291,82 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     # ── Lazy evaluator ──
     computed_set = set()
     computing_set = set()
+    # Track which branch produced a cell's value — for resolve-formulas API.
+    _computed_sources: dict[tuple, str] = {}  # gk → 'cell' | 'rule:<id>' | 'default-sum'
+    _computed_formulas: dict[tuple, str] = {}  # gk → formula text used
+
+    def _is_consolidating(context: dict, meta: dict) -> bool:
+        """True if any non-main-analytic coord points to a record with children."""
+        main = meta.get("main_aid")
+        children = meta.get("children_by_rid", {})
+        for aid, rid in context.items():
+            if aid == main:
+                continue
+            if children.get(rid):
+                return True
+        return False
+
+    def _expand_children_one_level(coord_key: str, context: dict, meta: dict) -> list[str]:
+        """Cartesian of 1-level children along every consolidating non-main axis."""
+        main = meta.get("main_aid")
+        children = meta.get("children_by_rid", {})
+        ordered_aids = meta["ordered_aids"]
+        axes = []
+        for aid in ordered_aids:
+            if aid == main:
+                continue
+            rid = context.get(aid)
+            if rid and children.get(rid):
+                axes.append((aid, children[rid]))
+        if not axes:
+            return []
+        combos = []
+        for prod in itertools.product(*[ch for _, ch in axes]):
+            new_parts = []
+            swap = {aid: crid for (aid, _), crid in zip(axes, prod)}
+            for aid in ordered_aids:
+                new_parts.append(swap.get(aid, context.get(aid, "")))
+            combos.append("|".join(new_parts))
+        return combos
+
+    def _resolve_indicator_formula(sheet_id: str, context: dict, meta: dict):
+        """Return (formula_text, source_label) or None."""
+        main = meta.get("main_aid")
+        if not main:
+            return None
+        indicator_rid = context.get(main)
+        if not indicator_rid:
+            return None
+        rules = meta.get("rules_by_indicator", {}).get(indicator_rid, [])
+        if not rules:
+            return None
+
+        # 3a. Scoped rules — pick the best match (subset of non-main coord).
+        non_main = {a: r for a, r in context.items() if a != main}
+        scoped_hits = []
+        for rule in rules:
+            if rule["kind"] != "scoped":
+                continue
+            scope = rule.get("scope") or {}
+            if not scope:
+                continue
+            if all(non_main.get(a) == r for a, r in scope.items()):
+                scoped_hits.append(rule)
+        if scoped_hits:
+            best = sorted(
+                scoped_hits,
+                key=lambda r: (-(r.get("priority") or 0), -len(r.get("scope") or {}), r["id"]),
+            )[0]
+            if best.get("formula"):
+                return best["formula"], f"rule:{best['id']}"
+
+        # 3b. Base leaf/consolidation.
+        is_consol = _is_consolidating(context, meta)
+        base_kind = "consolidation" if is_consol else "leaf"
+        for rule in rules:
+            if rule["kind"] == base_kind and rule.get("formula"):
+                return rule["formula"], f"rule:{rule['id']}"
+        return None
 
     def get_cell(sheet_id: str, coord_key: str) -> float:
         gk = (sheet_id, coord_key)
@@ -271,32 +374,59 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             return _to_float(global_cells.get(gk, ""))
         if gk in computing_set:
             return _to_float(global_cells.get(gk, ""))  # cycle
-        formula = global_formulas.get(gk)
-        if not formula:
-            return _to_float(global_cells.get(gk, ""))
 
-        computing_set.add(gk)
-        meta = sheet_meta[sheet_id]
+        meta = sheet_meta.get(sheet_id)
+        if not meta:
+            return _to_float(global_cells.get(gk, ""))
         context = _context_from_key(coord_key, meta["ordered_aids"])
 
-        def get_ref_value(ref_token: str) -> float:
-            ref = parse_ref(ref_token)
-            ref_sheet = ref.get("sheet")
+        # ── 1. Explicit per-cell formula (cell_data.rule='formula')
+        formula = global_formulas.get(gk)
+        formula_source = "cell" if formula else None
 
-            if ref_sheet:
-                return _resolve_cross_sheet(ref, context, meta, sheet_id)
-            else:
-                resolved = _resolve_local(ref, context, meta)
-                if not resolved or resolved == coord_key:
+        # ── 2. Indicator rule (scoped → consolidation/leaf base)
+        if not formula:
+            resolved = _resolve_indicator_formula(sheet_id, context, meta)
+            if resolved:
+                formula, formula_source = resolved
+
+        if formula:
+            computing_set.add(gk)
+
+            def get_ref_value(ref_token: str) -> float:
+                ref = parse_ref(ref_token)
+                ref_sheet = ref.get("sheet")
+                if ref_sheet:
+                    return _resolve_cross_sheet(ref, context, meta, sheet_id)
+                rs = _resolve_local(ref, context, meta)
+                if not rs or rs == coord_key:
                     return 0.0
-                return get_cell(sheet_id, resolved)
+                return get_cell(sheet_id, rs)
 
-        result = evaluate(formula, get_ref_value)
-        result_str = str(round(result, 6)) if result != 0 else "0"
-        global_cells[gk] = result_str
-        computed_set.add(gk)
-        computing_set.discard(gk)
-        return result
+            result = evaluate(formula, get_ref_value)
+            result_str = str(round(result, 6)) if result != 0 else "0"
+            global_cells[gk] = result_str
+            computed_set.add(gk)
+            computing_set.discard(gk)
+            _computed_sources[gk] = formula_source or "cell"
+            _computed_formulas[gk] = formula
+            return result
+
+        # ── 3. Consolidating coord with no formula → default SUM over children
+        if _is_consolidating(context, meta):
+            computing_set.add(gk)
+            total = 0.0
+            for child_ck in _expand_children_one_level(coord_key, context, meta):
+                total += get_cell(sheet_id, child_ck)
+            total_str = str(round(total, 6)) if total != 0 else "0"
+            global_cells[gk] = total_str
+            computed_set.add(gk)
+            computing_set.discard(gk)
+            _computed_sources[gk] = "default-sum"
+            return total
+
+        # ── 4. Leaf manual value (stored)
+        return _to_float(global_cells.get(gk, ""))
 
     def _to_float(val):
         try: return float(val)
@@ -429,14 +559,127 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         sheet_id, coord_key = gk
         get_cell(sheet_id, coord_key)
 
-    # ── Return all formula values grouped by sheet ──
-    result = {}
-    for (sid, ck) in global_formulas:
-        new_val = global_cells.get((sid, ck), "")
-        if sid not in result: result[sid] = {}
-        result[sid][ck] = new_val
+    # ── Also evaluate cells where an indicator rule applies (no explicit formula).
+    #    These are existing cell_data rows (e.g. HEAD-level parents) whose value
+    #    should be computed via the indicator's consolidation / scoped rule.
+    rule_driven: set[tuple] = set()
+    for gk in list(_original_cell_keys):
+        if gk in global_formulas:
+            continue
+        sid, ck = gk
+        meta = sheet_meta.get(sid)
+        if not meta or not meta.get("rules_by_indicator"):
+            continue
+        context = _context_from_key(ck, meta["ordered_aids"])
+        if _resolve_indicator_formula(sid, context, meta) is not None:
+            get_cell(sid, ck)
+            rule_driven.add(gk)
+
+    # ── Return all computed values grouped by sheet ──
+    result: dict[str, dict[str, str]] = {}
+    for gk in list(global_formulas) + list(rule_driven):
+        sid, ck = gk
+        new_val = global_cells.get(gk, "")
+        result.setdefault(sid, {})[ck] = new_val
 
     return result
+
+
+# ── Standalone resolver (no recalc) ─────────────────────────────────────────
+# Used by the /resolved-formulas API to tell the UI which formula *would* be
+# applied to a given cell, and why. Mirrors the precedence used in get_cell.
+
+async def resolve_formula_for_display(db, sheet_id: str, coord_key: str) -> dict:
+    """Return {formula: str, source: 'cell'|'rule:<id>'|'default-sum'|'manual', kind: str|None}.
+
+    Does NOT evaluate — just tells the UI which formula applies.
+    """
+    # 1. Per-cell explicit formula
+    cell_rows = await db.execute_fetchall(
+        "SELECT rule, formula FROM cell_data WHERE sheet_id = ? AND coord_key = ?",
+        (sheet_id, coord_key),
+    )
+    cell = dict(cell_rows[0]) if cell_rows else None
+    if cell and cell.get("rule") == "formula" and cell.get("formula"):
+        return {"formula": cell["formula"], "source": "cell", "kind": None}
+
+    # Load sheet metadata needed for rule resolution.
+    bindings = await db.execute_fetchall(
+        "SELECT sa.analytic_id, sa.sort_order, sa.is_main, a.is_periods "
+        "FROM sheet_analytics sa JOIN analytics a ON a.id = sa.analytic_id "
+        "WHERE sa.sheet_id = ? ORDER BY sa.sort_order",
+        (sheet_id,),
+    )
+    ordered_aids = [b["analytic_id"] for b in bindings]
+    main_aid = next((b["analytic_id"] for b in bindings if b["is_main"]), None)
+    parts = coord_key.split("|")
+    context = {aid: parts[i] for i, aid in enumerate(ordered_aids) if i < len(parts)}
+    if not main_aid:
+        return {"formula": "", "source": "manual", "kind": None}
+    indicator_rid = context.get(main_aid)
+    if not indicator_rid:
+        return {"formula": "", "source": "manual", "kind": None}
+
+    # children index for is_consolidating
+    child_rows = await db.execute_fetchall(
+        "SELECT id, parent_id FROM analytic_records WHERE analytic_id IN ({})".format(
+            ",".join("?" * len(ordered_aids))
+        ),
+        tuple(ordered_aids),
+    )
+    children_by_rid: dict[str, list[str]] = {}
+    for r in child_rows:
+        if r["parent_id"]:
+            children_by_rid.setdefault(r["parent_id"], []).append(r["id"])
+
+    # 2. Scoped rules for this indicator on this sheet.
+    rule_rows = await db.execute_fetchall(
+        "SELECT id, kind, scope_json, priority, formula FROM indicator_formula_rules "
+        "WHERE sheet_id = ? AND indicator_id = ?",
+        (sheet_id, indicator_rid),
+    )
+    rules = []
+    for r in rule_rows:
+        try:
+            scope = json.loads(r["scope_json"]) if r["scope_json"] else {}
+        except Exception:
+            scope = {}
+        rules.append({
+            "id": r["id"],
+            "kind": r["kind"],
+            "scope": scope,
+            "priority": r["priority"] or 0,
+            "formula": r["formula"] or "",
+        })
+
+    non_main = {a: rid for a, rid in context.items() if a != main_aid}
+    scoped_hits = [
+        r for r in rules
+        if r["kind"] == "scoped" and r["scope"]
+        and all(non_main.get(a) == v for a, v in r["scope"].items())
+    ]
+    if scoped_hits:
+        best = sorted(
+            scoped_hits,
+            key=lambda r: (-(r["priority"]), -len(r["scope"]), r["id"]),
+        )[0]
+        if best["formula"]:
+            return {"formula": best["formula"], "source": f"rule:{best['id']}", "kind": "scoped"}
+
+    # 3. Base consolidation / leaf.
+    is_consol = any(
+        aid != main_aid and children_by_rid.get(rid)
+        for aid, rid in context.items()
+    )
+    base_kind = "consolidation" if is_consol else "leaf"
+    for r in rules:
+        if r["kind"] == base_kind and r["formula"]:
+            return {"formula": r["formula"], "source": f"rule:{r['id']}", "kind": base_kind}
+
+    # 4. No rule → default sum for consolidating, else manual.
+    if is_consol:
+        return {"formula": "", "source": "default-sum", "kind": None}
+    return {"formula": "", "source": "manual", "kind": None}
 
 
 # ── Convenience wrapper ────────────────────────────────────────────────────

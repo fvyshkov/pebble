@@ -9,9 +9,11 @@ import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
 import ChevronRightOutlined from '@mui/icons-material/ChevronRightOutlined'
 import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
+import FunctionsOutlined from '@mui/icons-material/FunctionsOutlined'
 import { usePending } from '../../store/PendingContext'
 import * as api from '../../api'
 import type { AnalyticField, AnalyticRecord } from '../../types'
+import IndicatorFormulasPanel from '../sheet/IndicatorFormulasPanel'
 
 function RecordCellInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const [local, setLocal] = useState(value)
@@ -45,6 +47,9 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const fileRef = useRef<HTMLInputElement>(null)
   const { addOp, getOverrides } = usePending()
+  // Sheets where this analytic is the main one — enables the "Формулы показателя" button per record.
+  const [mainSheets, setMainSheets] = useState<{ id: string; name: string }[]>([])
+  const [rulesOpen, setRulesOpen] = useState<{ sheetId: string; recordId: string; name: string } | null>(null)
 
   const load = useCallback(async () => {
     const [fs, rs] = await Promise.all([api.listFields(analyticId), api.listRecords(analyticId)])
@@ -53,6 +58,26 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
   }, [analyticId])
 
   useEffect(() => { load() }, [load])
+
+  // Figure out which sheets have this analytic as main.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const a = await api.getAnalytic(analyticId)
+        const mid = (a as any).model_id
+        if (!mid) return
+        const sheets = await api.listSheets(mid)
+        const out: { id: string; name: string }[] = []
+        for (const s of sheets) {
+          const m = await api.getMainAnalytic(s.id)
+          if (m.analytic_id === analyticId) out.push({ id: s.id, name: s.name })
+        }
+        if (!cancelled) setMainSheets(out)
+      } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
+  }, [analyticId])
 
   const buildTree = (): TreeNode[] => {
     const byParent: Record<string, AnalyticRecord[]> = { root: [] }
@@ -226,6 +251,17 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
                                 <DeleteOutlineOutlined sx={{ fontSize: 14 }} />
                               </IconButton>
                             </Tooltip>
+                            {mainSheets.length > 0 && (
+                              <Tooltip title={`Формулы показателя${mainSheets.length > 1 ? ` (откроется: ${mainSheets[0].name})` : ''}`}>
+                                <IconButton size="small" onClick={() => setRulesOpen({
+                                  sheetId: mainSheets[0].id,
+                                  recordId: node.record.id,
+                                  name: node.data[fields[0]?.code] || node.record.id.slice(0, 6),
+                                })}>
+                                  <FunctionsOutlined sx={{ fontSize: 14 }} />
+                                </IconButton>
+                              </Tooltip>
+                            )}
                           </Box>
                           {hasChildren ? (
                             <IconButton size="small" sx={{ flexShrink: 0 }} onClick={() => toggle(node.record.id)}>
@@ -258,6 +294,16 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
         <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
           Нет записей. Добавьте запись или импортируйте из Excel.
         </Typography>
+      )}
+
+      {rulesOpen && (
+        <IndicatorFormulasPanel
+          open
+          onClose={() => setRulesOpen(null)}
+          sheetId={rulesOpen.sheetId}
+          indicatorId={rulesOpen.recordId}
+          indicatorName={rulesOpen.name}
+        />
       )}
     </Box>
   )

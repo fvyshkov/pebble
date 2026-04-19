@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import {
   TextField, Typography, Box, Switch, FormControlLabel,
   Chip, Button, IconButton, Select, MenuItem, InputLabel, FormControl,
+  CircularProgress,
 } from '@mui/material'
 import * as Icons from '@mui/icons-material'
 import * as api from '../../api'
@@ -26,6 +27,8 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
   const [data, setData] = useState<Analytic | null>(null)
   const [iconOpen, setIconOpen] = useState(false)
   const [sheetStatus, setSheetStatus] = useState<string>('')
+  const [bulkBusy, setBulkBusy] = useState<null | 'add' | 'remove'>(null)
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
   const { addOp, getOverrides } = usePending()
 
   useEffect(() => {
@@ -189,47 +192,77 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
       )}
 
       {/* Add/remove from all sheets */}
-      <Box sx={{ display: 'flex', gap: 1, mt: 3, mb: 1 }}>
+      <Box sx={{ display: 'flex', gap: 1, mt: 3, mb: 1, alignItems: 'center' }}>
         <Button
           variant="outlined" size="small"
-          startIcon={<Icons.PlaylistAddOutlined />}
+          startIcon={bulkBusy === 'add'
+            ? <CircularProgress size={14} thickness={5} />
+            : <Icons.PlaylistAddOutlined />}
+          disabled={!!bulkBusy}
           onClick={async () => {
-            const sheets = await api.listSheets(modelId)
-            let added = 0
-            for (const sheet of sheets) {
-              const existing = await api.listSheetAnalytics(sheet.id)
-              if (!existing.some((sa: any) => sa.analytic_id === analyticId)) {
-                await api.addSheetAnalytic(sheet.id, { analytic_id: analyticId, sort_order: existing.length })
-                added++
+            setBulkBusy('add')
+            setBulkProgress({ done: 0, total: 0 })
+            try {
+              const sheets = await api.listSheets(modelId)
+              setBulkProgress({ done: 0, total: sheets.length })
+              let added = 0
+              for (let i = 0; i < sheets.length; i++) {
+                const sheet = sheets[i]
+                const existing = await api.listSheetAnalytics(sheet.id)
+                if (!existing.some((sa: any) => sa.analytic_id === analyticId)) {
+                  await api.addSheetAnalytic(sheet.id, { analytic_id: analyticId, sort_order: existing.length })
+                  added++
+                }
+                setBulkProgress({ done: i + 1, total: sheets.length })
               }
+              setSheetStatus(added > 0 ? `Добавлено в ${added} лист(ов)` : 'Уже во всех листах')
+            } finally {
+              setBulkBusy(null)
+              setBulkProgress({ done: 0, total: 0 })
+              setTimeout(() => setSheetStatus(''), 3000)
             }
-            setSheetStatus(added > 0 ? `Добавлено в ${added} лист(ов)` : 'Уже во всех листах')
-            setTimeout(() => setSheetStatus(''), 3000)
           }}
           sx={{ textTransform: 'none', fontSize: 12 }}
         >
-          Добавить во все листы
+          {bulkBusy === 'add'
+            ? `Добавляется… ${bulkProgress.done}/${bulkProgress.total}`
+            : 'Добавить во все листы'}
         </Button>
         <Button
           variant="outlined" size="small" color="warning"
-          startIcon={<Icons.PlaylistRemoveOutlined />}
+          startIcon={bulkBusy === 'remove'
+            ? <CircularProgress size={14} thickness={5} />
+            : <Icons.PlaylistRemoveOutlined />}
+          disabled={!!bulkBusy}
           onClick={async () => {
-            const sheets = await api.listSheets(modelId)
-            let removed = 0
-            for (const sheet of sheets) {
-              const existing = await api.listSheetAnalytics(sheet.id)
-              const sa = existing.find((s: any) => s.analytic_id === analyticId)
-              if (sa) {
-                await api.removeSheetAnalytic(sheet.id, sa.id)
-                removed++
+            setBulkBusy('remove')
+            setBulkProgress({ done: 0, total: 0 })
+            try {
+              const sheets = await api.listSheets(modelId)
+              setBulkProgress({ done: 0, total: sheets.length })
+              let removed = 0
+              for (let i = 0; i < sheets.length; i++) {
+                const sheet = sheets[i]
+                const existing = await api.listSheetAnalytics(sheet.id)
+                const sa = existing.find((s: any) => s.analytic_id === analyticId)
+                if (sa) {
+                  await api.removeSheetAnalytic(sheet.id, sa.id)
+                  removed++
+                }
+                setBulkProgress({ done: i + 1, total: sheets.length })
               }
+              setSheetStatus(removed > 0 ? `Удалено из ${removed} лист(ов)` : 'Нет ни в одном листе')
+            } finally {
+              setBulkBusy(null)
+              setBulkProgress({ done: 0, total: 0 })
+              setTimeout(() => setSheetStatus(''), 3000)
             }
-            setSheetStatus(removed > 0 ? `Удалено из ${removed} лист(ов)` : 'Нет ни в одном листе')
-            setTimeout(() => setSheetStatus(''), 3000)
           }}
           sx={{ textTransform: 'none', fontSize: 12 }}
         >
-          Удалить со всех листов
+          {bulkBusy === 'remove'
+            ? `Удаляется… ${bulkProgress.done}/${bulkProgress.total}`
+            : 'Удалить со всех листов'}
         </Button>
       </Box>
       {sheetStatus && <Typography variant="caption" color="success.main">{sheetStatus}</Typography>}

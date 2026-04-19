@@ -64,13 +64,18 @@
   display: flex !important;
 }
 
-/* Flash colour for cells whose value changed (enableCellChangeFlash).
-   Override AG Grid's default yellow to a soft green — signals to every viewer
-   (not only the one who triggered recalc) which cells just updated. */
-.ag-theme-alpine {
-  --ag-value-change-value-highlight-background-color: rgba(76, 175, 80, 0.55);
-  --ag-value-change-delta-up-color: #2e7d32;
-  --ag-value-change-delta-down-color: #2e7d32;
+/* Flash colour for cells whose value changed (api.flashCells()).
+   In AG Grid v33+ Theming API the `themeAlpine` object doesn't attach the
+   legacy `.ag-theme-alpine` class, so CSS variables scoped there never take
+   effect. Target the flash classes directly. Soft green — every viewer sees
+   which parent sums just recomputed. */
+.ag-cell-data-changed,
+.ag-cell-data-changed-animation {
+  background-color: rgba(76, 175, 80, 0.55) !important;
+  transition: background-color 0.6s ease-out;
+}
+.ag-cell-data-changed-animation {
+  background-color: transparent !important;
 }
 
 .panel-left-toolbar {

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Box, Typography, TextField, List, ListItem, ListItemIcon, ListItemText,
-  IconButton, Menu, MenuItem, Tooltip,
+  IconButton, Menu, MenuItem, Tooltip, Radio,
 } from '@mui/material'
 import AddOutlined from '@mui/icons-material/AddOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
@@ -20,16 +20,18 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
   const [sheet, setSheet] = useState<Sheet | null>(null)
   const [bindings, setBindings] = useState<SheetAnalytic[]>([])
   const [allAnalytics, setAllAnalytics] = useState<Analytic[]>([])
+  const [mainAnalyticId, setMainAnalyticId] = useState<string | null>(null)
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null)
   const { addOp, getOverrides } = usePending()
   const dragIdx = useRef<number | null>(null)
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
 
   const load = async () => {
-    const [sheets, sa, analytics] = await Promise.all([
+    const [sheets, sa, analytics, main] = await Promise.all([
       api.listSheets(modelId),
       api.listSheetAnalytics(sheetId),
       api.listAnalytics(modelId),
+      api.getMainAnalytic(sheetId),
     ])
     const found = sheets.find(s => s.id === sheetId) || null
     if (found) {
@@ -39,6 +41,7 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
     setSheet(found)
     setBindings(sa)
     setAllAnalytics(analytics)
+    setMainAnalyticId(main.analytic_id)
   }
 
   useEffect(() => { load() }, [sheetId, modelId])
@@ -68,6 +71,17 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
     await api.removeSheetAnalytic(sheetId, saId)
     load()
   }
+
+  const handleSetMain = async (analyticId: string) => {
+    setMainAnalyticId(analyticId)  // optimistic
+    try {
+      await api.setMainAnalytic(sheetId, analyticId)
+    } catch {
+      load()  // revert on error
+    }
+  }
+
+  const analyticById = (aid: string) => allAnalytics.find(a => a.id === aid)
 
   const handleDragStart = (idx: number) => {
     dragIdx.current = idx
@@ -165,6 +179,21 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
               {getIcon(b.analytic_icon)}
             </ListItemIcon>
             <ListItemText primary={b.analytic_name || 'Аналитика'} />
+            {(() => {
+              const a = analyticById(b.analytic_id)
+              if (a && a.is_periods) return null
+              const isMain = b.analytic_id === mainAnalyticId
+              return (
+                <Tooltip title={isMain ? 'Главная аналитика (формулы индикаторов живут здесь)' : 'Сделать главной аналитикой'}>
+                  <Radio
+                    size="small"
+                    checked={isMain}
+                    onChange={() => handleSetMain(b.analytic_id)}
+                    sx={{ p: 0.5, mr: 4 }}
+                  />
+                </Tooltip>
+              )
+            })()}
           </ListItem>
         ))}
       </List>

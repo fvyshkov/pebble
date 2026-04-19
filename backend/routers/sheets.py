@@ -206,6 +206,51 @@ async def remove_sheet_analytic(sheet_id: str, sa_id: str):
     return {"ok": True}
 
 
+# ── Main analytic per sheet ──
+
+class MainAnalyticIn(BaseModel):
+    analytic_id: str
+
+
+@router.get("/{sheet_id}/main-analytic")
+async def get_main_analytic(sheet_id: str):
+    db = get_db()
+    rows = await db.execute_fetchall(
+        """SELECT sa.analytic_id FROM sheet_analytics sa
+           JOIN analytics a ON a.id = sa.analytic_id
+           WHERE sa.sheet_id = ? AND sa.is_main = 1 AND a.is_periods = 0
+           LIMIT 1""",
+        (sheet_id,),
+    )
+    return {"analytic_id": rows[0]["analytic_id"] if rows else None}
+
+
+@router.put("/{sheet_id}/main-analytic")
+async def set_main_analytic(sheet_id: str, body: MainAnalyticIn):
+    """Set is_main=1 on one non-period analytic, clear it on the rest."""
+    db = get_db()
+    # Validate target is bound to this sheet and is not a period analytic
+    target = await db.execute_fetchall(
+        """SELECT sa.id, a.is_periods FROM sheet_analytics sa
+           JOIN analytics a ON a.id = sa.analytic_id
+           WHERE sa.sheet_id = ? AND sa.analytic_id = ?""",
+        (sheet_id, body.analytic_id),
+    )
+    if not target:
+        return {"error": "analytic not bound to this sheet"}
+    if target[0]["is_periods"]:
+        return {"error": "cannot mark period analytic as main"}
+    await db.execute(
+        "UPDATE sheet_analytics SET is_main = 0 WHERE sheet_id = ?", (sheet_id,)
+    )
+    await db.execute(
+        "UPDATE sheet_analytics SET is_main = 1 WHERE sheet_id = ? AND analytic_id = ?",
+        (sheet_id, body.analytic_id),
+    )
+    await db.commit()
+    return {"ok": True, "analytic_id": body.analytic_id}
+
+
 @router.put("/{sheet_id}/analytics-reorder")
 async def reorder_sheet_analytics(sheet_id: str, body: ReorderIn):
     db = get_db()

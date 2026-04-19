@@ -64,9 +64,28 @@ CREATE TABLE IF NOT EXISTS sheet_analytics (
     analytic_id     TEXT NOT NULL REFERENCES analytics(id) ON DELETE CASCADE,
     sort_order      INTEGER NOT NULL DEFAULT 0,
     is_fixed        INTEGER NOT NULL DEFAULT 0,
-    fixed_record_id TEXT REFERENCES analytic_records(id) ON DELETE SET NULL
+    fixed_record_id TEXT REFERENCES analytic_records(id) ON DELETE SET NULL,
+    is_main         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sa_sheet ON sheet_analytics(sheet_id);
+
+-- ── Indicator formula rules (per-indicator, per-sheet) ───────
+-- kind: 'leaf'          — база для клетки, где все не-главные аналитики листовые
+--       'consolidation' — база для клетки, где хотя бы одна не-главная ссылается на не-лист
+--       'scoped'        — матчится если все пары scope_json ⊆ coord клетки
+-- priority — выше = важнее при мульти-совпадении.
+CREATE TABLE IF NOT EXISTS indicator_formula_rules (
+    id           TEXT PRIMARY KEY,
+    sheet_id     TEXT NOT NULL REFERENCES sheets(id) ON DELETE CASCADE,
+    indicator_id TEXT NOT NULL REFERENCES analytic_records(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL,
+    scope_json   TEXT NOT NULL DEFAULT '{}',
+    priority     INTEGER NOT NULL DEFAULT 0,
+    formula      TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ifr_sheet_indicator
+    ON indicator_formula_rules(sheet_id, indicator_id);
 
 CREATE TABLE IF NOT EXISTS cell_data (
     id           TEXT PRIMARY KEY,
@@ -138,7 +157,35 @@ MIGRATIONS = [
     "ALTER TABLE sheets ADD COLUMN excel_code TEXT DEFAULT ''",
     "ALTER TABLE sheets ADD COLUMN sort_order INTEGER DEFAULT 0",
     "ALTER TABLE analytic_records ADD COLUMN excel_row INTEGER",
+    "ALTER TABLE sheet_analytics ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0",
 ]
+
+
+async def _backfill_is_main(db: aiosqlite.Connection) -> None:
+    """Mark one sheet_analytics row per sheet as 'main':
+    the lowest sort_order among non-period analytics. If a sheet already
+    has any is_main=1, leave it alone.
+    """
+    # Sheets that need main backfill
+    rows = await db.execute_fetchall(
+        """SELECT sa.id, sa.sheet_id, sa.sort_order, a.is_periods
+           FROM sheet_analytics sa
+           JOIN analytics a ON a.id = sa.analytic_id
+           WHERE sa.sheet_id NOT IN (
+               SELECT DISTINCT sheet_id FROM sheet_analytics WHERE is_main = 1
+           )
+           ORDER BY sa.sheet_id, sa.sort_order"""
+    )
+    by_sheet: dict[str, list] = {}
+    for r in rows:
+        by_sheet.setdefault(r["sheet_id"], []).append(r)
+    for sheet_id, lst in by_sheet.items():
+        target = next((r for r in lst if not r["is_periods"]), None)
+        if target is not None:
+            await db.execute(
+                "UPDATE sheet_analytics SET is_main = 1 WHERE id = ?",
+                (target["id"],),
+            )
 
 
 async def init_db():
@@ -166,6 +213,8 @@ async def init_db():
         )
     # Ensure 'admin' user has can_admin flag
     await _db.execute("UPDATE users SET can_admin = 1 WHERE username IN ('Админ', 'admin')")
+    # Backfill sheet_analytics.is_main
+    await _backfill_is_main(_db)
     await _db.commit()
 
 

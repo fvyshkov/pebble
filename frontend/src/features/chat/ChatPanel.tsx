@@ -166,16 +166,21 @@ export default function ChatPanel({
     rec.interimResults = true
     rec.continuous = true
     let buffer = ''
+    let lastInterim = ''
+    const commitNow = () => {
+      // Merge any interim text still shown into the buffer so we don't lose
+      // words the engine hasn't finalized yet.
+      const combined = (buffer + lastInterim).trim()
+      if (combined) {
+        sendRef.current(combined)
+        buffer = ''
+        lastInterim = ''
+        setInput('')
+      }
+    }
     const schedulePauseCommit = () => {
       if (pauseTimerRef.current) window.clearTimeout(pauseTimerRef.current)
-      pauseTimerRef.current = window.setTimeout(() => {
-        const v = buffer.trim()
-        if (v) {
-          sendRef.current(v)
-          buffer = ''
-          setInput('')
-        }
-      }, 1200)
+      pauseTimerRef.current = window.setTimeout(commitNow, 1200)
     }
     rec.onresult = (e: any) => {
       let interim = ''
@@ -185,8 +190,11 @@ export default function ChatPanel({
         if (r.isFinal) buffer += t + ' '
         else interim += t
       }
+      lastInterim = interim
       setInput(buffer + interim)
-      if (e.results[e.results.length - 1]?.isFinal) schedulePauseCommit()
+      // Reschedule on EVERY result event — final or interim. If silence
+      // follows for >1.2s, commit fires regardless of final/interim state.
+      schedulePauseCommit()
     }
     rec.onerror = () => { /* swallow; user will click again to retry */ }
     rec.onend = () => {

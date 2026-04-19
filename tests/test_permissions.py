@@ -100,3 +100,57 @@ def test_accessible_sheets_have_excel_code(db, test_user):
         for sheet in model["sheets"]:
             # excel_code should be present (may be empty for old sheets)
             assert "excel_code" in sheet, f"Sheet {sheet['name']} missing excel_code"
+
+
+def test_cell_filtering_actually_hides_records(db, test_user):
+    """Stronger version of test_cell_filtering_by_user: create a real record
+    restriction and verify /cells/by-sheet returns fewer rows for that user.
+    Exercises the server-side permission filter end-to-end."""
+    # Find a sheet with at least one analytic binding + 2+ records.
+    row = db.execute(
+        """SELECT s.id AS sid, sa.analytic_id AS aid
+           FROM sheets s JOIN sheet_analytics sa ON sa.sheet_id = s.id
+           LIMIT 1"""
+    ).fetchone()
+    if not row:
+        pytest.skip("No sheet with analytic bindings")
+    sheet_id, analytic_id = row["sid"], row["aid"]
+    records = db.execute(
+        "SELECT id FROM analytic_records WHERE analytic_id = ? LIMIT 10",
+        (analytic_id,),
+    ).fetchall()
+    if len(records) < 2:
+        pytest.skip("Need ≥2 records for this analytic")
+
+    # Baseline: unfiltered cell count
+    resp = _api("get", f"/cells/by-sheet/{sheet_id}")
+    baseline = len(resp.json())
+
+    # Restrict user to ONLY the first record (deny rest).
+    # Grant view on first record only — once the server sees at least one
+    # record_permission for this (user, analytic), only granted records pass.
+    _api("put", "/users/analytic-permissions/set", json={
+        "user_id": test_user["id"],
+        "analytic_id": analytic_id,
+        "record_id": records[0]["id"],
+        "can_view": True, "can_edit": False,
+    })
+
+    # Filtered call — cells should be a subset of baseline.
+    resp_f = _api("get", f"/cells/by-sheet/{sheet_id}?user_id={test_user['id']}")
+    assert resp_f.status_code == 200, resp_f.text
+    filtered = len(resp_f.json())
+    assert filtered <= baseline, (
+        f"Filtered cells ({filtered}) exceed baseline ({baseline})"
+    )
+    # Strong check: since we granted only 1 out of N records, the server must
+    # drop some cells (unless the sheet is empty, in which case both counts
+    # are 0 and we can't conclude anything — skip).
+    if baseline == 0:
+        pytest.skip("Sheet has no cells; cannot verify filtering tightens")
+    assert filtered < baseline, (
+        f"Expected filter to remove cells but got {filtered} == baseline "
+        f"({baseline}). Server-side permission filter may be broken."
+    )
+    # No cleanup needed: test_user is deleted in the fixture teardown and
+    # cascade-removes its analytic_record_permissions rows.

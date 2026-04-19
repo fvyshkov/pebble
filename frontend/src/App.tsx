@@ -258,14 +258,41 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
       if (el.isContentEditable) return true
       return false
     }
+    const stripTrailingSpace = () => {
+      const el = document.activeElement as (HTMLElement & { value?: string }) | null
+      if (!el) return
+      // INPUT / TEXTAREA — use native setter so React picks up the change.
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        const v = (el as HTMLInputElement | HTMLTextAreaElement).value
+        if (v && v.endsWith(' ')) {
+          const setter = Object.getOwnPropertyDescriptor(
+            Object.getPrototypeOf(el), 'value',
+          )?.set
+          setter?.call(el, v.slice(0, -1))
+          el.dispatchEvent(new Event('input', { bubbles: true }))
+        }
+        return
+      }
+      // contenteditable — patch textContent if it ends with a space.
+      if (el.isContentEditable) {
+        const t = el.textContent || ''
+        if (t.endsWith(' ')) {
+          el.textContent = t.slice(0, -1)
+          el.dispatchEvent(new Event('input', { bubbles: true }))
+        }
+      }
+    }
     const onKey = async (ev: KeyboardEvent) => {
-      // Double-space → toggle voice
+      // Double-space → toggle voice. Works everywhere in the app, including
+      // inside inputs, textareas and AG Grid cell editors. In editable
+      // targets we strip the just-typed trailing space so the field isn't
+      // polluted by the shortcut.
       if (ev.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
-        if (isEditable()) return
         const now = Date.now()
         if (now - lastSpaceRef.current < 400) {
           ev.preventDefault()
           lastSpaceRef.current = 0
+          if (isEditable()) stripTrailingSpace()
           setChatOpen(true)
           // Defer a tick so ChatPanel has mounted if it was closed.
           setTimeout(() => {
@@ -496,10 +523,11 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             ) : isSheetSelected ? (
               useAgGrid ? (
                 <PivotGridAG
-                  key={`ag-${selection.id}-${refreshKey}`}
+                  key={`ag-${selection.id}-${refreshKey}-${mode}`}
                   sheetId={selection.id} modelId={selection.modelId}
                   currentUserId={currentUserId}
                   calcProgress={calcProgress}
+                  mode={mode === 'formulas' ? 'formulas' : 'data'}
                 />
               ) : (
                 <PivotGrid

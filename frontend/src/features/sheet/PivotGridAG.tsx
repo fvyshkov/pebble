@@ -21,6 +21,14 @@ import {
   type GridReadyEvent,
   type CellKeyDownEvent,
 } from 'ag-grid-community'
+
+// Variant of themeAlpine with visible vertical + horizontal cell borders.
+// Explicit theme params override the default `none` for column/row borders.
+const themeAlpineWithBorders = themeAlpine.withParams({
+  columnBorder: { style: 'solid', width: 1, color: '#e0e0e0' },
+  rowBorder: { style: 'solid', width: 1, color: '#f0f0f0' },
+  headerColumnBorder: { style: 'solid', width: 1, color: '#d5d5d5' },
+})
 import {
   AllEnterpriseModule,
   LicenseManager,
@@ -78,6 +86,8 @@ interface Props {
   currentUserId?: string
   /** Model-wide recalc progress (while a calculate-model/stream is in flight). */
   calcProgress?: CalcProgress | null
+  /** 'data' — values; 'formulas' — show rule label or formula text (admin). */
+  mode?: 'data' | 'formulas'
 }
 
 interface RowDatum {
@@ -236,7 +246,7 @@ function CalcProgressChip({ calcProgress, localRunning }: {
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Props) {
+export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode = 'data' }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [rowData, setRowData] = useState<RowDatum[]>([])
@@ -250,6 +260,16 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
   }, [recalcRunning, calcProgress])
   // Analytic-pinning state (drag row → toolbar to fix an analytic on one value)
   const [pinned, setPinned] = useState<Record<string, string>>({})
+  // Period-level aggregate toggles (Year / Quarter …) — chips above the
+  // grid switch these on/off to add summing columns at non-leaf levels.
+  const [colLevelToggles, setColLevelToggles] = useState<Record<number, boolean>>({})
+  const [colLevelNames, setColLevelNames] = useState<{ level: number; label: string }[]>([])
+  const colTreeRef = useRef<RecordNode[]>([])
+  const colLevelTogglesRef = useRef<Record<number, boolean>>({})
+  // colId → leafIds it sums. Used to flash Σ-columns whenever one of their
+  // underlying leaf period cells changes.
+  const sumColLeavesRef = useRef<Record<string, string[]>>({})
+  useEffect(() => { colLevelTogglesRef.current = colLevelToggles }, [colLevelToggles])
   const [analyticsMap, setAnalyticsMap] = useState<Record<string, Analytic>>({})
   const [recordNames, setRecordNames] = useState<Record<string, string>>({})
   const vsLoadedRef = useRef(false)
@@ -360,6 +380,8 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
   const gridApiRef = useRef<GridApi | null>(null)
   const cellMapRef = useRef<Record<string, string>>({})
   const cellRuleRef = useRef<Record<string, CellRule>>({})
+  /** coord_key → formula text (only populated for `formula`-rule cells). */
+  const formulaMapRef = useRef<Record<string, string>>({})
   const colLeafIdsRef = useRef<string[]>([])
   const dbOrdRef = useRef<string[]>([])
   const colAIdRef = useRef<string>('')
@@ -437,28 +459,57 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
       const colTree = rMap[colAId] || []
       const colLeaves = getLeaves(colTree)
       colLeafIdsRef.current = colLeaves.map(l => l.record.id)
+      colTreeRef.current = colTree
+
+      // Detect labels for each non-leaf column level (Годы, Кварталы, …).
+      const detectedLevels: { level: number; label: string }[] = []
+      const walkForLabel = (nodes: RecordNode[], lvl: number) => {
+        if (!nodes.length || !nodes[0].children.length) return
+        const firstName = (nodes[0].data && nodes[0].data.name) || ''
+        let label = `Уровень ${lvl + 1}`
+        if (/^\d{4}$/.test(firstName)) label = 'Годы'
+        else if (/квартал/i.test(firstName)) label = 'Кварталы'
+        else if (/^(янв|фев|мар|апр|май|июн|июл|авг|сен|окт|ноя|дек)/i.test(firstName)) label = 'Месяцы'
+        detectedLevels.push({ level: lvl, label })
+        walkForLabel(nodes[0].children, lvl + 1)
+      }
+      walkForLabel(colTree, 0)
+      setColLevelNames(detectedLevels)
 
       // ── Column definitions ──────────────────────────────────────────────
-      const buildColDefs = (nodes: RecordNode[]): (ColDef | ColGroupDef)[] =>
-        nodes.map(n => {
+      // Reset sum-col leaf map — populated as makeSumColDef runs below.
+      sumColLeavesRef.current = {}
+      const buildColDefs = (nodes: RecordNode[], lvl: number): (ColDef | ColGroupDef)[] => {
+        const out: (ColDef | ColGroupDef)[] = []
+        for (const n of nodes) {
           const label = recordLabel(n)
           if (n.children.length === 0) {
-            return makePeriodColDef(label, n.record.id)
+            out.push(makePeriodColDef(label, n.record.id))
+            continue
           }
-          return {
+          out.push({
             headerName: label,
             headerClass: 'ag-center-header',
-            children: buildColDefs(n.children),
-          } as ColGroupDef
-        })
+            children: buildColDefs(n.children, lvl + 1),
+          } as ColGroupDef)
+          // Inject sum column for this group when its level toggle is on.
+          if (colLevelTogglesRef.current[lvl]) {
+            const leafIds = getLeaves([n]).map(l => l.record.id)
+            out.push(makeSumColDef(label, leafIds))
+          }
+        }
+        return out
+      }
 
       // ── Cells (full prefetch) ───────────────────────────────────────────
       cellMapRef.current = {}
       cellRuleRef.current = {}
+      formulaMapRef.current = {}
       const cellData: CellData[] = await api.getCells(sheetId, currentUserId)
       for (const c of cellData) {
         cellMapRef.current[c.coord_key] = c.value ?? ''
         if (c.rule) cellRuleRef.current[c.coord_key] = c.rule as CellRule
+        if (c.formula) formulaMapRef.current[c.coord_key] = c.formula
       }
 
       // ── Build rows (hierarchical, matching legacy PivotGrid) ────────────
@@ -594,7 +645,7 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
       }
 
       // ── Column defs ─────────────────────────────────────────────────────
-      const defs: (ColDef | ColGroupDef)[] = buildColDefs(colTree)
+      const defs: (ColDef | ColGroupDef)[] = buildColDefs(colTree, 0)
       setColumnDefs(defs)
       setRowData(rows)
       setSheetName(`${rowAIds.length} аналитик × ${colLeaves.length} периодов`)
@@ -606,6 +657,45 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
   }, [sheetId, currentUserId, lookupCell, pinned])
 
   useEffect(() => { load() }, [load])
+
+  // Rebuild columnDefs (with / without sum columns) when level toggles change.
+  // Uses the cached colTree so we don't re-fetch cells.
+  const togglesSig = JSON.stringify(colLevelToggles)
+  useEffect(() => {
+    const colTree = colTreeRef.current
+    if (!colTree.length) return
+    // Reset sum-col leaf map — toggle rebuild re-registers them below.
+    sumColLeavesRef.current = {}
+    const rebuild = (nodes: RecordNode[], lvl: number): (ColDef | ColGroupDef)[] => {
+      const out: (ColDef | ColGroupDef)[] = []
+      for (const n of nodes) {
+        const label = recordLabel(n)
+        if (n.children.length === 0) {
+          out.push(makePeriodColDef(label, n.record.id))
+          continue
+        }
+        out.push({
+          headerName: label,
+          headerClass: 'ag-center-header',
+          children: rebuild(n.children, lvl + 1),
+        } as ColGroupDef)
+        if (colLevelToggles[lvl]) {
+          const leafIds = getLeaves([n]).map(l => l.record.id)
+          out.push(makeSumColDef(label, leafIds))
+        }
+      }
+      return out
+    }
+    setColumnDefs(prev => {
+      // Preserve the auto-group column (always first, pinned left) + any
+      // currently-injected row-analytic columns (none in this grid). We
+      // only regenerate columns that come from the period tree.
+      const first = prev.find(c => (c as ColGroupDef).children == null && (c as ColDef).field === undefined)
+      const newCols = rebuild(colTree, 0)
+      return first ? [first, ...newCols] : newCols
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [togglesSig])
 
   // Persist view settings (pinned analytics + column state: widths, order,
   // pinned cols, hidden cols). Debounced, only after first load.
@@ -638,74 +728,111 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
     })
   }, [])
 
-  // When a model-wide recalc ends, refetch cells and apply diffs in place so
-  // AG Grid's enableCellChangeFlash lights up every cell that actually
-  // changed (green, per the CSS override). Works regardless of WHICH user
-  // triggered the recalc — we always diff the fresh server state against
-  // our local snapshot.
+  // Fetch fresh cells from server, update leaves silently, bottom-up
+  // recompute parents, and flash parents whose value changed. Reused by
+  // the model-wide recalc effect AND by onCellValueChanged (so formula
+  // cells recomputed server-side after a local edit also show the flash).
+  const refreshAndFlashParents = useCallback(async () => {
+    const grid = gridApiRef.current
+    if (!grid) return
+    try {
+      const fresh: CellData[] = await api.getCells(sheetId, currentUserId)
+      const freshMap: Record<string, string> = {}
+      const freshRule: Record<string, CellRule> = {}
+      const freshFormula: Record<string, string> = {}
+      for (const c of fresh) {
+        freshMap[c.coord_key] = c.value ?? ''
+        if (c.rule) freshRule[c.coord_key] = c.rule as CellRule
+        if (c.formula) freshFormula[c.coord_key] = c.formula
+      }
+      formulaMapRef.current = freshFormula
+      // Pass 1: update every LEAF row's period values silently.
+      grid.forEachNode(node => {
+        if (!node.data || !node.data.isLeaf) return
+        for (const leafId of colLeafIdsRef.current) {
+          const coordKey: string | undefined = node.data[`__coord_${leafId}`]
+          if (!coordKey) continue
+          const newVal = freshMap[coordKey] ?? ''
+          const oldVal = (node.data[`p_${leafId}`] ?? '') as string | number
+          const newRule = (freshRule[coordKey] as CellRule) || 'manual'
+          if (newRule !== node.data[`__rule_${leafId}`]) {
+            node.data[`__rule_${leafId}`] = newRule
+          }
+          if (String(newVal) !== String(oldVal)) {
+            node.setDataValue(`p_${leafId}`, newVal)
+          }
+        }
+      })
+      // Pass 2: recompute parent (non-leaf) rows bottom-up; flash changes.
+      const allNodes: any[] = []
+      grid.forEachNode(n => { if (n.data) allNodes.push(n) })
+      const kidsByPath: Record<string, any[]> = {}
+      for (const n of allNodes) {
+        const pk = n.data.path.slice(0, -1).join('|')
+        ;(kidsByPath[pk] ||= []).push(n)
+      }
+      const parents = allNodes
+        .filter(n => !n.data.isLeaf)
+        .sort((a, b) => b.data.path.length - a.data.path.length)
+      const flashRowNodes: any[] = []
+      const flashColSet = new Set<string>()
+      for (const pNode of parents) {
+        const kids = kidsByPath[pNode.data.path.join('|')] || []
+        let rowChanged = false
+        for (const leafId of colLeafIdsRef.current) {
+          const field = `p_${leafId}`
+          const coordKey: string | undefined = pNode.data[`__coord_${leafId}`]
+          if (coordKey && freshRule[coordKey]) {
+            pNode.data[`__rule_${leafId}`] = freshRule[coordKey]
+          }
+          const rule: CellRule = pNode.data[`__rule_${leafId}`] || 'sum_children'
+          let newVal: string
+          if (rule === 'empty') {
+            newVal = ''
+          } else if (rule === 'formula' || rule === 'manual') {
+            newVal = coordKey ? (freshMap[coordKey] ?? '') : ''
+          } else {
+            let s = 0, has = false
+            for (const k of kids) {
+              const v = k.data[field]
+              if (v == null || v === '') continue
+              const n = parseFloat(String(v))
+              if (!Number.isNaN(n)) { s += n; has = true }
+            }
+            newVal = has ? String(s) : ''
+          }
+          const oldVal = (pNode.data[field] ?? '') as string | number
+          if (String(newVal) !== String(oldVal)) {
+            pNode.setDataValue(field, newVal)
+            rowChanged = true
+            flashColSet.add(field)
+          }
+        }
+        if (rowChanged) flashRowNodes.push(pNode)
+      }
+      if (flashRowNodes.length > 0 && flashColSet.size > 0) {
+        grid.flashCells({
+          rowNodes: flashRowNodes,
+          columns: Array.from(flashColSet),
+          flashDuration: 1500,
+          fadeDuration: 600,
+        })
+      }
+      cellMapRef.current = freshMap
+      cellRuleRef.current = freshRule
+    } catch (e) { console.error('[flash] error', e) }
+  }, [sheetId, currentUserId])
+
+  // When a model-wide recalc ends (calcProgress truthy → null), refetch and
+  // flash derived parent cells that changed.
   const prevCalcProgressRef = useRef(calcProgress)
   useEffect(() => {
     const wasRunning = !!prevCalcProgressRef.current
     const nowIdle = !calcProgress
     prevCalcProgressRef.current = calcProgress
     if (!wasRunning || !nowIdle) return
-    const grid = gridApiRef.current
-    if (!grid) return
-    let cancelled = false
-    ;(async () => {
-      try {
-        const fresh: CellData[] = await api.getCells(sheetId, currentUserId)
-        if (cancelled) return
-        // Build fresh maps.
-        const freshMap: Record<string, string> = {}
-        const freshRule: Record<string, CellRule> = {}
-        for (const c of fresh) {
-          freshMap[c.coord_key] = c.value ?? ''
-          if (c.rule) freshRule[c.coord_key] = c.rule as CellRule
-        }
-        // Walk every displayed leaf row; record every (row, col) whose
-        // DERIVED value (formula / sum_children, NOT manual) changed so
-        // we can flash it. Manual cells aren't flashed — they're the input
-        // that triggered the recalc, not a result of it.
-        const flashRowNodes: any[] = []
-        const flashColSet = new Set<string>()
-        grid.forEachNode(node => {
-          if (!node.data || !node.data.isLeaf) return
-          let rowHasDerivedChange = false
-          for (const leafId of colLeafIdsRef.current) {
-            const coordKey: string | undefined = node.data[`__coord_${leafId}`]
-            if (!coordKey) continue
-            const newVal = freshMap[coordKey] ?? ''
-            const oldVal = (node.data[`p_${leafId}`] ?? '') as string | number
-            // Keep rule map fresh too (formula→manual transitions etc.).
-            const newRule = (freshRule[coordKey] as CellRule) || 'manual'
-            const oldRule: CellRule = node.data[`__rule_${leafId}`] || 'manual'
-            if (newRule !== oldRule) node.data[`__rule_${leafId}`] = newRule
-            if (String(newVal) !== String(oldVal)) {
-              node.setDataValue(`p_${leafId}`, newVal)
-              if (newRule !== 'manual') {
-                rowHasDerivedChange = true
-                flashColSet.add(`p_${leafId}`)
-              }
-            }
-          }
-          if (rowHasDerivedChange) flashRowNodes.push(node)
-        })
-        if (flashRowNodes.length > 0 && flashColSet.size > 0) {
-          grid.flashCells({
-            rowNodes: flashRowNodes,
-            columns: Array.from(flashColSet),
-            flashDuration: 1500,
-            fadeDuration: 600,
-          })
-        }
-        // Update refs for future lookups/diffs.
-        cellMapRef.current = freshMap
-        cellRuleRef.current = freshRule
-      } catch { /* ignore — next edit/recalc will retry */ }
-    })()
-    return () => { cancelled = true }
-  }, [calcProgress, sheetId, currentUserId])
+    refreshAndFlashParents()
+  }, [calcProgress, refreshAndFlashParents])
 
   // Native clipboard paste — reads TSV from the paste event (works in all
   // browsers without permission prompt because the paste event is
@@ -789,28 +916,49 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
   function makePeriodColDef(label: string, periodRecId: string): ColDef {
     const field = `p_${periodRecId}`
     // Rough width from header text length so names fit by default.
-    // Rough initial estimate (AG Grid's autoSizeColumns on first-data-rendered
-    // refines this). Keep it generous so headers aren't clipped pre-measurement.
+    // Generous by design: AG Grid's autoSizeColumns-to-header measurement
+    // is fragile after column-state restore, so we err on the wide side so
+    // labels like "Декабрь 2026" don't get clipped. 12 px/char + 44 px of
+    // padding (cell padding + sort/menu icon) ≈ fits "Декабрь 2026" (12 ch
+    // → 188 px) with margin.
     const chars = (label || '').length
-    const autoWidth = Math.max(90, Math.min(260, chars * 10 + 28))
+    const autoWidth = Math.max(120, Math.min(320, chars * 12 + 44))
     return {
       headerName: label,
       field,
       headerClass: 'ag-center-header',
       width: autoWidth,
-      minWidth: 70,
+      minWidth: 90,
       // NB: do NOT set enableCellChangeFlash here — we only want to flash
       // DERIVED cells (sums/formulas that recomputed), not the manual cell
       // the user just typed into. Flash is triggered explicitly via
       // api.flashCells() in the recalc-diff effect and in the local
       // parent-sum update path.
       editable: (p: any) => {
+        if (mode === 'formulas') return false // read-only in formula view
         if (!p.data || !p.data.isLeaf) return false // group rows: read-only
         const rule: CellRule = p.data[`__rule_${periodRecId}`] || 'manual'
-        return rule === 'manual'
+        // `manual` — обычный ввод. `formula` — разрешаем перезаписать вручную
+        // (как в Excel / legacy PivotGrid): typing a value replaces the
+        // formula and saves the cell as manual (rule: 'manual' in
+        // onCellValueChanged). `empty` / `sum_children` остаются read-only.
+        return rule === 'manual' || rule === 'formula'
       },
       valueFormatter: (p: any) => {
         const rule: CellRule = p.data?.[`__rule_${periodRecId}`] || 'manual'
+        if (mode === 'formulas') {
+          // Formula mode: show formula text for `formula` cells, otherwise
+          // a short rule label (parity with legacy PivotGrid settings view).
+          if (rule === 'formula') {
+            const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
+            const f = coordKey ? formulaMapRef.current[coordKey] : ''
+            return f || 'ƒ формула'
+          }
+          if (rule === 'sum_children') return 'Σ сумма'
+          if (rule === 'empty') return '∅'
+          if (!p.data?.isLeaf) return 'Σ сумма'
+          return '✎ ввод'
+        }
         if (rule === 'empty') return ''
         const v = p.value
         if (v == null || v === '') return ''
@@ -821,17 +969,48 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
         return String(v)
       },
       valueParser: (p: any) => {
-        // Reject non-numeric input for numeric cells.
-        const s = String(p.newValue ?? '').trim().replace(',', '.')
-        if (s === '') return ''
-        const num = Number(s)
+        // Lenient numeric parser: strip everything except digits and the
+        // first decimal separator. Example: "11у12.а12" → "1112.12".
+        // Also: comma → dot, minus sign allowed only at position 0.
+        const raw = String(p.newValue ?? '').trim()
+        if (raw === '') return ''
+        // Normalise decimal comma to dot before filtering.
+        const normalised = raw.replace(',', '.')
+        let out = ''
+        let seenDot = false
+        for (let i = 0; i < normalised.length; i++) {
+          const ch = normalised[i]
+          if (ch >= '0' && ch <= '9') {
+            out += ch
+          } else if (ch === '.' && !seenDot) {
+            out += '.'
+            seenDot = true
+          } else if (ch === '-' && out === '') {
+            out += '-'
+          }
+          // everything else gets dropped
+        }
+        // Cleanup: bare '-' / '.' / '-.' → empty
+        if (out === '' || out === '-' || out === '.' || out === '-.') return ''
+        const num = Number(out)
         if (Number.isNaN(num)) return p.oldValue
-        return s
+        return out
       },
       cellStyle: (p: any) => {
         const isLeaf = !!p.data?.isLeaf
         const rule: CellRule = p.data?.[`__rule_${periodRecId}`] || 'manual'
-        const s: any = { textAlign: 'right' }
+        const s: any = { textAlign: mode === 'formulas' ? 'left' : 'right' }
+        if (mode === 'formulas') {
+          // Settings/formula view: distinct pastel palette + left align so
+          // rule labels and formula text read naturally.
+          s.fontSize = 11
+          s.background = '#fafbfc'
+          if (rule === 'formula') s.color = '#1565c0'
+          else if (rule === 'sum_children' || !isLeaf) s.color = '#2e7d32'
+          else if (rule === 'empty') s.color = '#bbb'
+          else s.color = '#666'
+          return s
+        }
         if (rule === 'empty') {
           s.background = '#f5f5f5'
           s.color = '#bbb'
@@ -853,6 +1032,55 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
         if (!Number.isNaN(num) && num < 0) s.color = '#d32f2f'
         return s
       },
+      tooltipValueGetter: (p: any) => {
+        if (mode !== 'formulas') return null
+        const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
+        const f = coordKey ? formulaMapRef.current[coordKey] : ''
+        return f ? `ƒ ${f}` : null
+      },
+    }
+  }
+
+  // Level-aggregate column (e.g. year total across quarters). Non-editable,
+  // summed from the group's leaf period fields for the current row.
+  function makeSumColDef(groupLabel: string, leafIds: string[]): ColDef {
+    const label = `Σ ${groupLabel}`
+    // Stable colId so we can target flashing — suffixed with leaf-id joins so
+    // two different Σ columns covering different leaf sets stay distinct.
+    const colId = `sum__${leafIds.join('_').slice(0, 80)}__${leafIds.length}`
+    sumColLeavesRef.current[colId] = leafIds
+    return {
+      colId,
+      headerName: label,
+      headerClass: 'ag-center-header',
+      width: Math.max(100, label.length * 9 + 24),
+      minWidth: 80,
+      editable: false,
+      valueGetter: (p: any) => {
+        if (!p.data) return ''
+        let s = 0, has = false
+        for (const id of leafIds) {
+          const v = p.data[`p_${id}`]
+          if (v == null || v === '') continue
+          const n = parseFloat(String(v))
+          if (!Number.isNaN(n)) { s += n; has = true }
+        }
+        return has ? s : ''
+      },
+      valueFormatter: (p: any) => {
+        if (mode === 'formulas') return 'Σ уровень'
+        const v = p.value
+        if (v === '' || v == null) return ''
+        const num = Number(v)
+        if (Number.isNaN(num)) return String(v)
+        return num.toLocaleString('ru-RU', { maximumFractionDigits: 2 })
+      },
+      cellStyle: () => ({
+        textAlign: 'right',
+        background: '#eef6ff',
+        color: '#0d47a1',
+        fontWeight: 600,
+      }),
     }
   }
 
@@ -905,6 +1133,8 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
 
   const onGridReady = useCallback((e: GridReadyEvent) => {
     gridApiRef.current = e.api
+    // Expose for E2E tests. Harmless in production — just a handle.
+    ;(window as unknown as { __pebbleGridApi?: GridApi }).__pebbleGridApi = e.api
   }, [])
 
   // Apply saved column state every time columnDefs are (re)built. If no
@@ -922,12 +1152,12 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
           state: savedColumnStateRef.current,
           applyOrder: true,
         })
-      } else {
-        const colIds = g.getAllDisplayedColumns()
-          .map(c => c.getColId())
-          .filter(id => id !== 'ag-Grid-AutoColumn')
-        if (colIds.length > 0) g.autoSizeColumns(colIds, false)
       }
+      // Note: we DON'T call autoSizeColumns here. AG Grid's header-measurement
+      // has been unreliable for long localised labels (e.g. "Декабрь 2026"
+      // getting clipped to ~138px). We instead rely on the generous default
+      // `width` in makePeriodColDef so headers always fit out of the box;
+      // users can shrink via drag, which persists via column-state.
     })
     return () => cancelAnimationFrame(raf)
   }, [columnDefs])
@@ -1002,7 +1232,9 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
         const node = e.api.getDisplayedRowAtIndex(focused.rowIndex)
         if (node?.data?.isLeaf && colId.startsWith('p_')) {
           const rule: CellRule = node.data[`__rule_${colId.slice(2)}`] || 'manual'
-          if (rule === 'manual') {
+          // Allow keyboard-to-edit for manual AND formula cells (Excel parity:
+          // typing on a formula cell replaces it with manual value).
+          if (rule === 'manual' || rule === 'formula') {
             kev.preventDefault()
             kev.stopPropagation()
             e.api.startEditingCell({
@@ -1175,6 +1407,30 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
       ;(kidsByPath[pk] ||= []).push(r)
     }
     const leafId = field.slice(2)
+    // Build path → rowNode index. No `getRowId` is defined, so
+    // `api.getRowNode(...)` wouldn't work — iterate instead.
+    const nodeByPath: Record<string, any> = {}
+    api.forEachNode(n => {
+      if (n.data) nodeByPath[(n.data.path as string[]).join('|')] = n
+    })
+    // Which Σ-columns include this leaf? We'll refresh & flash them on the
+    // leaf row AND every ancestor row (the leaf itself also flashes for Σ
+    // cols because the user sees a fresh aggregate value).
+    const affectedSumCols: string[] = []
+    for (const [colId, ids] of Object.entries(sumColLeavesRef.current)) {
+      if (ids.includes(leafId)) affectedSumCols.push(colId)
+    }
+    const leafKey = leafPath.join('|')
+    const leafNode = nodeByPath[leafKey]
+    if (affectedSumCols.length > 0 && leafNode) {
+      api.refreshCells({ rowNodes: [leafNode], columns: affectedSumCols, force: true })
+      api.flashCells({
+        rowNodes: [leafNode],
+        columns: affectedSumCols,
+        flashDuration: 1500,
+        fadeDuration: 600,
+      })
+    }
     // Walk upward from leaf's parent to root.
     for (let depth = leafPath.length - 1; depth >= 1; depth--) {
       const parentPath = leafPath.slice(0, depth)
@@ -1193,15 +1449,16 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
       const newVal = has ? String(s) : ''
       const changed = String(parent[field] ?? '') !== newVal
       parent[field] = newVal
-      // Nudge AG Grid to refresh just that cell.
-      const node = api.getRowNode(parentPath.join('|'))
+      const node = nodeByPath[parentPath.join('|')]
       if (node) {
-        api.refreshCells({ rowNodes: [node], columns: [field], force: true })
-        // Flash the recomputed parent sum cell (it's a derived value).
+        // Refresh both the changed leaf-field column AND any Σ-columns that
+        // include this leaf (they sum across periods on this row).
+        const cols = [field, ...affectedSumCols]
+        api.refreshCells({ rowNodes: [node], columns: cols, force: true })
         if (changed) {
           api.flashCells({
             rowNodes: [node],
-            columns: [field],
+            columns: cols,
             flashDuration: 1500,
             fadeDuration: 600,
           })
@@ -1218,6 +1475,13 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
     const coordKey: string | undefined = e.data?.[`__coord_${leafId}`]
     if (!coordKey) return
     const newVal = e.newValue == null ? '' : String(e.newValue)
+    // If the user overwrote a formula cell, flip its local rule to 'manual'
+    // right away so the cell restyles (blue → yellow) without waiting for
+    // the server round-trip.
+    if (e.data[`__rule_${leafId}`] === 'formula') {
+      e.data[`__rule_${leafId}`] = 'manual'
+      e.node?.setData({ ...e.data })
+    }
     // Optimistic: recompute parent sums locally for instant feedback.
     const path: string[] = e.data.path
     recomputeParentsForField(path, field)
@@ -1231,12 +1495,15 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
       user_id: currentUserId,
     }]).then(() => {
       cellMapRef.current[coordKey] = newVal
+      // Server recomputed formulas synchronously — refetch + flash so any
+      // derived (formula/sum_children) cells that changed light up green.
+      refreshAndFlashParents()
     }).catch(err => {
       setError(`Не удалось сохранить: ${err?.message || err}`)
     }).finally(() => {
       setRecalcRunning(false)
     })
-  }, [sheetId, currentUserId, recomputeParentsForField])
+  }, [sheetId, currentUserId, recomputeParentsForField, refreshAndFlashParents])
 
   // ── Render ─────────────────────────────────────────────────────────────
   if (loading) {
@@ -1290,16 +1557,35 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress }: Pr
             />
           )
         })}
+        {/* Column-level aggregate toggles (Годы / Кварталы / Месяцы). Click
+            to add/remove summing columns at that level of the period
+            hierarchy. Parity with legacy PivotGrid. */}
+        {colLevelNames.length > 0 && (
+          <Box sx={{ display: 'flex', gap: 0.5, ml: pinnedEntries.length ? 1 : 0 }}>
+            {colLevelNames.map(({ level, label }) => (
+              <Chip
+                key={`lvl-${level}`}
+                size="small"
+                label={`Σ ${label}`}
+                color={colLevelToggles[level] ? 'primary' : 'default'}
+                variant={colLevelToggles[level] ? 'filled' : 'outlined'}
+                onClick={() => setColLevelToggles(prev => ({ ...prev, [level]: !prev[level] }))}
+                sx={{ fontSize: 11 }}
+                data-testid={`col-level-chip-${level}`}
+              />
+            ))}
+          </Box>
+        )}
       </Box>
       <Box sx={{ flex: 1, minHeight: 0 }} ref={gridContainerRef}>
         <AgGridReact
-          theme={themeAlpine}
+          theme={themeAlpineWithBorders}
           rowData={rowData}
           columnDefs={columnDefs}
           treeData
           getDataPath={getDataPath}
           autoGroupColumnDef={autoGroupColumnDef}
-          groupDefaultExpanded={0}
+          groupDefaultExpanded={-1}
           rowHeight={28}
           headerHeight={30}
           onCellValueChanged={onCellValueChanged}

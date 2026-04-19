@@ -38,7 +38,11 @@ SYSTEM_PROMPT = """Ты помощник в приложении Pebble — фи
 - Отвечать на общие вопросы о Pebble и финансовом моделировании.
 - Выполнять действия с моделями: перечислять, создавать, открывать, импортировать Excel.
 - Работать с листами: перечислять, открывать, фиксировать/снимать аналитики, вводить значения.
+- Добавлять/убирать аналитики сразу со всех листов модели.
 - Запускать пересчёт формул.
+- Управлять правами пользователей на записи аналитики: `list_users`, `list_analytic_records` (найти id записи по имени), `set_record_permission(user_id, analytic_id, record_id, can_view, can_edit)`. Когда хотя бы одно разрешение для пары (user, analytic) задано — пользователь видит только разрешённые записи этой аналитики.
+
+Важно: когда пользователь просит "добавь/убери аналитику X со всех листов" — НЕ отсылай его в UI; найди analytic_id через list_model_analytics и вызови add_analytic_to_all_sheets / remove_analytic_from_all_sheets сам.
 
 Контекст пользователя передаётся в каждом запросе (текущая модель, текущий лист, id пользователя).
 Когда пользователь просит сделать что-то в приложении, используй инструменты. Если нужен идентификатор (model_id, sheet_id), сначала вызови list_models или list_sheets чтобы его узнать.
@@ -192,6 +196,46 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "list_model_analytics",
+        "description": (
+            "Получить все аналитики модели (не привязанные к конкретному листу). "
+            "Возвращает массив {id, name, code}. Используй чтобы найти analytic_id "
+            "по имени аналитики."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"model_id": {"type": "string"}},
+            "required": ["model_id"],
+        },
+    },
+    {
+        "name": "add_analytic_to_all_sheets",
+        "description": (
+            "Добавить аналитику во ВСЕ листы модели (идемпотентно — листы, где "
+            "она уже есть, пропускаются). Возвращает {added, skipped}."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "model_id": {"type": "string"},
+                "analytic_id": {"type": "string"},
+            },
+            "required": ["model_id", "analytic_id"],
+        },
+    },
+    {
+        "name": "remove_analytic_from_all_sheets",
+        "description": "Убрать аналитику со ВСЕХ листов модели. Возвращает {removed}.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "model_id": {"type": "string"},
+                "analytic_id": {"type": "string"},
+            },
+            "required": ["model_id", "analytic_id"],
+        },
+    },
+    {
         "name": "fill_sheet",
         "description": (
             "Заполнить ВСЕ ячейки листа (декартово произведение листовых записей "
@@ -209,6 +253,44 @@ TOOLS: list[dict] = [
                 "max": {"type": "number", "description": "Максимум для mode=random (по умолчанию 100)"},
             },
             "required": ["sheet_id", "mode"],
+        },
+    },
+    {
+        "name": "list_users",
+        "description": "Получить список всех пользователей. Возвращает [{id, username, can_admin}].",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "list_analytic_records",
+        "description": (
+            "Получить плоский список записей аналитики с именами и parent_id. "
+            "Нужно для поиска нужной терминальной записи по имени (D11, D12 и т.п.). "
+            "Возвращает [{id, name, parent_id, has_children}]."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"analytic_id": {"type": "string"}},
+            "required": ["analytic_id"],
+        },
+    },
+    {
+        "name": "set_record_permission",
+        "description": (
+            "Установить право пользователя на конкретную запись аналитики. "
+            "Когда установлено хотя бы одно разрешение для пары (user, analytic), "
+            "пользователь видит ТОЛЬКО разрешённые записи этой аналитики во всех "
+            "листах. Идемпотентно — можно вызывать многократно."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string"},
+                "analytic_id": {"type": "string"},
+                "record_id": {"type": "string"},
+                "can_view": {"type": "boolean"},
+                "can_edit": {"type": "boolean"},
+            },
+            "required": ["user_id", "analytic_id", "record_id"],
         },
     },
 ]
@@ -408,6 +490,65 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             client_actions.append({"type": "unpin_analytic", "analytic_id": inp["analytic_id"]})
             return json.dumps({"ok": True}, ensure_ascii=False)
 
+        if name == "list_model_analytics":
+            rows = await db.execute_fetchall(
+                "SELECT id, name, code FROM analytics WHERE model_id = ? ORDER BY sort_order",
+                (inp["model_id"],),
+            )
+            return json.dumps([dict(r) for r in rows], ensure_ascii=False)
+
+        if name == "add_analytic_to_all_sheets":
+            model_id = inp["model_id"]
+            analytic_id = inp["analytic_id"]
+            sheets = await db.execute_fetchall(
+                "SELECT id FROM sheets WHERE model_id = ?", (model_id,),
+            )
+            added = 0
+            skipped = 0
+            for s in sheets:
+                sid = s["id"]
+                existing = await db.execute_fetchall(
+                    "SELECT id FROM sheet_analytics WHERE sheet_id = ? AND analytic_id = ?",
+                    (sid, analytic_id),
+                )
+                if existing:
+                    skipped += 1
+                    continue
+                cnt_rows = await db.execute_fetchall(
+                    "SELECT COUNT(*) AS n FROM sheet_analytics WHERE sheet_id = ?", (sid,),
+                )
+                sort_order = cnt_rows[0]["n"] if cnt_rows else 0
+                await db.execute(
+                    "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_fixed, fixed_record_id) VALUES (?, ?, ?, ?, 0, NULL)",
+                    (str(uuid.uuid4()), sid, analytic_id, sort_order),
+                )
+                added += 1
+            await db.commit()
+            client_actions.append({"type": "reload_model", "model_id": model_id})
+            return json.dumps({"added": added, "skipped": skipped}, ensure_ascii=False)
+
+        if name == "remove_analytic_from_all_sheets":
+            model_id = inp["model_id"]
+            analytic_id = inp["analytic_id"]
+            sheets = await db.execute_fetchall(
+                "SELECT id FROM sheets WHERE model_id = ?", (model_id,),
+            )
+            removed = 0
+            for s in sheets:
+                existing = await db.execute_fetchall(
+                    "SELECT id FROM sheet_analytics WHERE sheet_id = ? AND analytic_id = ?",
+                    (s["id"], analytic_id),
+                )
+                if existing:
+                    await db.execute(
+                        "DELETE FROM sheet_analytics WHERE sheet_id = ? AND analytic_id = ?",
+                        (s["id"], analytic_id),
+                    )
+                    removed += 1
+            await db.commit()
+            client_actions.append({"type": "reload_model", "model_id": model_id})
+            return json.dumps({"removed": removed}, ensure_ascii=False)
+
         if name == "fill_sheet":
             result = await _fill_sheet_impl(
                 db,
@@ -420,6 +561,59 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             )
             client_actions.append({"type": "reload_sheet", "sheet_id": inp["sheet_id"]})
             return json.dumps(result, ensure_ascii=False)
+
+        if name == "list_users":
+            rows = await db.execute_fetchall(
+                "SELECT id, username, can_admin FROM users ORDER BY username"
+            )
+            return json.dumps([dict(r) for r in rows], ensure_ascii=False)
+
+        if name == "list_analytic_records":
+            rows = await db.execute_fetchall(
+                """SELECT id, parent_id, data_json FROM analytic_records
+                   WHERE analytic_id = ? ORDER BY sort_order""",
+                (inp["analytic_id"],),
+            )
+            # Detect has_children by checking if this id appears as parent_id
+            parent_ids = {r["parent_id"] for r in rows if r["parent_id"]}
+            out = []
+            for r in rows:
+                data = json.loads(r["data_json"] or "{}")
+                out.append({
+                    "id": r["id"],
+                    "name": data.get("name", ""),
+                    "parent_id": r["parent_id"],
+                    "has_children": r["id"] in parent_ids,
+                })
+            return json.dumps(out, ensure_ascii=False)
+
+        if name == "set_record_permission":
+            user_id = inp["user_id"]
+            analytic_id = inp["analytic_id"]
+            record_id = inp["record_id"]
+            can_view = 1 if inp.get("can_view", True) else 0
+            can_edit = 1 if inp.get("can_edit", False) else 0
+            existing = await db.execute_fetchall(
+                """SELECT id FROM analytic_record_permissions
+                   WHERE user_id = ? AND analytic_id = ? AND record_id = ?""",
+                (user_id, analytic_id, record_id),
+            )
+            if existing:
+                await db.execute(
+                    """UPDATE analytic_record_permissions
+                       SET can_view = ?, can_edit = ? WHERE id = ?""",
+                    (can_view, can_edit, existing[0]["id"]),
+                )
+            else:
+                await db.execute(
+                    """INSERT INTO analytic_record_permissions
+                       (id, user_id, analytic_id, record_id, can_view, can_edit)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (str(uuid.uuid4()), user_id, analytic_id, record_id,
+                     can_view, can_edit),
+                )
+            await db.commit()
+            return json.dumps({"ok": True}, ensure_ascii=False)
 
         if name == "list_excel_in_folder":
             import os as _os
