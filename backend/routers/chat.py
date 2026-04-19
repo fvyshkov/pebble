@@ -159,7 +159,152 @@ TOOLS: list[dict] = [
             "required": ["analytic_id"],
         },
     },
+    {
+        "name": "list_excel_in_folder",
+        "description": (
+            "Найти все Excel-файлы (.xlsx / .xls) в указанной папке на "
+            "локальной машине. Путь может начинаться с '~'. Возвращает "
+            "массив объектов {path, name, size, mtime}. Если файлов несколько, "
+            "ВЫЗОВИ этот инструмент перед import_excel_from_path и уточни у "
+            "пользователя, какой именно импортировать (или все подряд)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder_path": {"type": "string", "description": "Путь к папке"},
+            },
+            "required": ["folder_path"],
+        },
+    },
+    {
+        "name": "import_excel_from_path",
+        "description": (
+            "Импортировать модель из Excel-файла, лежащего на локальной машине. "
+            "Используй ПОЛНЫЙ путь, полученный из list_excel_in_folder."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+                "model_name": {"type": "string", "description": "Имя новой модели (по умолчанию — имя файла)"},
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
+        "name": "fill_sheet",
+        "description": (
+            "Заполнить ВСЕ ячейки листа (декартово произведение листовых записей "
+            "всех аналитик). mode='value' пишет константу value; mode='random' — "
+            "случайные целые в диапазоне [min, max]. Только ячейки с правилом "
+            "manual (и новые) перезаписываются; формулы и суммы не трогаются."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sheet_id": {"type": "string"},
+                "mode": {"type": "string", "enum": ["value", "random"]},
+                "value": {"type": "string", "description": "Константа для mode=value"},
+                "min": {"type": "number", "description": "Минимум для mode=random (по умолчанию 1)"},
+                "max": {"type": "number", "description": "Максимум для mode=random (по умолчанию 100)"},
+            },
+            "required": ["sheet_id", "mode"],
+        },
+    },
 ]
+
+
+# ── Shared sheet-fill implementation (used by chat tool + HTTP endpoint) ──
+
+async def _fill_sheet_impl(
+    db, *, sheet_id: str, mode: str, value=None, vmin: float = 1, vmax: float = 100,
+    user_id: str | None = None,
+) -> dict:
+    """Fill every cartesian-leaf cell of a sheet.
+
+    Skips cells whose stored rule is NOT 'manual' (formulas / sum_children).
+    For new cells (no row yet) inserts with rule='manual'.
+    Returns {ok, cells_written, skipped_non_manual}.
+    """
+    import random
+    # Binding order
+    sa_rows = await db.execute_fetchall(
+        "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order",
+        (sheet_id,),
+    )
+    if not sa_rows:
+        return {"error": "sheet has no analytics"}
+    analytic_ids = [r["analytic_id"] for r in sa_rows]
+    # Leaf records per analytic (records that are NOT anyone's parent)
+    leaves_by_a: dict[str, list[str]] = {}
+    for aid in analytic_ids:
+        recs = await db.execute_fetchall(
+            "SELECT id, parent_id FROM analytic_records WHERE analytic_id = ?", (aid,),
+        )
+        parent_set = {r["parent_id"] for r in recs if r["parent_id"]}
+        leaves_by_a[aid] = [r["id"] for r in recs if r["id"] not in parent_set]
+    for aid in analytic_ids:
+        if not leaves_by_a[aid]:
+            return {"error": f"analytic {aid} has no leaf records"}
+    # Cartesian product
+    combos: list[list[str]] = [[]]
+    for aid in analytic_ids:
+        combos = [c + [lid] for c in combos for lid in leaves_by_a[aid]]
+    # Existing cells keyed by coord_key for rule/id lookup
+    existing_rows = await db.execute_fetchall(
+        "SELECT id, coord_key, rule FROM cell_data WHERE sheet_id = ?", (sheet_id,),
+    )
+    existing = {r["coord_key"]: (r["id"], r["rule"]) for r in existing_rows}
+    cells_written = 0
+    skipped = 0
+    for combo in combos:
+        coord_key = "|".join(combo)
+        prev = existing.get(coord_key)
+        if prev and prev[1] != "manual":
+            skipped += 1
+            continue
+        if mode == "random":
+            v = str(random.randint(int(vmin), int(vmax)))
+        else:
+            v = "" if value is None else str(value)
+        if prev:
+            await db.execute(
+                "UPDATE cell_data SET value = ?, data_type = 'number' WHERE id = ?",
+                (v, prev[0]),
+            )
+        else:
+            await db.execute(
+                """INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula)
+                   VALUES (?, ?, ?, ?, 'number', 'manual', '')""",
+                (str(uuid.uuid4()), sheet_id, coord_key, v),
+            )
+        cells_written += 1
+    await db.commit()
+    return {"ok": True, "cells_written": cells_written, "skipped_non_manual": skipped}
+
+
+class FillSheetRequest(BaseModel):
+    mode: str = "random"  # "random" | "value"
+    value: str | None = None
+    min: float = 1
+    max: float = 100
+    user_id: str | None = None
+
+
+@router.post("/fill_sheet/{sheet_id}")
+async def fill_sheet_direct(sheet_id: str, req: FillSheetRequest):
+    """Non-LLM endpoint for filling every manual cell on a sheet.
+
+    Useful for scripting and for tests that don't want to hit Anthropic.
+    """
+    db = get_db()
+    result = await _fill_sheet_impl(
+        db, sheet_id=sheet_id, mode=req.mode, value=req.value,
+        vmin=req.min, vmax=req.max, user_id=req.user_id,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 # ── Server-side tool execution ─────────────────────────────────────────────
@@ -262,6 +407,62 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
         if name == "unpin_analytic":
             client_actions.append({"type": "unpin_analytic", "analytic_id": inp["analytic_id"]})
             return json.dumps({"ok": True}, ensure_ascii=False)
+
+        if name == "fill_sheet":
+            result = await _fill_sheet_impl(
+                db,
+                sheet_id=inp["sheet_id"],
+                mode=inp.get("mode", "value"),
+                value=inp.get("value"),
+                vmin=inp.get("min", 1),
+                vmax=inp.get("max", 100),
+                user_id=ctx.user_id,
+            )
+            client_actions.append({"type": "reload_sheet", "sheet_id": inp["sheet_id"]})
+            return json.dumps(result, ensure_ascii=False)
+
+        if name == "list_excel_in_folder":
+            import os as _os
+            folder = _os.path.expanduser(inp.get("folder_path", "")).strip()
+            if not folder or not _os.path.isdir(folder):
+                return json.dumps({"error": f"not a directory: {folder}"}, ensure_ascii=False)
+            files = []
+            for fn in sorted(_os.listdir(folder)):
+                if fn.startswith("~$"):  # Excel lock files
+                    continue
+                if not fn.lower().endswith((".xlsx", ".xls")):
+                    continue
+                full = _os.path.join(folder, fn)
+                try:
+                    st = _os.stat(full)
+                    files.append({
+                        "path": full,
+                        "name": fn,
+                        "size": st.st_size,
+                        "mtime": int(st.st_mtime),
+                    })
+                except OSError:
+                    continue
+            return json.dumps({"folder": folder, "files": files}, ensure_ascii=False)
+
+        if name == "import_excel_from_path":
+            import os as _os, io as _io
+            from fastapi import UploadFile as _UploadFile
+            from backend.routers.import_excel import import_excel as _do_import
+            path = _os.path.expanduser(inp.get("file_path", "")).strip()
+            if not path or not _os.path.isfile(path):
+                return json.dumps({"error": f"file not found: {path}"}, ensure_ascii=False)
+            fname = _os.path.basename(path)
+            model_name = inp.get("model_name") or _os.path.splitext(fname)[0]
+            with open(path, "rb") as fh:
+                data = fh.read()
+            upload = _UploadFile(file=_io.BytesIO(data), filename=fname)
+            try:
+                result = await _do_import(file=upload, model_name=model_name)
+            except Exception as ex:
+                return json.dumps({"error": f"import failed: {ex}"}, ensure_ascii=False)
+            client_actions.append({"type": "reload_model", "model_id": result.get("model_id", "")})
+            return json.dumps(result, ensure_ascii=False)
 
         return json.dumps({"error": f"unknown tool {name}"}, ensure_ascii=False)
     except Exception as e:

@@ -11,7 +11,6 @@ import SettingsOutlined from '@mui/icons-material/SettingsOutlined'
 import TableChartOutlined from '@mui/icons-material/TableChartOutlined'
 import FunctionsOutlined from '@mui/icons-material/FunctionsOutlined'
 import PeopleOutlined from '@mui/icons-material/PeopleOutlined'
-import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import LogoutOutlined from '@mui/icons-material/LogoutOutlined'
 import CalculateOutlined from '@mui/icons-material/CalculateOutlined'
 import SmartToyOutlined from '@mui/icons-material/SmartToyOutlined'
@@ -193,7 +192,7 @@ function ImportDialog({ open, onClose, onImported }: {
 }
 
 function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: string; can_admin: boolean }; onLogout?: () => void }) {
-  const [mode, setMode] = useState<AppMode>('settings')
+  const [mode, setMode] = useState<AppMode>('data')
   const [selection, setSelection] = useState<TreeSelection | null>(null)
   const [leftWidth, setLeftWidth] = useState(280)
   const [leftOpen, setLeftOpen] = useState(true)
@@ -207,15 +206,21 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
     (localStorage.getItem('pebble_calcMode') as 'auto' | 'manual') || 'auto'
   )
   const [calcRunning, setCalcRunning] = useState(false)
-  const [calcProgress, setCalcProgress] = useState<{ done: number; total: number; sheet?: string } | null>(null)
+  const [calcProgress, setCalcProgress] = useState<{
+    done: number; total: number; sheet?: string;
+    computed?: number; totalCells?: number; startedAt?: number;
+  } | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
+  const [chatWidth, setChatWidth] = useState<number>(() => {
+    const v = parseInt(localStorage.getItem('pebble_chatWidth') || '', 10)
+    return Number.isFinite(v) && v >= 280 ? v : 400
+  })
+  useEffect(() => { localStorage.setItem('pebble_chatWidth', String(chatWidth)) }, [chatWidth])
   const [chatImportFile, setChatImportFile] = useState<File | null>(null)
-  const [useAgGrid, setUseAgGrid] = useState<boolean>(
-    () => localStorage.getItem('pebble_useAgGrid') === '1'
-  )
-  useEffect(() => {
-    localStorage.setItem('pebble_useAgGrid', useAgGrid ? '1' : '0')
-  }, [useAgGrid])
+  // AG Grid is now the only supported mode. The toggle is hidden, but the
+  // state + legacy PivotGrid code path are kept for emergency fallback.
+  // Intentionally no localStorage persistence: page reload always = AG Grid.
+  const [useAgGrid, setUseAgGrid] = useState<boolean>(true)
   const calcedModelsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
@@ -235,6 +240,66 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   useEffect(() => { localStorage.setItem('pebble_calcMode', calcMode) }, [calcMode])
 
   const onRefresh = useCallback(() => setRefreshKey(k => k + 1), [])
+
+  // ── Global shortcuts ──────────────────────────────────────────────────
+  // • Double-space (two spaces within 400ms) → toggle voice input in chat.
+  //   Opens chat panel if it's closed. Ignored when the user is typing in
+  //   an input/textarea so normal " " still works.
+  // • Cmd/Ctrl+Z → history-based undo (api.undoChanges on the latest entry).
+  //   Skipped when focus is inside an editable element, so text-editor undo
+  //   (including AG Grid cell editor) keeps working natively.
+  const lastSpaceRef = useRef<number>(0)
+  useEffect(() => {
+    const isEditable = () => {
+      const el = document.activeElement as HTMLElement | null
+      if (!el) return false
+      const tag = el.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+      if (el.isContentEditable) return true
+      return false
+    }
+    const onKey = async (ev: KeyboardEvent) => {
+      // Double-space → toggle voice
+      if (ev.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
+        if (isEditable()) return
+        const now = Date.now()
+        if (now - lastSpaceRef.current < 400) {
+          ev.preventDefault()
+          lastSpaceRef.current = 0
+          setChatOpen(true)
+          // Defer a tick so ChatPanel has mounted if it was closed.
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('pebble:toggleVoice'))
+          }, 50)
+        } else {
+          lastSpaceRef.current = now
+        }
+        return
+      }
+      // Cmd/Ctrl+J → toggle AI chat panel
+      if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && !ev.altKey && ev.key.toLowerCase() === 'j') {
+        ev.preventDefault()
+        setChatOpen(v => !v)
+        return
+      }
+      // Cmd/Ctrl+Z → history undo
+      if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && ev.key.toLowerCase() === 'z') {
+        if (isEditable()) return
+        const modelId = selection?.modelId
+        if (!modelId) return
+        ev.preventDefault()
+        try {
+          const hist = await api.getModelHistory(modelId, 1)
+          if (hist.length > 0) {
+            await api.undoChanges(modelId, hist[0].id)
+            setRefreshKey(k => k + 1)
+          }
+        } catch { /* ignore */ }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selection?.modelId])
 
   // No auto-calculate on first sheet load — imported values from Excel are already correct.
   // Recalculation only happens when user explicitly edits cells or clicks "Рассчитать".
@@ -292,11 +357,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             onChange={(_, v) => { if (v) setMode(v) }}
             sx={{ '& .MuiToggleButton-root': { py: 0.25, px: 1, fontSize: 12, textTransform: 'none' } }}
           >
-            {isAdmin && (
-              <ToggleButton value="settings">
-                <Tooltip title="Настройки модели"><SettingsOutlined sx={{ fontSize: 16 }} /></Tooltip>
-              </ToggleButton>
-            )}
             <ToggleButton value="data">
               <Tooltip title="Просмотр / ввод данных"><TableChartOutlined sx={{ fontSize: 16 }} /></Tooltip>
             </ToggleButton>
@@ -305,15 +365,14 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 <Tooltip title="Формулы и правила"><FunctionsOutlined sx={{ fontSize: 16 }} /></Tooltip>
               </ToggleButton>
             )}
+            {isAdmin && (
+              <ToggleButton value="settings">
+                <Tooltip title="Настройки модели"><SettingsOutlined sx={{ fontSize: 16 }} /></Tooltip>
+              </ToggleButton>
+            )}
           </ToggleButtonGroup>
 
-          {isAdmin && (
-            <Tooltip title="Импорт модели из Excel">
-              <IconButton size="small" onClick={() => setShowImport(true)}>
-                <FileUploadOutlined fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          )}
+          {/* Import moved to LeftPanel toolbar (next to "add model"). */}
 
           {/* Calc mode toggle + calculate button */}
           <Tooltip title={calcMode === 'auto' ? 'Авто-расчёт (при каждом сохранении)' : 'Ручной расчёт (по кнопке)'}>
@@ -334,12 +393,32 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 disabled={calcRunning}
                 startIcon={calcRunning ? <CircularProgress size={12} /> : <CalculateOutlined fontSize="small" />}
                 onClick={async () => {
+                  const startedAt = Date.now()
                   setCalcRunning(true)
-                  setCalcProgress({ done: 0, total: 1 })
+                  setCalcProgress({ done: 0, total: 1, startedAt })
                   await api.calculateModelStream(selection.modelId, (data) => {
-                    if (data.phase === 'start') setCalcProgress({ done: 0, total: data.total_sheets || 1 })
-                    else if (data.phase === 'sheet_done') setCalcProgress({ done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet })
-                    else if (data.phase === 'done') { setCalcProgress(null); setCalcRunning(false); setRefreshKey(k => k + 1) }
+                    if (data.phase === 'start') {
+                      setCalcProgress({
+                        done: 0, total: data.total_sheets || 1,
+                        totalCells: data.total_cells ?? undefined,
+                        computed: 0, startedAt,
+                      })
+                    } else if (data.phase === 'sheet_done') {
+                      setCalcProgress({
+                        done: data.done || 0, total: data.total_sheets || 1,
+                        sheet: data.sheet,
+                        totalCells: data.total_cells ?? undefined,
+                        computed: data.computed ?? undefined,
+                        startedAt,
+                      })
+                    } else if (data.phase === 'done') {
+                      // NB: no longer bump refreshKey — that would remount
+                      // PivotGridAG and lose the "pre-recalc" cellMap snapshot
+                      // needed to detect which cells changed (for the green
+                      // flash). PivotGridAG refetches + diffs internally when
+                      // calcProgress transitions from truthy to null.
+                      setCalcProgress(null); setCalcRunning(false)
+                    }
                   }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
                 }}
                 sx={{ fontSize: 11, textTransform: 'none', minWidth: 0, py: 0, px: 1 }}
@@ -359,18 +438,22 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             </Tooltip>
           )}
 
-          <Tooltip title={useAgGrid ? 'Переключиться на старый grid' : 'Переключиться на AG Grid (бета)'}>
-            <IconButton
-              size="small"
-              onClick={() => setUseAgGrid(v => !v)}
-              data-testid="aggrid-toggle"
-              sx={{ color: useAgGrid ? '#1976d2' : undefined, fontSize: 12 }}
-            >
-              <span style={{ fontWeight: 700, fontSize: 11 }}>{useAgGrid ? 'AG' : 'old'}</span>
-            </IconButton>
-          </Tooltip>
+          {/* AG Grid toggle hidden — AG is the only active mode. Keep the
+              legacy PivotGrid path compiled in case we need to fall back. */}
+          {false && (
+            <Tooltip title={useAgGrid ? 'Переключиться на старый grid' : 'Переключиться на AG Grid (бета)'}>
+              <IconButton
+                size="small"
+                onClick={() => setUseAgGrid(v => !v)}
+                data-testid="aggrid-toggle"
+                sx={{ color: useAgGrid ? '#1976d2' : undefined, fontSize: 12 }}
+              >
+                <span style={{ fontWeight: 700, fontSize: 11 }}>{useAgGrid ? 'AG' : 'old'}</span>
+              </IconButton>
+            </Tooltip>
+          )}
 
-          <Tooltip title={chatOpen ? 'Скрыть AI-чат' : 'AI-помощник'}>
+          <Tooltip title={chatOpen ? 'Скрыть AI-чат (⌘J)' : 'AI-помощник (⌘J)'}>
             <IconButton
               size="small"
               onClick={() => setChatOpen(v => !v)}
@@ -400,6 +483,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 selection={selection} onSelect={handleSelect}
                 refreshKey={refreshKey} expandAfterCreate={expandAfterCreate} onCreated={onCreated}
                 sheetsOnly={isDataMode} currentUserId={isDataMode ? currentUserId : undefined}
+                onImportClick={isAdmin ? () => setShowImport(true) : undefined}
               />
             </div>
             <Splitter onResize={d => setLeftWidth(w => Math.max(180, w + d))} />
@@ -415,6 +499,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                   key={`ag-${selection.id}-${refreshKey}`}
                   sheetId={selection.id} modelId={selection.modelId}
                   currentUserId={currentUserId}
+                  calcProgress={calcProgress}
                 />
               ) : (
                 <PivotGrid
@@ -433,8 +518,12 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
           </div>
 
           {/* Right-docked AI chat — pushes other content via flex, not overlay */}
+          {chatOpen && (
+            <Splitter onResize={d => setChatWidth(w => Math.max(280, Math.min(900, w - d)))} />
+          )}
           <ChatPanel
             open={chatOpen}
+            width={chatWidth}
             onClose={() => setChatOpen(false)}
             context={{
               current_model_id: selection?.modelId ?? null,

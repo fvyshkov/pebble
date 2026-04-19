@@ -3,6 +3,7 @@ import { SimpleTreeView } from '@mui/x-tree-view/SimpleTreeView'
 import { TreeItem } from '@mui/x-tree-view/TreeItem'
 import { IconButton, Tooltip } from '@mui/material'
 import AddOutlined from '@mui/icons-material/AddOutlined'
+import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
 import FolderOutlined from '@mui/icons-material/FolderOutlined'
 import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
@@ -20,6 +21,7 @@ interface Props {
   onCreated?: (info: { modelId: string; folder: 'sheets' | 'analytics'; id: string; type: 'sheet' | 'analytic' }) => void
   sheetsOnly?: boolean
   currentUserId?: string
+  onImportClick?: () => void
 }
 
 interface ModelTree {
@@ -28,7 +30,7 @@ interface ModelTree {
   analytics: Analytic[]
 }
 
-export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId }: Props) {
+export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId, onImportClick }: Props) {
   const [trees, setTrees] = useState<ModelTree[]>([])
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string[]>([])
@@ -216,6 +218,13 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
         <Tooltip title="Добавить модель">
           <IconButton size="small" onClick={handleAdd}><AddOutlined fontSize="small" /></IconButton>
         </Tooltip>
+        {onImportClick && (
+          <Tooltip title="Импорт модели из Excel">
+            <IconButton size="small" onClick={onImportClick}>
+              <FileUploadOutlined fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
       </div>
       <div className="panel-left-tree">
         <SimpleTreeView

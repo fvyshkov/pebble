@@ -274,7 +274,7 @@ function RecordPicker({ anchorEl, tree, onSelect, onClose }: {
 }
 
 // ─── Cell rule types ───
-type CellRule = 'manual' | 'sum_children' | 'formula'
+type CellRule = 'manual' | 'sum_children' | 'formula' | 'empty'
 
 // ─── Main PivotGrid ───
 interface Props {
@@ -1622,8 +1622,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   const editable = rule === 'manual'
 
                   if (mode === 'settings') {
-                    const ruleLabel = rule === 'manual' ? 'ввод' : rule === 'sum_children' ? 'сумма' : 'формула'
-                    const ruleColor = rule === 'formula' ? '#1565c0' : rule === 'sum_children' ? '#2e7d32' : '#666'
+                    const ruleLabel = rule === 'manual' ? 'ввод' : rule === 'sum_children' ? 'сумма' : rule === 'empty' ? 'пусто' : 'формула'
+                    const ruleColor = rule === 'formula' ? '#1565c0' : rule === 'sum_children' ? '#2e7d32' : rule === 'empty' ? '#bbb' : '#666'
                     const formulaText = formulas[coordKey] || ''
                     const cellContent = rule === 'formula' && formulaText ? formulaText : ruleLabel
 
@@ -1646,6 +1646,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                               <MenuItem value="manual" sx={{ fontSize: 12 }}>✎ Ввод</MenuItem>
                               <MenuItem value="sum_children" sx={{ fontSize: 12 }}>Σ Сумма</MenuItem>
                               <MenuItem value="formula" sx={{ fontSize: 12 }}>ƒ Формула</MenuItem>
+                              <MenuItem value="empty" sx={{ fontSize: 12 }}>∅ Пусто</MenuItem>
                             </Select>
                             {rule === 'formula' && (
                               <>
@@ -1674,6 +1675,15 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   }
 
                   // Data mode
+                  // Empty cell — nothing computed, nothing shown, no manual input
+                  if (rule === 'empty') {
+                    return (
+                      <td key={colRecId} onClick={cellClick} style={{
+                        border: focusBorder, padding: '4px 6px',
+                        background: selBg || '#f5f5f5', color: '#bbb', fontSize: 13,
+                      }} />
+                    )
+                  }
                   // Formula cell — use server-computed value from cells[]
                   if (rule === 'formula') {
                     const fText = formulas[coordKey] || ''

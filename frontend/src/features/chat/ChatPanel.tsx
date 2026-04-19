@@ -3,6 +3,8 @@ import { Box, IconButton, TextField, CircularProgress, Typography, Tooltip } fro
 import SendOutlined from '@mui/icons-material/SendOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import ClearAllOutlined from '@mui/icons-material/ClearAllOutlined'
+import MicOutlined from '@mui/icons-material/MicOutlined'
+import MicOffOutlined from '@mui/icons-material/MicOffOutlined'
 import * as api from '../../api'
 import type { ChatAction } from '../../api'
 
@@ -14,6 +16,7 @@ export interface ChatContext {
 
 export interface ChatPanelProps {
   open: boolean
+  width?: number
   onClose: () => void
   context: ChatContext
   // Callbacks the agent can invoke via action side-effects
@@ -34,7 +37,7 @@ interface UIMessage {
 const STORAGE_KEY = 'pebble_chat_history_v1'
 
 export default function ChatPanel({
-  open, onClose, context,
+  open, width, onClose, context,
   onOpenSheet, onSwitchMode, onImportExcel, onRefreshData,
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<UIMessage[]>(() => {
@@ -48,6 +51,14 @@ export default function ChatPanel({
   const [loading, setLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Voice input state
+  const [listening, setListening] = useState(false)
+  const [voiceUnsupported, setVoiceUnsupported] = useState(false)
+  const recognitionRef = useRef<any>(null)
+  const sendRef = useRef<(text: string) => void>(() => {})
+  const pauseTimerRef = useRef<number | null>(null)
+  // TTS bookkeeping: index of the last assistant message we've already spoken.
+  const lastSpokenRef = useRef<number>(-1)
 
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.slice(-50))) } catch { /* ignore */ }
@@ -120,7 +131,89 @@ export default function ChatPanel({
     }
   }, [onImportExcel])
 
-  const clear = () => { setMessages([]); localStorage.removeItem(STORAGE_KEY) }
+  const clear = () => {
+    setMessages([])
+    localStorage.removeItem(STORAGE_KEY)
+    // Also reset any live TTS and the spoken-index cursor, so re-asking the
+    // same thing after a clear speaks again instead of being skipped.
+    try { window.speechSynthesis?.cancel() } catch { /* ignore */ }
+    lastSpokenRef.current = -1
+  }
+
+  // Keep a stable reference to `send` so voice recognition callbacks
+  // always hit the latest closure without reattaching handlers on every render.
+  useEffect(() => { sendRef.current = send }, [send])
+
+  // Voice input: Web Speech API. Recognition runs continuously; after a
+  // ~1.2 s silence we auto-submit the accumulated transcript and keep the
+  // mic open for the next utterance (so user can dictate multiple commands).
+  const toggleVoice = useCallback(() => {
+    const W = window as any
+    const SR = W.SpeechRecognition || W.webkitSpeechRecognition
+    if (!SR) { setVoiceUnsupported(true); return }
+    if (listening) {
+      recognitionRef.current?.stop?.()
+      recognitionRef.current = null
+      setListening(false)
+      if (pauseTimerRef.current) {
+        window.clearTimeout(pauseTimerRef.current)
+        pauseTimerRef.current = null
+      }
+      return
+    }
+    const rec = new SR()
+    rec.lang = 'ru-RU'
+    rec.interimResults = true
+    rec.continuous = true
+    let buffer = ''
+    const schedulePauseCommit = () => {
+      if (pauseTimerRef.current) window.clearTimeout(pauseTimerRef.current)
+      pauseTimerRef.current = window.setTimeout(() => {
+        const v = buffer.trim()
+        if (v) {
+          sendRef.current(v)
+          buffer = ''
+          setInput('')
+        }
+      }, 1200)
+    }
+    rec.onresult = (e: any) => {
+      let interim = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i]
+        const t = r[0]?.transcript || ''
+        if (r.isFinal) buffer += t + ' '
+        else interim += t
+      }
+      setInput(buffer + interim)
+      if (e.results[e.results.length - 1]?.isFinal) schedulePauseCommit()
+    }
+    rec.onerror = () => { /* swallow; user will click again to retry */ }
+    rec.onend = () => {
+      // If still listening (user didn't toggle off), restart so it keeps going.
+      if (recognitionRef.current === rec) {
+        try { rec.start() } catch { /* already started race */ }
+      }
+    }
+    recognitionRef.current = rec
+    setListening(true)
+    try { rec.start() } catch { /* ignore */ }
+  }, [listening])
+
+  // Cleanup on unmount
+  useEffect(() => () => {
+    recognitionRef.current?.stop?.()
+    if (pauseTimerRef.current) window.clearTimeout(pauseTimerRef.current)
+  }, [])
+
+  // Global shortcut: App.tsx dispatches 'pebble:toggleVoice' on double-space.
+  useEffect(() => {
+    const h = () => toggleVoice()
+    window.addEventListener('pebble:toggleVoice', h)
+    return () => window.removeEventListener('pebble:toggleVoice', h)
+  }, [toggleVoice])
+
+  // TTS voiceover of assistant replies removed per user request.
 
   if (!open) return null
 
@@ -128,7 +221,7 @@ export default function ChatPanel({
     <Box
       data-testid="chat-panel"
       sx={{
-        width: 400, minWidth: 320, height: '100%',
+        width: width ?? 400, flexShrink: 0, height: '100%',
         display: 'flex', flexDirection: 'column',
         borderLeft: '1px solid #e0e0e0', background: '#fafafa',
       }}
@@ -191,34 +284,71 @@ export default function ChatPanel({
       </Box>
 
       {/* Input */}
-      <Box sx={{ p: 1, borderTop: '1px solid #e0e0e0', background: '#fff', display: 'flex', gap: 0.5 }}>
-        <TextField
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          placeholder="Задайте вопрос или команду…"
-          multiline
-          minRows={1}
-          maxRows={4}
-          size="small"
-          fullWidth
-          disabled={loading}
-          onKeyDown={e => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              const v = input.trim()
-              if (v) send(v)
-            }
-          }}
-          inputProps={{ 'data-testid': 'chat-input' }}
-        />
-        <IconButton
-          onClick={() => { const v = input.trim(); if (v) send(v) }}
-          disabled={loading || !input.trim()}
-          data-testid="chat-send"
-          color="primary"
-        >
-          <SendOutlined />
-        </IconButton>
+      <Box sx={{ display: 'flex', flexDirection: 'column', borderTop: '1px solid #e0e0e0', background: '#fff' }}>
+        <Box sx={{ p: 1, display: 'flex', gap: 0.5 }}>
+          <TextField
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            placeholder="Задайте вопрос или команду…"
+            multiline
+            minRows={1}
+            maxRows={4}
+            size="small"
+            fullWidth
+            disabled={loading}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                const v = input.trim()
+                if (v) send(v)
+              }
+            }}
+            inputProps={{ 'data-testid': 'chat-input' }}
+          />
+          <IconButton
+            onClick={() => { const v = input.trim(); if (v) send(v) }}
+            disabled={loading || !input.trim()}
+            data-testid="chat-send"
+            color="primary"
+          >
+            <SendOutlined />
+          </IconButton>
+        </Box>
+        {/* Mode bar: voice toggle */}
+        <Box sx={{
+          px: 1, pb: 0.75, display: 'flex', alignItems: 'center', gap: 0.75,
+          fontSize: 11, color: '#666',
+        }}>
+          <Tooltip title={
+            voiceUnsupported
+              ? 'Голосовой ввод не поддерживается в этом браузере'
+              : listening ? 'Выключить голосовой ввод' : 'Голосовой ввод (авто-отправка через паузу)'
+          }>
+            <span>
+              <IconButton
+                size="small"
+                onClick={toggleVoice}
+                disabled={voiceUnsupported}
+                data-testid="chat-voice-toggle"
+                sx={{
+                  color: listening ? '#d32f2f' : '#666',
+                  animation: listening ? 'pulse 1.2s infinite' : 'none',
+                  '@keyframes pulse': {
+                    '0%,100%': { opacity: 1 },
+                    '50%': { opacity: 0.45 },
+                  },
+                }}
+              >
+                {listening ? <MicOutlined fontSize="small" /> : <MicOffOutlined fontSize="small" />}
+              </IconButton>
+            </span>
+          </Tooltip>
+          <span>
+            {voiceUnsupported ? 'голос недоступен'
+              : listening ? 'слушаю… (пауза → отправка)'
+              : 'голос выключен'}
+          </span>
+        </Box>
       </Box>
     </Box>
   )

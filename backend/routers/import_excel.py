@@ -693,8 +693,16 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     except (ValueError, AttributeError):
                         continue
 
+                # Cell color is authoritative: yellow/beige fill (theme=7) means
+                # "user input" in the source spreadsheet — treat as manual even
+                # if a formula exists. We keep the numeric value Excel computed.
+                is_yellow = _is_input_cell(ws_f.cell(row_num, col_num))
+
                 # Determine rule and formula from Claude analysis
-                if formula_info:
+                if is_yellow:
+                    rule = "manual"
+                    formula_text = ""
+                elif formula_info:
                     rule = "formula"
                     is_first = (period_rid == first_period_rid)
                     if is_first and formula_info.get("formula_first"):
@@ -980,7 +988,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             val = float(val.replace(",", ".").replace(" ", ""))
                         except (ValueError, AttributeError):
                             continue
-                    if formula_info:
+                    # Cell color is authoritative: yellow fill = user input,
+                    # even if a formula exists. Keep the value Excel computed.
+                    is_yellow = _is_input_cell(ws_f.cell(row_num, col_num))
+                    if is_yellow:
+                        rule = "manual"
+                        formula_text = ""
+                    elif formula_info:
                         rule = "formula"
                         is_first = (period_rid == first_period_rid)
                         if is_first and formula_info.get("formula_first"):

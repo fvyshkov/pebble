@@ -97,6 +97,8 @@ def prepare():
 def browser_context(browser: Browser):
     ctx = browser.new_context(viewport={"width": 1400, "height": 900})
     ctx.set_default_timeout(20000)
+    # Force legacy PivotGrid — these tests assert on table DOM.
+    ctx.add_init_script("window.localStorage.setItem('pebble_useAgGrid', '0')")
     yield ctx
     ctx.close()
 

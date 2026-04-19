@@ -234,7 +234,15 @@ async def calculate_model_stream(model_id: str):
         sheets = await db.execute_fetchall(
             "SELECT id, name FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,))
         total_sheets = len(sheets)
-        yield f"data: {json.dumps({'phase': 'start', 'total_sheets': total_sheets})}\n\n"
+        # Count formula cells across the model so the UI can show X/Y progress.
+        total_cells_rows = await db.execute_fetchall(
+            """SELECT COUNT(*) AS n FROM cell_data
+               WHERE sheet_id IN (SELECT id FROM sheets WHERE model_id = ?)
+                 AND rule = 'formula'""",
+            (model_id,),
+        )
+        total_cells = total_cells_rows[0]["n"] if total_cells_rows else 0
+        yield f"data: {json.dumps({'phase': 'start', 'total_sheets': total_sheets, 'total_cells': total_cells})}\n\n"
 
         result = await calculate_model(db, model_id)
         total = 0

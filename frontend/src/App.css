@@ -46,14 +46,31 @@
 }
 
 .splitter {
-  width: 4px;
+  width: 5px;
   cursor: col-resize;
-  background: transparent;
+  background: #e0e0e0;
   flex-shrink: 0;
+  transition: background 0.15s;
 }
 
-.splitter:hover {
+.splitter:hover,
+.splitter:active {
   background: #1976d2;
+}
+
+/* Keep AG Grid status bar visible even when no cells are selected. */
+.ag-theme-alpine .ag-status-bar {
+  min-height: 28px;
+  display: flex !important;
+}
+
+/* Flash colour for cells whose value changed (enableCellChangeFlash).
+   Override AG Grid's default yellow to a soft green — signals to every viewer
+   (not only the one who triggered recalc) which cells just updated. */
+.ag-theme-alpine {
+  --ag-value-change-value-highlight-background-color: rgba(76, 175, 80, 0.55);
+  --ag-value-change-delta-up-color: #2e7d32;
+  --ag-value-change-delta-down-color: #2e7d32;
 }
 
 .panel-left-toolbar {
@@ -116,4 +133,34 @@
   height: 100%;
   color: #999;
   gap: 8px;
+}
+
+/* AG Grid: center column header titles */
+.ag-center-header .ag-header-cell-label {
+  justify-content: center;
+}
+.ag-center-header .ag-header-group-cell-label {
+  justify-content: center;
+}
+
+/* AG Grid: visible vertical + horizontal gridlines between data cells. */
+.ag-theme-alpine .ag-cell,
+.ag-theme-alpine .ag-header-cell,
+.ag-theme-alpine .ag-header-group-cell {
+  border-right: 1px solid #e0e0e0 !important;
+}
+.ag-theme-alpine .ag-cell {
+  border-bottom: 1px solid #f0f0f0 !important;
+}
+
+/* AG Grid: visible selection highlight consistent across manual/formula/sum
+   cells. Must fully override inline `background` set by cellStyle (yellow for
+   manual cells), so we use `background` shorthand + high-alpha blue. */
+.ag-cell-focus:not(.ag-cell-inline-editing),
+.ag-cell-range-single-cell {
+  box-shadow: inset 0 0 0 2px #1976d2 !important;
+  background: rgba(25, 118, 210, 0.35) !important;
+}
+.ag-cell-range-selected:not(.ag-cell-range-single-cell):not(.ag-cell-focus) {
+  background: rgba(25, 118, 210, 0.22) !important;
 }
