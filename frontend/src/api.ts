@@ -94,7 +94,7 @@ export const getCellsPartial = (sheetId: string, coordKeys: string[], userId?: s
   }).then(r => json<CellData[]>(r))
 export const calculateModelStream = (
   modelId: string,
-  onProgress: (data: { phase: string; sheet?: string; done?: number; total_sheets?: number; computed?: number }) => void,
+  onProgress: (data: { phase: string; sheet?: string; done?: number; total_sheets?: number; computed?: number; total_cells?: number }) => void,
 ): Promise<void> =>
   fetch(`${BASE}/cells/calculate-model/${modelId}/stream`, { method: 'POST' })
     .then(async res => {

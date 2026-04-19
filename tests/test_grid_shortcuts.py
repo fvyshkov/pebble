@@ -21,6 +21,8 @@ ADMIN_PASS = "admin"
 @pytest.fixture(scope="module")
 def browser_context(browser):
     ctx = browser.new_context()
+    # Force legacy PivotGrid — these tests assert on table DOM.
+    ctx.add_init_script("window.localStorage.setItem('pebble_useAgGrid', '0')")
     yield ctx
     ctx.close()
 

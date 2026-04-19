@@ -17,3 +17,21 @@ services:
     envVars:
       - key: PEBBLE_DB
         value: /data/pebble.db
+
+  # Preview service for AG Grid migration branch. Shares no disk with main
+  # so it can freely be blown away / rebuilt.
+  - type: web
+    name: pebble-aggrid
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    branch: aggrid
+    autoDeploy: true
+    healthCheckPath: /api/models
+    disk:
+      name: pebble-aggrid-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PEBBLE_DB
+        value: /data/pebble.db
