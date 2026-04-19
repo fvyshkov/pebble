@@ -1718,7 +1718,8 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
 
                   // Manual input cell
                   const shouldEdit = isFocused && editingCell && canEdit
-                  const manualBg = !canEdit ? '#fff5f5' : selBg || '#fdf8e8'
+                  // Selection highlight must be visible regardless of editability.
+                  const manualBg = selBg || (!canEdit ? '#fff5f5' : '#fdf8e8')
                   return (
                     <td key={colRecId} onClick={cellClick}
                       style={{ border: focusBorder, padding: 0, background: manualBg }}
