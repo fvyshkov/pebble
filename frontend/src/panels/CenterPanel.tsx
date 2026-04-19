@@ -30,7 +30,7 @@ export default function CenterPanel({ selection, onRefresh }: Props) {
         <>
           <AnalyticSettings analyticId={selection.id} modelId={selection.modelId} onRefresh={onInnerRefresh} />
           <AnalyticFields analyticId={selection.id} key={`fields-${innerKey}`} />
-          <AnalyticRecordsGrid analyticId={selection.id} key={`records-${innerKey}`} />
+          <AnalyticRecordsGrid analyticId={selection.id} modelId={selection.modelId} key={`records-${innerKey}`} />
         </>
       )}
       {selection.type === 'sheet' && (

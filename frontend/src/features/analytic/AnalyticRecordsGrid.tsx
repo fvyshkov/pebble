@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Box, Typography, IconButton, Tooltip, Table, TableHead, TableBody,
-  TableRow, TableCell, TextField,
+  TableRow, TableCell, TextField, MenuItem, Select, FormControl, InputLabel,
 } from '@mui/material'
 import AddOutlined from '@mui/icons-material/AddOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
@@ -10,10 +10,12 @@ import ChevronRightOutlined from '@mui/icons-material/ChevronRightOutlined'
 import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import FunctionsOutlined from '@mui/icons-material/FunctionsOutlined'
+import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import { usePending } from '../../store/PendingContext'
 import * as api from '../../api'
 import type { AnalyticField, AnalyticRecord } from '../../types'
 import IndicatorFormulasPanel from '../sheet/IndicatorFormulasPanel'
+import Splitter from '../../components/Splitter'
 
 function RecordCellInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const [local, setLocal] = useState(value)
@@ -32,6 +34,7 @@ function RecordCellInput({ value, onChange }: { value: string; onChange: (v: str
 
 interface Props {
   analyticId: string
+  modelId?: string
 }
 
 interface TreeNode {
@@ -41,15 +44,20 @@ interface TreeNode {
   level: number
 }
 
-export default function AnalyticRecordsGrid({ analyticId }: Props) {
+export default function AnalyticRecordsGrid({ analyticId, modelId }: Props) {
   const [fields, setFields] = useState<AnalyticField[]>([])
   const [records, setRecords] = useState<AnalyticRecord[]>([])
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const fileRef = useRef<HTMLInputElement>(null)
   const { addOp, getOverrides } = usePending()
-  // Sheets where this analytic is the main one — enables the "Формулы показателя" button per record.
+  // Sheets where this analytic is the main one.
   const [mainSheets, setMainSheets] = useState<{ id: string; name: string }[]>([])
-  const [rulesOpen, setRulesOpen] = useState<{ sheetId: string; recordId: string; name: string } | null>(null)
+  // Record currently showing its formulas in the right pane.
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
+  // Which of the main sheets the panel targets (when > 1).
+  const [activeSheetId, setActiveSheetId] = useState<string | null>(null)
+  // Resizable right-pane width.
+  const [panelWidth, setPanelWidth] = useState<number>(420)
 
   const load = useCallback(async () => {
     const [fs, rs] = await Promise.all([api.listFields(analyticId), api.listRecords(analyticId)])
@@ -73,7 +81,10 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
           const m = await api.getMainAnalytic(s.id)
           if (m.analytic_id === analyticId) out.push({ id: s.id, name: s.name })
         }
-        if (!cancelled) setMainSheets(out)
+        if (!cancelled) {
+          setMainSheets(out)
+          if (out.length > 0 && !activeSheetId) setActiveSheetId(out[0].id)
+        }
       } catch { /* ignore */ }
     })()
     return () => { cancelled = true }
@@ -194,8 +205,22 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
   const tree = buildTree()
   const flat = flattenTree(tree)
 
+  const selectedRecord = selectedRecordId ? records.find(r => r.id === selectedRecordId) : null
+  const selectedRecordName = selectedRecord
+    ? (() => {
+        try {
+          const d = typeof selectedRecord.data_json === 'string'
+            ? JSON.parse(selectedRecord.data_json)
+            : selectedRecord.data_json
+          return (d && (d[fields[0]?.code] || d.name)) || selectedRecord.id.slice(0, 6)
+        } catch { return selectedRecord.id.slice(0, 6) }
+      })()
+    : ''
+  const showPanel = !!selectedRecordId && mainSheets.length > 0 && !!activeSheetId && !!modelId
+
   return (
-    <Box>
+    <Box sx={{ display: 'flex', minWidth: 0, width: '100%' }}>
+      <Box sx={{ flex: 1, minWidth: 0 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
         <Typography variant="subtitle1">Записи</Typography>
         <Tooltip title="Добавить запись">
@@ -227,11 +252,15 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
               const hasChildren = node.children.length > 0
               const isCollapsed = collapsed.has(node.record.id)
 
+              const isSelected = selectedRecordId === node.record.id
               return (
                 <TableRow
                   key={node.record.id}
                   hover
+                  selected={isSelected}
+                  onClick={() => { if (mainSheets.length > 0) setSelectedRecordId(node.record.id) }}
                   sx={{
+                    cursor: mainSheets.length > 0 ? 'pointer' : 'default',
                     '& .row-actions': { opacity: 0 },
                     '&:hover .row-actions': { opacity: 1 },
                   }}
@@ -252,12 +281,12 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
                               </IconButton>
                             </Tooltip>
                             {mainSheets.length > 0 && (
-                              <Tooltip title={`Формулы показателя${mainSheets.length > 1 ? ` (откроется: ${mainSheets[0].name})` : ''}`}>
-                                <IconButton size="small" onClick={() => setRulesOpen({
-                                  sheetId: mainSheets[0].id,
-                                  recordId: node.record.id,
-                                  name: node.data[fields[0]?.code] || node.record.id.slice(0, 6),
-                                })}>
+                              <Tooltip title="Показать формулы показателя">
+                                <IconButton
+                                  size="small"
+                                  onClick={() => setSelectedRecordId(node.record.id)}
+                                  color={selectedRecordId === node.record.id ? 'primary' : 'default'}
+                                >
                                   <FunctionsOutlined sx={{ fontSize: 14 }} />
                                 </IconButton>
                               </Tooltip>
@@ -295,15 +324,47 @@ export default function AnalyticRecordsGrid({ analyticId }: Props) {
           Нет записей. Добавьте запись или импортируйте из Excel.
         </Typography>
       )}
+      </Box>
 
-      {rulesOpen && (
-        <IndicatorFormulasPanel
-          open
-          onClose={() => setRulesOpen(null)}
-          sheetId={rulesOpen.sheetId}
-          indicatorId={rulesOpen.recordId}
-          indicatorName={rulesOpen.name}
-        />
+      {showPanel && (
+        <>
+          <Splitter onResize={d => setPanelWidth(w => Math.max(260, Math.min(900, w - d)))} />
+          <Box sx={{ width: panelWidth, flexShrink: 0, borderLeft: 1, borderColor: 'divider', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: 1, borderColor: 'divider' }}>
+              {mainSheets.length > 1 ? (
+                <FormControl size="small" sx={{ minWidth: 160 }}>
+                  <InputLabel>Лист</InputLabel>
+                  <Select
+                    label="Лист" value={activeSheetId || ''}
+                    onChange={e => setActiveSheetId(String(e.target.value))}
+                  >
+                    {mainSheets.map(s => (
+                      <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              ) : (
+                <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1, minWidth: 0 }}>
+                  {mainSheets[0]?.name}
+                </Typography>
+              )}
+              <Box sx={{ flex: 1 }} />
+              <Tooltip title="Скрыть панель">
+                <IconButton size="small" onClick={() => setSelectedRecordId(null)}>
+                  <CloseOutlined fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Box>
+            <Box sx={{ flex: 1, overflow: 'auto' }}>
+              <IndicatorFormulasPanel
+                sheetId={activeSheetId!}
+                modelId={modelId!}
+                indicatorId={selectedRecordId!}
+                indicatorName={selectedRecordName}
+              />
+            </Box>
+          </Box>
+        </>
       )}
     </Box>
   )
