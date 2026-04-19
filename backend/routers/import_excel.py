@@ -90,13 +90,14 @@ RULES:
 9. CRITICAL: Every [indicator_name] in a formula must EXACTLY match the "name" field of SOME indicator in the JSON output. If the same indicator name appears in multiple groups, append a disambiguating suffix in parentheses to BOTH the name and all formula references. Example: "портфель" in KGS group → name "портфель (KGS)", in RUB group → "портфель (RUB)".
 10. For "Итого" / summary rows that SUM across groups: use the EXACT disambiguated names. E.g. formula: "[портфель (KGS)] + [портфель (RUB)] + [портфель (USD)]". NEVER write [портфель] + [портфель] + [портфель] — that's a self-reference!
 11. Rows like "ВСЕГО АКТИВЫ", "ИТОГО ОБЯЗАТЕЛЬСТВА" are NOT separate indicators — they are the group header itself. The group header row IS the aggregation row.
-12. GROUPING BY NAME PATTERN (DO NOT BE MISLED BY MISSING FORMULA): A row is a group header whenever its label matches a grouping pattern — even when the Excel cell on that row is empty or has no formula. The absence of a formula means "sum of children", NOT "manual input". Grouping patterns (case-insensitive) include:
-    - ends with "в т.ч.:" / "в т.ч." / "в том числе:" / "в том числе" / "включая:" / "включая" (e.g. "общее количество партнеров, в т.ч.:")
+12. GROUPING BY NAME PATTERN — MANDATORY, IGNORE MISSING FORMULA: A row is a group header whenever its label matches ANY grouping pattern below, even if the Excel cell is empty or contains no formula. NEVER mark such a row as "manual". Grouping patterns (case-insensitive):
+    - ends with "в т.ч.:" / "в т.ч." / "в том числе:" / "в том числе" / "включая:" / "включая"
+      EXAMPLE: "общее количество партнеров, в т.ч.:" → is_group=true, rule="sum_children", children=[all indented rows below it]
     - starts with "Итого" / "Всего" / "Всего по " / "Общее " / "Общий " / "Общая "
     - "Суммарн" / "Сумма " prefixes
-    - Children below such a row (greater indent / visually nested) must be attached as its children. For these group headers use rule "sum_children" (NOT "manual") and emit NO formula (it's computed as SUM of children automatically).
-    - Indentation (A1-column indent level) is a strong secondary signal: a row with indent=N whose siblings right below have indent>N is almost certainly a parent, even if not bold.
-13. Sheet 0 / «параметры» caveat: most rows there ARE manual input, BUT a row matching rule 12 above is still a grouping header with `sum_children`, not manual. Do not blanket-mark every row on sheet 0 as manual.
+    For ALL matching rows: is_group=true, rule="sum_children", NO formula. Rows below at greater indent are its children.
+13. INDENTATION RULE: A row with indent=N whose immediately following rows have indent>N is a parent group header. Attach those deeper-indent rows as children, even if the header row has no bold/formula. This is a HARD rule — do not put indented rows as siblings of their parent.
+14. Sheet 0 / «параметры» caveat: most rows there ARE manual input, BUT a row matching rule 12 above is still a grouping header with `sum_children`, not manual. Do not blanket-mark every row on sheet 0 as manual.
 
 Return ONLY valid JSON, no markdown:
 {"excel_name":"Tab","display_name":"Title","data_start_col":4,"indicators":[
@@ -1062,6 +1063,32 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 ratio = cs["cells"] / excel_cells * 100 if excel_cells > 0 else 0
                 if ratio < 80:
                     yield event(f"⚠ «{cs['name']}»: импортировано {cs['cells']}/{excel_cells} ячеек ({ratio:.0f}%)")
+
+        # ── Post-import: detect period-consolidation formulas for ratios/averages ──
+        # Ask Claude which indicators should NOT be summed across periods
+        # (e.g. interest rates, averages). Tolerant of API failures.
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            from backend.formula_suggester import suggest_consolidations_for_sheet
+            # Get the periods analytic name (used as context in the prompt).
+            period_analytic_name = "Периоды"
+            try:
+                pa = await db.execute_fetchall(
+                    "SELECT name FROM analytics WHERE id = ? LIMIT 1",
+                    (period_analytic_id,),
+                )
+                if pa:
+                    period_analytic_name = pa[0]["name"]
+            except Exception:
+                pass
+            total_rules = 0
+            for cs in created_sheets:
+                try:
+                    n = await suggest_consolidations_for_sheet(db, cs["id"], period_analytic_name)
+                    total_rules += n
+                except Exception as e:
+                    print(f"[import] suggest_consolidations failed for {cs['id']}: {e}")
+            if total_rules:
+                yield event(f"   ✓ Claude подобрал {total_rules} формул консолидации по периодам")
 
         yield event(f"✅ Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
                      {"done": True, "model_id": model_id, "model_name": model_name_final})

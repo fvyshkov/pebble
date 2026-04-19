@@ -1770,6 +1770,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
         }}
         onClose={() => setFormulaEditorOpen(false)}
         modelId={modelId}
+        currentSheetId={sheetId}
       />
 
       {/* Context menu */}

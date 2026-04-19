@@ -27,7 +27,8 @@ function buildTree(records: AnalyticRecord[]): RecordNode[] {
 
 interface SheetTree {
   sheet: Sheet
-  analytics: { analytic: Analytic; records: RecordNode[] }[]
+  mainAnalytic: Analytic | null
+  records: RecordNode[]
 }
 
 // ─── Expression templates ───
@@ -48,9 +49,10 @@ interface Props {
   onSave: (formula: string) => void
   onClose: () => void
   modelId: string
+  currentSheetId?: string
 }
 
-export default function FormulaEditor({ open, formula, onSave, onClose, modelId }: Props) {
+export default function FormulaEditor({ open, formula, onSave, onClose, modelId, currentSheetId }: Props) {
   const [text, setText] = useState(formula)
   const [sheets, setSheets] = useState<SheetTree[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -68,14 +70,19 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId 
       const result: SheetTree[] = []
       for (const s of sheetList) {
         const sa = await api.listSheetAnalytics(s.id)
-        const items: { analytic: Analytic; records: RecordNode[] }[] = []
-        for (const binding of sa) {
-          const a = analyticsList.find(x => x.id === binding.analytic_id)
-          if (!a) continue
-          const recs = await api.listRecords(a.id)
-          items.push({ analytic: a, records: buildTree(recs) })
+        // Only the main analytic (the indicator axis). Fall back to first non-periods.
+        const mainBinding = sa.find(b => (b as any).is_main === 1 || (b as any).is_main === true)
+          ?? sa.find(b => {
+            const a = analyticsList.find(x => x.id === b.analytic_id)
+            return a && !a.is_periods
+          })
+        const main = mainBinding ? analyticsList.find(x => x.id === mainBinding.analytic_id) ?? null : null
+        let records: RecordNode[] = []
+        if (main) {
+          const recs = await api.listRecords(main.id)
+          records = buildTree(recs)
         }
-        result.push({ sheet: s, analytics: items })
+        result.push({ sheet: s, mainAnalytic: main, records })
       }
       setSheets(result)
     })()
@@ -87,8 +94,10 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId 
     })
   }
 
-  const insertRef = (sheetName: string, analyticName: string, recordName: string) => {
-    const ref = `[${sheetName}].[${analyticName}].[${recordName}]`
+  const insertRef = (sheetId: string, sheetName: string, recordName: string) => {
+    const ref = sheetId === currentSheetId
+      ? `[${recordName}]`
+      : `[${sheetName}].[${recordName}]`
     const el = textRef.current
     if (el) {
       const start = el.selectionStart
@@ -119,7 +128,7 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId 
     }
   }
 
-  const renderRecordTree = (nodes: RecordNode[], sheetName: string, analyticName: string, level: number): React.ReactNode => {
+  const renderRecordTree = (nodes: RecordNode[], sheetId: string, sheetName: string, level: number): React.ReactNode => {
     return nodes.map(n => {
       const key = `rec:${n.record.id}`
       const name = n.data.name || n.record.id.slice(0, 8)
@@ -140,12 +149,12 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId 
             ) : <Box sx={{ width: 18 }} />}
             <Typography
               variant="body2" sx={{ fontSize: 12 }}
-              onClick={() => insertRef(sheetName, analyticName, name)}
+              onClick={() => insertRef(sheetId, sheetName, name)}
             >
               {name}
             </Typography>
           </Box>
-          {hasChildren && isExp && renderRecordTree(n.children, sheetName, analyticName, level + 1)}
+          {hasChildren && isExp && renderRecordTree(n.children, sheetId, sheetName, level + 1)}
         </Box>
       )
     })
@@ -171,20 +180,7 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId 
                   <DescriptionOutlined sx={{ fontSize: 14, mx: 0.5, opacity: 0.5 }} />
                   <Typography variant="body2" sx={{ fontSize: 12 }}>{st.sheet.name}</Typography>
                 </Box>
-                {sExp && st.analytics.map(({ analytic, records }) => {
-                  const aKey = `analytic:${analytic.id}`
-                  const aExp = expanded.has(aKey)
-                  return (
-                    <Box key={analytic.id}>
-                      <Box onClick={() => toggle(aKey)}
-                        sx={{ display: 'flex', alignItems: 'center', pl: 3, py: 0.25, cursor: 'pointer', '&:hover': { bgcolor: '#f5f5f5' } }}>
-                        {aExp ? <ExpandMoreOutlined sx={{ fontSize: 14 }} /> : <ChevronRightOutlined sx={{ fontSize: 14 }} />}
-                        <Typography variant="body2" sx={{ fontSize: 12, ml: 0.5 }}>{analytic.name}</Typography>
-                      </Box>
-                      {aExp && renderRecordTree(records, st.sheet.name, analytic.name, 0)}
-                    </Box>
-                  )
-                })}
+                {sExp && renderRecordTree(st.records, st.sheet.id, st.sheet.name, 0)}
               </Box>
             )
           })}
@@ -204,7 +200,7 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId 
               border: '1px solid #e0e0e0', borderRadius: 4, outline: 'none',
               resize: 'none', lineHeight: 1.6,
             }}
-            placeholder={'Пример:\nесли [Бюджет].[Показатели].[Выручка] > 0 то\n  [Бюджет].[Показатели].[Выручка] * 0.2\nиначе\n  0\nконец_если'}
+            placeholder={'Пример:\nесли [Выручка] > 0 то\n  [Выручка] * 0.2\nиначе\n  0\nконец_если'}
           />
         </Box>
 

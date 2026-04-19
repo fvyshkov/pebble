@@ -1100,7 +1100,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         const formatted = p.valueFormatted != null && p.valueFormatted !== ''
           ? p.valueFormatted
           : (p.value == null ? '' : String(p.value))
-        if (!isLeaf || !coordKey) {
+        if (!isLeaf || !coordKey || mode !== 'formulas') {
           return <span>{formatted}</span>
         }
         return (
@@ -1601,9 +1601,9 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   // ── Render ─────────────────────────────────────────────────────────────
   if (loading) {
     return (
-      <Box sx={{ p: 3, display: 'flex', gap: 1, alignItems: 'center' }}>
-        <CircularProgress size={18} />
-        <Typography variant="body2">Загрузка AG Grid…</Typography>
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, minHeight: 200 }}>
+        <CircularProgress size={48} thickness={3} sx={{ color: 'primary.main' }} />
+        <Typography variant="body2" color="text.secondary">Загрузка…</Typography>
       </Box>
     )
   }
@@ -1733,6 +1733,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         open={formulaEditorOpen}
         formula={formulaMapRef.current[formulaEditorKey] || ''}
         modelId={modelId}
+        currentSheetId={sheetId}
         onClose={() => setFormulaEditorOpen(false)}
         onSave={async text => {
           try {

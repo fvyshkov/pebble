@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react'
 import {
   TextField, Typography, Box, Switch, FormControlLabel,
   Chip, Button, IconButton, Select, MenuItem, InputLabel, FormControl,
-  CircularProgress,
+  CircularProgress, Accordion, AccordionSummary, AccordionDetails,
 } from '@mui/material'
+import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
 import * as Icons from '@mui/icons-material'
 import * as api from '../../api'
 import type { Analytic } from '../../types'
@@ -110,9 +111,11 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
   const SelectedIcon = data.icon ? (Icons as any)[data.icon] : null
 
   return (
-    <Box sx={{ maxWidth: 500, mb: 3 }}>
-      <Typography variant="h6" sx={{ mb: 2 }}>Аналитика</Typography>
-
+    <Accordion defaultExpanded={true} disableGutters sx={{ maxWidth: 500, mb: 1, '&:before': { display: 'none' }, boxShadow: 'none', border: '1px solid #e0e0e0', borderRadius: '4px !important' }}>
+      <AccordionSummary expandIcon={<ExpandMoreOutlined />}>
+        <Typography variant="subtitle1" sx={{ fontWeight: 500 }}>{data.name}</Typography>
+      </AccordionSummary>
+      <AccordionDetails sx={{ pt: 0, px: 2, pb: 2 }}>
       <Box sx={{ display: 'flex', gap: 1, mb: 2, alignItems: 'center' }}>
         <IconButton
           onClick={() => setIconOpen(true)}
@@ -272,6 +275,7 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
         onClose={() => setIconOpen(false)}
         onSelect={icon => change({ icon } as any)}
       />
-    </Box>
+      </AccordionDetails>
+    </Accordion>
   )
 }

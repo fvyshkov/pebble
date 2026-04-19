@@ -10,11 +10,11 @@ import AddOutlined from '@mui/icons-material/AddOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
 import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
 import DragIndicatorOutlined from '@mui/icons-material/DragIndicatorOutlined'
-import SaveOutlined from '@mui/icons-material/SaveOutlined'
 import EditOutlined from '@mui/icons-material/EditOutlined'
 import FormulaEditor from './FormulaEditor'
 import * as api from '../../api'
 import type { Analytic, AnalyticRecord, SheetAnalytic } from '../../types'
+import { usePending } from '../../store/PendingContext'
 
 interface Props {
   sheetId: string
@@ -27,6 +27,8 @@ type Mode = 'manual' | 'formula'
 
 interface ScopedRule {
   id?: string
+  // Each key = analytic_id. Value is one record id (single) or
+  // comma-separated ids (multi-select for periods).
   scope: Record<string, string>
   priority: number
   formula: string
@@ -36,6 +38,7 @@ interface ScopedRule {
 interface AnalyticInfo {
   id: string
   name: string
+  isPeriods: boolean
   records: AnalyticRecord[]
   byId: Record<string, AnalyticRecord>
   childrenOf: Record<string, string[]>
@@ -58,34 +61,63 @@ function buildAnalyticInfo(a: Analytic, recs: AnalyticRecord[]): AnalyticInfo {
     const parent = r.parent_id || '__root__'
     ;(childrenOf[parent] ||= []).push(r.id)
   }
-  return { id: a.id, name: a.name, records: recs, byId, childrenOf }
+  return { id: a.id, name: a.name, isPeriods: !!a.is_periods, records: recs, byId, childrenOf }
 }
 
-/** Tree-style record picker (Popover + SimpleTreeView). */
+/** Tree-style record picker (Popover + SimpleTreeView).
+ *  multi=true: comma-separated multi-select (for periods analytic).
+ */
 function RecordTreePicker({
-  analytic, value, onChange,
+  analytic, value, onChange, multi,
 }: {
   analytic: AnalyticInfo
-  value: string
+  value: string          // comma-separated when multi
   onChange: (rid: string) => void
+  multi?: boolean
 }) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null)
-  const label = value ? recName(analytic.byId[value]) : 'любое'
+  const selected = useMemo(
+    () => new Set(value ? value.split(',').filter(Boolean) : []),
+    [value],
+  )
+  const label = selected.size === 0
+    ? 'любое'
+    : [...selected].map(id => recName(analytic.byId[id]) || id.slice(0, 6)).join(', ')
+
+  const toggle = (id: string) => {
+    if (!multi) { onChange(id); setAnchor(null); return }
+    const next = new Set(selected)
+    next.has(id) ? next.delete(id) : next.add(id)
+    onChange([...next].join(','))
+  }
 
   const renderNode = (id: string): React.ReactNode => {
     const rec = analytic.byId[id]
     if (!rec) return null
     const kids = analytic.childrenOf[id] || []
+    const checked = selected.has(id)
     return (
       <TreeItem
         key={id}
         itemId={id}
-        label={recName(rec)}
-        onClick={e => {
-          e.stopPropagation()
-          onChange(id)
-          setAnchor(null)
-        }}
+        label={
+          <Box
+            component="span"
+            sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer' }}
+            onClick={e => { e.stopPropagation(); toggle(id) }}
+          >
+            {multi && (
+              <Box component="span" sx={{
+                width: 14, height: 14, border: '1px solid', borderColor: checked ? 'primary.main' : 'text.disabled',
+                borderRadius: 0.5, bgcolor: checked ? 'primary.main' : 'transparent',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              }}>
+                {checked && <Box component="span" sx={{ color: 'white', fontSize: 10, lineHeight: 1 }}>✓</Box>}
+              </Box>
+            )}
+            <span>{recName(rec)}</span>
+          </Box>
+        }
       >
         {kids.map(renderNode)}
       </TreeItem>
@@ -98,13 +130,13 @@ function RecordTreePicker({
       <Button
         size="small" variant="outlined"
         onClick={e => setAnchor(e.currentTarget)}
-        sx={{ textTransform: 'none', justifyContent: 'flex-start', minWidth: 140 }}
+        sx={{ textTransform: 'none', justifyContent: 'flex-start', minWidth: 140, maxWidth: 280 }}
         data-testid="scope-picker-btn"
       >
-        <Typography variant="caption" sx={{ fontWeight: 500, mr: 1, color: 'text.secondary' }}>
+        <Typography variant="caption" sx={{ fontWeight: 500, mr: 1, color: 'text.secondary', flexShrink: 0 }}>
           {analytic.name}:
         </Typography>
-        <Typography variant="body2" noWrap>{label}</Typography>
+        <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>{label}</Typography>
       </Button>
       <Popover
         open={!!anchor}
@@ -116,7 +148,7 @@ function RecordTreePicker({
           <Button
             size="small" fullWidth
             sx={{ justifyContent: 'flex-start', textTransform: 'none', mb: 0.5 }}
-            onClick={() => { onChange(''); setAnchor(null) }}
+            onClick={() => { onChange(''); if (!multi) setAnchor(null) }}
           >
             <em>любое</em>
           </Button>
@@ -135,14 +167,13 @@ function RecordTreePicker({
 export default function IndicatorFormulasPanel({
   sheetId, modelId, indicatorId, indicatorName,
 }: Props) {
+  const { addOp, getOverrides } = usePending()
   const [leafFormula, setLeafFormula] = useState('')
   const [leafMode, setLeafMode] = useState<Mode>('manual')
   const [consolFormula, setConsolFormula] = useState('')
   const [consolMode, setConsolMode] = useState<Mode>('manual')
   const [scoped, setScoped] = useState<ScopedRule[]>([])
   const [loading, setLoading] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [dirty, setDirty] = useState(false)
   const [analytics, setAnalytics] = useState<AnalyticInfo[]>([])
   const [mainAid, setMainAid] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ consol: true, leaf: true })
@@ -162,18 +193,48 @@ export default function IndicatorFormulasPanel({
     : ''
 
   const dragIdxRef = useRef<number | null>(null)
+  // True once user has made any edit — prevents queuing the initial load as a pending op.
+  const editedRef = useRef(false)
+
+  // Auto-queue a pending op whenever edited state changes.
+  useEffect(() => {
+    if (!editedRef.current) return
+    addOp({
+      key: `indicatorRules:${sheetId}:${indicatorId}`,
+      type: 'putIndicatorRules',
+      id: sheetId,
+      parentId: indicatorId,
+      data: {
+        consolidation: consolMode === 'formula' ? consolFormula : '',
+        leaf: leafMode === 'formula' ? leafFormula : '',
+        scoped: scoped.map(r => ({
+          id: r.id,
+          scope: r.scope,
+          priority: r.priority,
+          formula: r.mode === 'formula' ? r.formula : '',
+        })),
+      },
+    })
+  }, [consolFormula, consolMode, leafFormula, leafMode, scoped])
 
   useEffect(() => {
     if (!sheetId || !indicatorId) return
+    editedRef.current = false
     setLoading(true)
-    setDirty(false)
     ;(async () => {
       try {
-        const [rules, main, bindings] = await Promise.all([
+        const [apiRules, main, bindings] = await Promise.all([
           api.getIndicatorRules(sheetId, indicatorId),
           api.getMainAnalytic(sheetId),
           api.listSheetAnalytics(sheetId),
         ])
+        // Overlay any unsaved pending changes from localStorage.
+        const pending = getOverrides(`indicatorRules:${sheetId}:${indicatorId}`)
+        const rules = pending
+          ? { consolidation: pending.consolidation ?? apiRules.consolidation,
+              leaf: pending.leaf ?? apiRules.leaf,
+              scoped: pending.scoped ?? apiRules.scoped }
+          : apiRules
         setConsolFormula(rules.consolidation || '')
         setConsolMode(rules.consolidation ? 'formula' : 'manual')
         setLeafFormula(rules.leaf || '')
@@ -181,8 +242,8 @@ export default function IndicatorFormulasPanel({
         // Top = highest priority
         const s = (rules.scoped || [])
           .slice()
-          .sort((a, b) => b.priority - a.priority)
-          .map(r => ({ ...r, mode: (r.formula ? 'formula' : 'manual') as Mode }))
+          .sort((a: any, b: any) => b.priority - a.priority)
+          .map((r: any) => ({ ...r, mode: (r.formula ? 'formula' : 'manual') as Mode }))
         setScoped(s)
         setMainAid(main.analytic_id)
         const nonMain = bindings.filter((b: SheetAnalytic) => b.analytic_id !== main.analytic_id)
@@ -214,7 +275,7 @@ export default function IndicatorFormulasPanel({
     return r ? recName(r) : rid.slice(0, 4)
   }
 
-  const markDirty = () => setDirty(true)
+  const markDirty = () => { editedRef.current = true }
   const toggleExpanded = (key: string) => {
     setExpanded(prev => ({ ...prev, [key]: !prev[key] }))
   }
@@ -266,26 +327,6 @@ export default function IndicatorFormulasPanel({
     markDirty()
   }
 
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      await api.putIndicatorRules(sheetId, indicatorId, {
-        // Manual mode = persist empty formula.
-        consolidation: consolMode === 'formula' ? consolFormula : '',
-        leaf: leafMode === 'formula' ? leafFormula : '',
-        scoped: scoped.map(r => ({
-          id: r.id,
-          scope: r.scope,
-          priority: r.priority,
-          formula: r.mode === 'formula' ? r.formula : '',
-        })),
-      })
-      setDirty(false)
-    } finally {
-      setSaving(false)
-    }
-  }
-
   if (loading) {
     return (
       <Box sx={{ p: 2 }}>
@@ -327,7 +368,6 @@ export default function IndicatorFormulasPanel({
               multiline minRows={1} maxRows={4} fullWidth size="small"
               value={formula}
               onChange={e => onFormulaChange(e.target.value)}
-              onClick={onEdit}
               placeholder={placeholder}
               InputProps={{ sx: { fontFamily: 'monospace', fontSize: 13 } }}
             />
@@ -343,11 +383,7 @@ export default function IndicatorFormulasPanel({
             <Typography variant="caption" color="text.secondary">{hint}</Typography>
           )}
         </>
-      ) : (
-        <Typography variant="caption" color="text.secondary">
-          {manualHint || 'Значение вводится пользователем в клетке.'}
-        </Typography>
-      )}
+      ) : null}
     </Box>
   )
 
@@ -362,11 +398,6 @@ export default function IndicatorFormulasPanel({
             <AddOutlined fontSize="small" />
           </IconButton>
         </Tooltip>
-        <Button
-          size="small" variant="contained" startIcon={<SaveOutlined />}
-          disabled={!dirty || saving}
-          onClick={handleSave}
-        >Сохранить</Button>
       </Stack>
 
       {mainAid == null && (
@@ -382,14 +413,8 @@ export default function IndicatorFormulasPanel({
         disableGutters
         data-testid="formula-slot-consol"
       >
-        <AccordionSummary expandIcon={<ExpandMoreOutlined fontSize="small" />} sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5 } }}>
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ flex: 1, minWidth: 0 }}>
-            <Chip size="small" color="primary" variant="outlined" label="консолидация" />
-            <Chip size="small" label={consolMode === 'formula' ? 'формула' : 'ручной ввод'} />
-            <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1, minWidth: 0, fontFamily: 'monospace' }}>
-              {consolMode === 'formula' ? (consolFormula || '—') : 'сумма нижестоящих (по умолчанию)'}
-            </Typography>
-          </Stack>
+        <AccordionSummary expandIcon={<ExpandMoreOutlined fontSize="small" />} sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5, minWidth: 0 } }}>
+          <Chip size="small" color="primary" variant="outlined" label="консолидация" />
         </AccordionSummary>
         <AccordionDetails sx={{ pt: 0 }}>
           <SlotBody
@@ -399,8 +424,6 @@ export default function IndicatorFormulasPanel({
             onFormulaChange={v => { setConsolFormula(v); markDirty() }}
             onEdit={() => setEditorSlot({ kind: 'consol' })}
             placeholder="например: [выдачи] / [партнёры]"
-            hint="Применяется на HEAD-клетках (когда хотя бы одна не-главная ось — не лист)."
-            manualHint="По умолчанию — сумма нижестоящих. Переключите в «Формула» для агрегата через выражение."
           />
         </AccordionDetails>
       </Accordion>
@@ -422,24 +445,15 @@ export default function IndicatorFormulasPanel({
           >
             <AccordionSummary
               expandIcon={<ExpandMoreOutlined fontSize="small" />}
-              sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5 } }}
+              sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5, minWidth: 0 } }}
             >
-              <Stack direction="row" spacing={1} alignItems="center" sx={{ flex: 1, minWidth: 0 }}>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 0.5, flex: 1, minWidth: 0 }}>
                 <DragIndicatorOutlined fontSize="small" sx={{ color: 'text.disabled', cursor: 'grab' }} />
-                <Chip size="small" label={`prio ${r.priority}`} />
-                <Chip size="small" color={r.mode === 'formula' ? 'primary' : 'default'}
-                  label={r.mode === 'formula' ? 'формула' : 'ручной ввод'} />
-                {Object.entries(r.scope).slice(0, 2).map(([aid, rid]) => (
+                {Object.entries(r.scope).filter(([, rid]) => rid).map(([aid, rid]) => (
                   <Chip key={aid} size="small" variant="outlined"
                     label={`${anameById[aid] || aid.slice(0, 4)}: ${recLabel(aid, rid)}`} />
                 ))}
-                {Object.keys(r.scope).length > 2 && (
-                  <Chip size="small" variant="outlined" label={`+${Object.keys(r.scope).length - 2}`} />
-                )}
-                <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1, minWidth: 0, fontFamily: 'monospace' }}>
-                  {r.mode === 'formula' ? (r.formula || '—') : '(ручной ввод)'}
-                </Typography>
-              </Stack>
+              </Box>
             </AccordionSummary>
             <AccordionDetails sx={{ pt: 0 }}>
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1, flexWrap: 'wrap' }}>
@@ -450,14 +464,9 @@ export default function IndicatorFormulasPanel({
                     analytic={a}
                     value={r.scope[a.id] || ''}
                     onChange={rid => handleScopeChange(idx, a.id, rid)}
+                    multi={a.isPeriods}
                   />
                 ))}
-                <TextField
-                  size="small" type="number" label="Приоритет"
-                  value={r.priority}
-                  onChange={e => patchScoped(idx, { priority: Number(e.target.value || 0) })}
-                  sx={{ width: 100 }}
-                />
                 <Box sx={{ flex: 1 }} />
                 <Tooltip title="Удалить правило">
                   <IconButton size="small" onClick={() => handleDeleteScoped(idx)}>
@@ -485,14 +494,8 @@ export default function IndicatorFormulasPanel({
         disableGutters
         data-testid="formula-slot-leaf"
       >
-        <AccordionSummary expandIcon={<ExpandMoreOutlined fontSize="small" />} sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5 } }}>
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ flex: 1, minWidth: 0 }}>
-            <Chip size="small" variant="outlined" label="обычная клетка" />
-            <Chip size="small" label={leafMode === 'formula' ? 'формула' : 'ручной ввод'} />
-            <Typography variant="caption" color="text.secondary" noWrap sx={{ flex: 1, minWidth: 0, fontFamily: 'monospace' }}>
-              {leafMode === 'formula' ? (leafFormula || '—') : 'значение вводит пользователь'}
-            </Typography>
-          </Stack>
+        <AccordionSummary expandIcon={<ExpandMoreOutlined fontSize="small" />} sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5, minWidth: 0 } }}>
+          <Chip size="small" variant="outlined" label="обычная клетка" />
         </AccordionSummary>
         <AccordionDetails sx={{ pt: 0 }}>
           <SlotBody
@@ -503,7 +506,6 @@ export default function IndicatorFormulasPanel({
             onEdit={() => setEditorSlot({ kind: 'leaf' })}
             placeholder="например: [выдачи] * 0.1"
             hint="База для листовой клетки (все не-главные оси — листья)."
-            manualHint="По умолчанию — ручной ввод значения. Переключите в «Формула» для вычисляемого показателя."
           />
         </AccordionDetails>
       </Accordion>
@@ -513,6 +515,7 @@ export default function IndicatorFormulasPanel({
         open={!!editorSlot}
         formula={editorFormula}
         modelId={modelId}
+        currentSheetId={sheetId}
         onClose={() => setEditorSlot(null)}
         onSave={text => {
           if (!editorSlot) return

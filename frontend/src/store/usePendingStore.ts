@@ -4,7 +4,7 @@ const STORAGE_KEY = 'pebble_pending'
 
 export interface PendingOp {
   key: string // unique key: "model:id", "analytic:id", "field:id", etc.
-  type: 'updateModel' | 'updateAnalytic' | 'updateField' | 'updateSheet' | 'updateRecord'
+  type: 'updateModel' | 'updateAnalytic' | 'updateField' | 'updateSheet' | 'updateRecord' | 'putIndicatorRules'
   id: string
   parentId?: string // e.g. analyticId for fields/records
   data: Record<string, any>

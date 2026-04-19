@@ -350,7 +350,8 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             scope = rule.get("scope") or {}
             if not scope:
                 continue
-            if all(non_main.get(a) == r for a, r in scope.items()):
+            # scope value may be comma-separated (multi-select periods)
+            if all(non_main.get(a) in (r or "").split(",") for a, r in scope.items() if r):
                 scoped_hits.append(rule)
         if scoped_hits:
             best = sorted(
@@ -656,7 +657,7 @@ async def resolve_formula_for_display(db, sheet_id: str, coord_key: str) -> dict
     scoped_hits = [
         r for r in rules
         if r["kind"] == "scoped" and r["scope"]
-        and all(non_main.get(a) == v for a, v in r["scope"].items())
+        and all(non_main.get(a) in (v or "").split(",") for a, v in r["scope"].items() if v)
     ]
     if scoped_hits:
         best = sorted(

@@ -15,6 +15,8 @@ import { usePending } from '../../store/PendingContext'
 import * as api from '../../api'
 import type { AnalyticField, AnalyticRecord } from '../../types'
 import IndicatorFormulasPanel from '../sheet/IndicatorFormulasPanel'
+import AnalyticSettings from './AnalyticSettings'
+import AnalyticFields from './AnalyticFields'
 import Splitter from '../../components/Splitter'
 
 function RecordCellInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
@@ -35,6 +37,7 @@ function RecordCellInput({ value, onChange }: { value: string; onChange: (v: str
 interface Props {
   analyticId: string
   modelId?: string
+  onRefresh?: () => void
 }
 
 interface TreeNode {
@@ -44,7 +47,7 @@ interface TreeNode {
   level: number
 }
 
-export default function AnalyticRecordsGrid({ analyticId, modelId }: Props) {
+export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: Props) {
   const [fields, setFields] = useState<AnalyticField[]>([])
   const [records, setRecords] = useState<AnalyticRecord[]>([])
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
@@ -216,11 +219,11 @@ export default function AnalyticRecordsGrid({ analyticId, modelId }: Props) {
         } catch { return selectedRecord.id.slice(0, 6) }
       })()
     : ''
-  const showPanel = !!selectedRecordId && mainSheets.length > 0 && !!activeSheetId && !!modelId
+  const showFormulaPanel = !!selectedRecordId && mainSheets.length > 0 && !!activeSheetId && !!modelId
 
   return (
-    <Box sx={{ display: 'flex', minWidth: 0, width: '100%' }}>
-      <Box sx={{ flex: 1, minWidth: 0 }}>
+    <Box sx={{ display: 'flex', minWidth: 0, width: '100%', height: '100%' }}>
+      <Box sx={{ flex: 1, minWidth: 0, overflow: 'auto', p: 1 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
         <Typography variant="subtitle1">Записи</Typography>
         <Tooltip title="Добавить запись">
@@ -326,10 +329,10 @@ export default function AnalyticRecordsGrid({ analyticId, modelId }: Props) {
       )}
       </Box>
 
-      {showPanel && (
-        <>
-          <Splitter onResize={d => setPanelWidth(w => Math.max(260, Math.min(900, w - d)))} />
-          <Box sx={{ width: panelWidth, flexShrink: 0, borderLeft: 1, borderColor: 'divider', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+      <Splitter onResize={d => setPanelWidth(w => Math.max(260, Math.min(900, w - d)))} />
+      <Box sx={{ width: panelWidth, flexShrink: 0, borderLeft: 1, borderColor: 'divider', display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'auto' }}>
+        {showFormulaPanel ? (
+          <>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: 1, borderColor: 'divider' }}>
               {mainSheets.length > 1 ? (
                 <FormControl size="small" sx={{ minWidth: 160 }}>
@@ -349,7 +352,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId }: Props) {
                 </Typography>
               )}
               <Box sx={{ flex: 1 }} />
-              <Tooltip title="Скрыть панель">
+              <Tooltip title="Назад к настройкам">
                 <IconButton size="small" onClick={() => setSelectedRecordId(null)}>
                   <CloseOutlined fontSize="small" />
                 </IconButton>
@@ -363,9 +366,20 @@ export default function AnalyticRecordsGrid({ analyticId, modelId }: Props) {
                 indicatorName={selectedRecordName}
               />
             </Box>
+          </>
+        ) : (
+          <Box sx={{ overflow: 'auto', p: 1 }}>
+            {modelId && (
+              <AnalyticSettings
+                analyticId={analyticId}
+                modelId={modelId}
+                onRefresh={onRefresh ?? (() => {})}
+              />
+            )}
+            <AnalyticFields analyticId={analyticId} />
           </Box>
-        </>
-      )}
+        )}
+      </Box>
     </Box>
   )
 }

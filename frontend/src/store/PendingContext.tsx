@@ -35,6 +35,9 @@ export function PendingProvider({ children, onFlushed }: { children: React.React
           case 'updateSheet':
             await api.updateSheet(op.id, op.data as any)
             break
+          case 'putIndicatorRules':
+            await api.putIndicatorRules(op.id, op.parentId!, op.data as any)
+            break
         }
       } catch (e) {
         console.error('Failed to save op', op, e)

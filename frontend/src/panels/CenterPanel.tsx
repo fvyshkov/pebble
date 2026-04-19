@@ -2,8 +2,6 @@ import { useState, useCallback } from 'react'
 import type { TreeSelection } from '../types'
 import EmptyState from '../components/EmptyState'
 import ModelSettings from '../features/model/ModelSettings'
-import AnalyticSettings from '../features/analytic/AnalyticSettings'
-import AnalyticFields from '../features/analytic/AnalyticFields'
 import AnalyticRecordsGrid from '../features/analytic/AnalyticRecordsGrid'
 import SheetSettings from '../features/sheet/SheetSettings'
 
@@ -22,16 +20,17 @@ export default function CenterPanel({ selection, onRefresh }: Props) {
   if (!selection) return <div className="panel-center"><EmptyState /></div>
 
   return (
-    <div className="panel-center">
+    <div className="panel-center" style={selection.type === 'analytic' ? { display: 'flex', flexDirection: 'column', overflow: 'hidden' } : undefined}>
       {selection.type === 'model' && (
         <ModelSettings modelId={selection.id} onRefresh={onRefresh} />
       )}
       {selection.type === 'analytic' && (
-        <>
-          <AnalyticSettings analyticId={selection.id} modelId={selection.modelId} onRefresh={onInnerRefresh} />
-          <AnalyticFields analyticId={selection.id} key={`fields-${innerKey}`} />
-          <AnalyticRecordsGrid analyticId={selection.id} modelId={selection.modelId} key={`records-${innerKey}`} />
-        </>
+        <AnalyticRecordsGrid
+          analyticId={selection.id}
+          modelId={selection.modelId}
+          onRefresh={onInnerRefresh}
+          key={`records-${innerKey}`}
+        />
       )}
       {selection.type === 'sheet' && (
         <SheetSettings sheetId={selection.id} modelId={selection.modelId} />
