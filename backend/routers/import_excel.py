@@ -90,6 +90,13 @@ RULES:
 9. CRITICAL: Every [indicator_name] in a formula must EXACTLY match the "name" field of SOME indicator in the JSON output. If the same indicator name appears in multiple groups, append a disambiguating suffix in parentheses to BOTH the name and all formula references. Example: "портфель" in KGS group → name "портфель (KGS)", in RUB group → "портфель (RUB)".
 10. For "Итого" / summary rows that SUM across groups: use the EXACT disambiguated names. E.g. formula: "[портфель (KGS)] + [портфель (RUB)] + [портфель (USD)]". NEVER write [портфель] + [портфель] + [портфель] — that's a self-reference!
 11. Rows like "ВСЕГО АКТИВЫ", "ИТОГО ОБЯЗАТЕЛЬСТВА" are NOT separate indicators — they are the group header itself. The group header row IS the aggregation row.
+12. GROUPING BY NAME PATTERN (DO NOT BE MISLED BY MISSING FORMULA): A row is a group header whenever its label matches a grouping pattern — even when the Excel cell on that row is empty or has no formula. The absence of a formula means "sum of children", NOT "manual input". Grouping patterns (case-insensitive) include:
+    - ends with "в т.ч.:" / "в т.ч." / "в том числе:" / "в том числе" / "включая:" / "включая" (e.g. "общее количество партнеров, в т.ч.:")
+    - starts with "Итого" / "Всего" / "Всего по " / "Общее " / "Общий " / "Общая "
+    - "Суммарн" / "Сумма " prefixes
+    - Children below such a row (greater indent / visually nested) must be attached as its children. For these group headers use rule "sum_children" (NOT "manual") and emit NO formula (it's computed as SUM of children automatically).
+    - Indentation (A1-column indent level) is a strong secondary signal: a row with indent=N whose siblings right below have indent>N is almost certainly a parent, even if not bold.
+13. Sheet 0 / «параметры» caveat: most rows there ARE manual input, BUT a row matching rule 12 above is still a grouping header with `sum_children`, not manual. Do not blanket-mark every row on sheet 0 as manual.
 
 Return ONLY valid JSON, no markdown:
 {"excel_name":"Tab","display_name":"Title","data_start_col":4,"indicators":[

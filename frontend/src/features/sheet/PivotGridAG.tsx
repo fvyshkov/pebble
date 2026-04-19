@@ -8,7 +8,7 @@
  * and `treeData={true}`.
  */
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
-import { Box, Chip, CircularProgress, LinearProgress, Tooltip, Typography } from '@mui/material'
+import { Box, Chip, CircularProgress, LinearProgress, Snackbar, Tooltip, Typography, Button as MUIButton } from '@mui/material'
 import { AgGridReact } from 'ag-grid-react'
 import {
   ModuleRegistry,
@@ -35,6 +35,8 @@ import {
 } from 'ag-grid-enterprise'
 import * as api from '../../api'
 import type { SheetAnalytic, Analytic, AnalyticRecord, CellData } from '../../types'
+import FormulaEditor from './FormulaEditor'
+import MoreVertOutlined from '@mui/icons-material/MoreVertOutlined'
 
 ModuleRegistry.registerModules([AllCommunityModule, AllEnterpriseModule])
 const licenseKey = (import.meta as any).env?.VITE_AG_GRID_LICENSE
@@ -246,7 +248,7 @@ function CalcProgressChip({ calcProgress, localRunning }: {
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode = 'data' }: Props) {
+export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgress, mode = 'data' }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [rowData, setRowData] = useState<RowDatum[]>([])
@@ -277,6 +279,20 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode
   // here so the debounced save effect can depend on `columnStateVersion`.
   const savedColumnStateRef = useRef<any[] | null>(null)
   const [columnStateVersion, setColumnStateVersion] = useState(0)
+
+  // Formula editor dialog state (opened from hover ⋮ button on a cell).
+  const [formulaEditorOpen, setFormulaEditorOpen] = useState(false)
+  const [formulaEditorKey, setFormulaEditorKey] = useState('')
+  // Snackbar offered after saving a per-cell formula — one-click "save as
+  // rule on the indicator" (promote-cell API). Hidden if we can't derive the
+  // main analytic / indicator id from coord.
+  const [promoteSnack, setPromoteSnack] = useState<
+    { coordKey: string; formula: string; indicatorId: string } | null
+  >(null)
+  // Cached per-load: main analytic id + its index in dbOrd (so we can extract
+  // indicator_id from a coord_key by splitting on '|' and picking that slot).
+  const mainAnalyticIdRef = useRef<string | null>(null)
+  const mainAnalyticIdxRef = useRef<number>(-1)
 
   // Cmd/Ctrl+R — Excel fill-right over the selected range. Handled at the
   // window level (capture phase) so we beat the browser's reload shortcut
@@ -382,6 +398,10 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode
   const cellRuleRef = useRef<Record<string, CellRule>>({})
   /** coord_key → formula text (only populated for `formula`-rule cells). */
   const formulaMapRef = useRef<Record<string, string>>({})
+  /** coord_key → {formula, source, kind} from POST /cells/resolved-formulas.
+   *  Populated only in mode='formulas' to show indicator-rule formulas on
+   *  cells that don't have a per-cell formula. */
+  const resolvedFormulaMapRef = useRef<Record<string, { formula: string; source: string; kind: string }>>({})
   const colLeafIdsRef = useRef<string[]>([])
   const dbOrdRef = useRef<string[]>([])
   const colAIdRef = useRef<string>('')
@@ -428,6 +448,13 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode
 
       const dbOrd = sa.map(b => b.analytic_id)
       dbOrdRef.current = dbOrd
+
+      // Remember main analytic binding — used to extract indicator_id from
+      // a coord_key when offering "promote to rule" snackbar after a per-cell
+      // formula save.
+      const mainBinding = sa.find(b => (b as any).is_main === 1 || (b as any).is_main === true)
+      mainAnalyticIdRef.current = mainBinding?.analytic_id || null
+      mainAnalyticIdxRef.current = mainBinding ? dbOrd.indexOf(mainBinding.analytic_id) : -1
 
       // View settings — read once per mount. Subsequent reloads reuse state.
       let curOrder = [...dbOrd]
@@ -657,6 +684,24 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode
   }, [sheetId, currentUserId, lookupCell, pinned])
 
   useEffect(() => { load() }, [load])
+
+  // In formulas mode, resolve indicator-rule formulas for all known coord keys
+  // (so HEAD cells driven by consolidation/scoped rules show their formula +
+  // source badge in the grid instead of a generic "Σ сумма" label).
+  useEffect(() => {
+    if (mode !== 'formulas' || !sheetId) return
+    const keys = Object.keys(cellMapRef.current)
+    if (keys.length === 0) return
+    let cancelled = false
+    api.getResolvedFormulas(sheetId, keys).then(res => {
+      if (cancelled) return
+      const m: Record<string, { formula: string; source: string; kind: string }> = {}
+      for (const r of res) if (r.formula) m[r.coord_key] = { formula: r.formula, source: r.source, kind: r.kind }
+      resolvedFormulaMapRef.current = m
+      gridApiRef.current?.refreshCells({ force: true })
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [sheetId, mode, rowData])
 
   // Rebuild columnDefs (with / without sum columns) when level toggles change.
   // Uses the cached colTree so we don't re-fetch cells.
@@ -938,21 +983,30 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode
         if (mode === 'formulas') return false // read-only in formula view
         if (!p.data || !p.data.isLeaf) return false // group rows: read-only
         const rule: CellRule = p.data[`__rule_${periodRecId}`] || 'manual'
-        // `manual` — обычный ввод. `formula` — разрешаем перезаписать вручную
-        // (как в Excel / legacy PivotGrid): typing a value replaces the
-        // formula and saves the cell as manual (rule: 'manual' in
-        // onCellValueChanged). `empty` / `sum_children` остаются read-only.
-        return rule === 'manual' || rule === 'formula'
+        // Только `manual` — редактируемо. Клетки с формулой редактируются
+        // через кнопку ⋮ → FormulaEditor (а не путём ввода значения), чтобы
+        // случайный ввод не затирал формулу. `empty` / `sum_children` —
+        // read-only.
+        return rule === 'manual'
       },
       valueFormatter: (p: any) => {
         const rule: CellRule = p.data?.[`__rule_${periodRecId}`] || 'manual'
         if (mode === 'formulas') {
           // Formula mode: show formula text for `formula` cells, otherwise
-          // a short rule label (parity with legacy PivotGrid settings view).
+          // indicator-rule formula (with source badge) or a short rule label.
           if (rule === 'formula') {
             const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
             const f = coordKey ? formulaMapRef.current[coordKey] : ''
-            return f || 'ƒ формула'
+            return f ? `[cell] ${f}` : 'ƒ формула'
+          }
+          const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
+          const resolved = coordKey ? resolvedFormulaMapRef.current[coordKey] : undefined
+          if (resolved) {
+            // Badge: source → short tag
+            const tag = resolved.source.startsWith('rule:')
+              ? (resolved.kind === 'consolidation' ? 'consol' : resolved.kind === 'leaf' ? 'leaf' : 'rule')
+              : resolved.source
+            return `[${tag}] ${resolved.formula}`
           }
           if (rule === 'sum_children') return 'Σ сумма'
           if (rule === 'empty') return '∅'
@@ -1037,6 +1091,45 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode
         const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
         const f = coordKey ? formulaMapRef.current[coordKey] : ''
         return f ? `ƒ ${f}` : null
+      },
+      // Hover ⋮ button → opens FormulaEditor for this cell.
+      // Only on leaf rows (group rows don't have an editable formula).
+      cellRenderer: (p: any) => {
+        const isLeaf = !!p.data?.isLeaf
+        const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
+        const formatted = p.valueFormatted != null && p.valueFormatted !== ''
+          ? p.valueFormatted
+          : (p.value == null ? '' : String(p.value))
+        if (!isLeaf || !coordKey) {
+          return <span>{formatted}</span>
+        }
+        return (
+          <span
+            className="cell-with-menu"
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', gap: 4 }}
+          >
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {formatted}
+            </span>
+            <button
+              type="button"
+              className="cell-menu-btn"
+              title="Формула клетки"
+              onClick={ev => {
+                ev.stopPropagation()
+                setFormulaEditorKey(coordKey)
+                setFormulaEditorOpen(true)
+              }}
+              style={{
+                border: 'none', background: 'transparent', cursor: 'pointer',
+                padding: 0, lineHeight: 1, color: '#888', opacity: 0,
+                transition: 'opacity 0.15s', flexShrink: 0,
+              }}
+            >
+              <MoreVertOutlined sx={{ fontSize: 14 }} />
+            </button>
+          </span>
+        )
       },
     }
   }
@@ -1635,6 +1728,74 @@ export default function PivotGridAG({ sheetId, currentUserId, calcProgress, mode
           }}
         />
       </Box>
+
+      <FormulaEditor
+        open={formulaEditorOpen}
+        formula={formulaMapRef.current[formulaEditorKey] || ''}
+        modelId={modelId}
+        onClose={() => setFormulaEditorOpen(false)}
+        onSave={async text => {
+          try {
+            await api.saveCells(sheetId, [{
+              coord_key: formulaEditorKey,
+              formula: text,
+              rule: 'formula',
+              user_id: currentUserId,
+            }])
+            formulaMapRef.current[formulaEditorKey] = text
+            cellRuleRef.current[formulaEditorKey] = 'formula'
+            // Offer to promote this per-cell formula to a rule on the indicator
+            // (P3 snackbar). Requires we know the main analytic — extract
+            // indicator_id from coord_key by slicing at its index in dbOrd.
+            const idx = mainAnalyticIdxRef.current
+            const parts = formulaEditorKey.split('|')
+            const indicatorId = idx >= 0 && idx < parts.length ? parts[idx] : ''
+            if (indicatorId) {
+              setPromoteSnack({ coordKey: formulaEditorKey, formula: text, indicatorId })
+            }
+            // Reload to pull recomputed values + flash changed cells.
+            load()
+          } catch (err: any) {
+            setError(`Не удалось сохранить формулу: ${err?.message || err}`)
+          }
+        }}
+      />
+
+      <Snackbar
+        open={!!promoteSnack}
+        autoHideDuration={8000}
+        onClose={() => setPromoteSnack(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        message="Формула сохранена на клетку"
+        action={
+          <>
+            <MUIButton
+              color="primary"
+              size="small"
+              onClick={async () => {
+                if (!promoteSnack) return
+                try {
+                  await api.promoteCellToRule(
+                    sheetId,
+                    promoteSnack.indicatorId,
+                    promoteSnack.coordKey,
+                    promoteSnack.formula,
+                  )
+                  setPromoteSnack(null)
+                  load()
+                } catch (err: any) {
+                  setError(`Не удалось сделать правилом: ${err?.message || err}`)
+                }
+              }}
+            >
+              Сделать правилом показателя
+            </MUIButton>
+            <MUIButton color="inherit" size="small" onClick={() => setPromoteSnack(null)}>
+              Закрыть
+            </MUIButton>
+          </>
+        }
+      />
     </Box>
   )
 }

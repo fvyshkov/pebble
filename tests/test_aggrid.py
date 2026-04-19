@@ -363,11 +363,11 @@ def test_aggrid_period_totals_toggle_adds_sum_column(sheet_page: Page):
 
 # ── Formula-cell manual override ───────────────────────────────────────────
 
-def test_aggrid_formula_cell_accepts_keyboard_typing(sheet_page: Page):
-    """Regression: typing on a formula-cell (blue text, not manual yellow)
-    should start editing and replace the formula with the typed value.
-    Previously the key-press → startEditingCell handler was gated to
-    `rule === 'manual'`, so formula cells silently ignored typing.
+def test_aggrid_formula_cell_rejects_keyboard_typing(sheet_page: Page):
+    """Regression (inverted 2026-04): typing on a formula-cell (blue text,
+    not manual yellow) MUST NOT start editing — formulas are edited only
+    through the hover ⋮ button → FormulaEditor dialog, so a stray keypress
+    can't silently overwrite a formula.
 
     Navigates to the PL ("Финансовый результат BaaS") sheet if possible —
     that sheet has formula cells on D11 rows in the demo model.
@@ -375,7 +375,6 @@ def test_aggrid_formula_cell_accepts_keyboard_typing(sheet_page: Page):
     page = sheet_page
     _enable_aggrid(page)
     _unpin_all(page)
-    # Try to switch to PL sheet — it has formula cells in the demo model.
     labels = page.locator(".tree-item-label")
     for i in range(labels.count()):
         try:
@@ -387,9 +386,6 @@ def test_aggrid_formula_cell_accepts_keyboard_typing(sheet_page: Page):
             page.wait_for_timeout(1800)
             break
     page.wait_for_timeout(800)
-    # Expand the first group so leaf rows (including formula-rule cells)
-    # become visible. Without expansion, only group rows show and those
-    # use different styling.
     expander = page.locator(
         ".ag-group-contracted:visible, .ag-icon-tree-closed:visible"
     ).first
@@ -397,7 +393,6 @@ def test_aggrid_formula_cell_accepts_keyboard_typing(sheet_page: Page):
         try:
             expander.click()
             page.wait_for_timeout(400)
-            # expand one more level
             expander2 = page.locator(
                 ".ag-group-contracted:visible, .ag-icon-tree-closed:visible"
             ).first
@@ -406,8 +401,6 @@ def test_aggrid_formula_cell_accepts_keyboard_typing(sheet_page: Page):
                 page.wait_for_timeout(400)
         except Exception:
             pass
-    # Find a formula-cell on a leaf row. Formula cells have colour #1565c0
-    # (blue) — look for it in the cell inline style across visible cells.
     candidates = page.locator(".ag-row:not(.ag-row-group) .ag-cell[col-id^='p_']")
     formula_cell = None
     n = candidates.count()
@@ -427,17 +420,136 @@ def test_aggrid_formula_cell_accepts_keyboard_typing(sheet_page: Page):
     formula_cell.scroll_into_view_if_needed()
     formula_cell.click()
     page.wait_for_timeout(200)
-    # Type a digit — this should enter edit mode per Excel-style behaviour.
+    # Typing a digit MUST NOT enter edit mode for a formula cell.
     page.keyboard.type("9")
     page.wait_for_timeout(250)
     editing = page.locator(".ag-cell-inline-editing").count()
-    assert editing > 0, (
-        "Typing a character on a formula cell did not start inline editing. "
-        "Expected `.ag-cell-inline-editing` to appear; got 0."
+    assert editing == 0, (
+        "Formula cells must be read-only to direct keyboard input "
+        "(edits go through ⋮ → FormulaEditor). "
+        f"Got {editing} `.ag-cell-inline-editing` elements after typing."
     )
-    # Escape to avoid mutating data.
     page.keyboard.press("Escape")
-    page.wait_for_timeout(150)
+    page.wait_for_timeout(100)
+
+
+def test_aggrid_formula_cell_dotdot_menu_opens_formula_editor(sheet_page: Page):
+    """The hover-⋮ button on a leaf cell opens the FormulaEditor dialog with
+    the current formula text preloaded. Regression: ⋮ entry was missing
+    after AG Grid migration; users had no way to edit a cell's formula."""
+    page = sheet_page
+    _enable_aggrid(page)
+    _unpin_all(page)
+    labels = page.locator(".tree-item-label")
+    for i in range(labels.count()):
+        try:
+            txt = labels.nth(i).inner_text()
+        except Exception:
+            continue
+        if "Финансовый результат" in txt:
+            labels.nth(i).click()
+            page.wait_for_timeout(1800)
+            break
+    page.wait_for_timeout(800)
+    candidates = page.locator(".ag-row:not(.ag-row-group) .ag-cell[col-id^='p_']")
+    n = candidates.count()
+    target_cell = None
+    for i in range(min(n, 400)):
+        c = candidates.nth(i)
+        try:
+            style = c.get_attribute("style") or ""
+        except Exception:
+            continue
+        if "rgb(21, 101, 192)" in style or "#1565c0" in style:
+            target_cell = c
+            break
+    if target_cell is None:
+        # fall back to any leaf cell — ⋮ button still appears
+        for i in range(min(n, 40)):
+            c = candidates.nth(i)
+            if c.is_visible():
+                target_cell = c
+                break
+    if target_cell is None:
+        pytest.skip("No leaf cells visible")
+    target_cell.scroll_into_view_if_needed()
+    target_cell.hover()
+    page.wait_for_timeout(200)
+    btn = target_cell.locator(".cell-menu-btn")
+    assert btn.count() == 1, (
+        f"Expected exactly one `.cell-menu-btn` inside hovered leaf cell; "
+        f"got {btn.count()}"
+    )
+    btn.click(force=True)
+    page.wait_for_timeout(400)
+    # FormulaEditor is a MUI Dialog — title "Редактор формулы" (from its JSX).
+    dialog = page.locator('.MuiDialog-root:visible')
+    assert dialog.count() >= 1, "FormulaEditor dialog did not open after ⋮ click"
+    # Close it to leave state clean.
+    esc = page.locator('.MuiDialog-root button:has-text("Отмена"), .MuiDialog-root button:has-text("Закрыть")').first
+    if esc.count() > 0 and esc.is_visible():
+        esc.click()
+    else:
+        page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+
+
+def test_aggrid_formula_save_shows_promote_to_rule_snackbar(sheet_page: Page):
+    """After saving a per-cell formula via ⋮ → FormulaEditor, a Snackbar
+    appears with a "Сделать правилом показателя" action button (P3 #30).
+    This offers the user one-click promotion of the per-cell formula into
+    an indicator rule (calls /promote-cell API)."""
+    page = sheet_page
+    _enable_aggrid(page)
+    _unpin_all(page)
+    labels = page.locator(".tree-item-label")
+    for i in range(labels.count()):
+        try:
+            txt = labels.nth(i).inner_text()
+        except Exception:
+            continue
+        if "Финансовый результат" in txt:
+            labels.nth(i).click()
+            page.wait_for_timeout(1800)
+            break
+    page.wait_for_timeout(600)
+    # Find any leaf cell — we'll hover to reveal the ⋮ button.
+    candidates = page.locator(".ag-row:not(.ag-row-group) .ag-cell[col-id^='p_']")
+    target = None
+    n = candidates.count()
+    for i in range(min(n, 50)):
+        c = candidates.nth(i)
+        if c.is_visible():
+            target = c
+            break
+    if target is None:
+        pytest.skip("No leaf cells visible")
+    target.scroll_into_view_if_needed()
+    target.hover()
+    page.wait_for_timeout(200)
+    btn = target.locator(".cell-menu-btn")
+    if btn.count() == 0:
+        pytest.skip("No ⋮ button on cell (non-leaf?)")
+    btn.click(force=True)
+    page.wait_for_timeout(400)
+    # Dialog open — type a trivial formula and save.
+    textarea = page.locator('.MuiDialog-root textarea').first
+    if textarea.count() == 0:
+        pytest.skip("FormulaEditor textarea not found")
+    textarea.fill("1")
+    save_btn = page.locator('.MuiDialog-root button:has-text("Сохранить")').first
+    save_btn.click()
+    page.wait_for_timeout(1200)
+    # Expect Snackbar with "Сделать правилом показателя".
+    snack = page.locator('.MuiSnackbar-root button:has-text("Сделать правилом показателя")').first
+    assert snack.count() >= 1, (
+        "Promote-to-rule snackbar did not appear after saving a per-cell formula"
+    )
+    # Dismiss it to clean up state.
+    close_btn = page.locator('.MuiSnackbar-root button:has-text("Закрыть")').first
+    if close_btn.count() > 0:
+        close_btn.click()
+    page.wait_for_timeout(300)
 
 
 def test_aggrid_period_header_fits_december(sheet_page: Page):

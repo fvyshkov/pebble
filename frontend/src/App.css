@@ -148,6 +148,14 @@
   justify-content: center;
 }
 
+/* AG Grid: hover ⋮ button inside leaf cells — show on cell hover. */
+.ag-cell:hover .cell-menu-btn {
+  opacity: 1 !important;
+}
+.cell-menu-btn:hover {
+  color: #1976d2 !important;
+}
+
 /* AG Grid: visible vertical + horizontal gridlines between data cells. */
 .ag-theme-alpine .ag-cell,
 .ag-theme-alpine .ag-header-cell,

@@ -389,6 +389,136 @@ async def fill_sheet_direct(sheet_id: str, req: FillSheetRequest):
     return result
 
 
+# ── LLM helper: auto-detect consolidation formulas on add-analytic ────────
+
+async def _suggest_consolidations_for_sheet(db, sheet_id: str, new_analytic_name: str) -> int:
+    """Ask Claude for per-indicator consolidation formulas after a new
+    analytic was bound to `sheet_id`. Write any non-SUM answers as
+    `consolidation`-kind rows into `indicator_formula_rules`. Tolerant of
+    Claude/API failures — returns number of rules written (0 on any error).
+    """
+    # Main analytic (where indicators live)
+    rows = await db.execute_fetchall(
+        "SELECT sa.analytic_id FROM sheet_analytics sa "
+        "JOIN analytics a ON a.id = sa.analytic_id "
+        "WHERE sa.sheet_id = ? AND sa.is_main = 1 AND a.is_periods = 0 LIMIT 1",
+        (sheet_id,),
+    )
+    if not rows:
+        return 0
+    main_aid = rows[0]["analytic_id"]
+
+    # All indicator records (with names)
+    recs = await db.execute_fetchall(
+        "SELECT id, data_json FROM analytic_records WHERE analytic_id = ?",
+        (main_aid,),
+    )
+    indicators: list[dict] = []
+    for r in recs:
+        try:
+            d = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else (r["data_json"] or {})
+        except Exception:
+            d = {}
+        nm = (d.get("name") or "").strip()
+        if nm:
+            indicators.append({"id": r["id"], "name": nm, "unit": d.get("unit", "")})
+    if not indicators:
+        return 0
+
+    # Skip indicators that already have a consolidation rule — don't overwrite.
+    existing = await db.execute_fetchall(
+        "SELECT indicator_id FROM indicator_formula_rules "
+        "WHERE sheet_id = ? AND kind = 'consolidation'",
+        (sheet_id,),
+    )
+    already = {r["indicator_id"] for r in existing}
+    todo = [i for i in indicators if i["id"] not in already]
+    if not todo:
+        return 0
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return 0
+    try:
+        import anthropic
+        kwargs = {"api_key": api_key}
+        base_url = os.environ.get("ANTHROPIC_BASE_URL")
+        if base_url:
+            kwargs["base_url"] = base_url
+        client = anthropic.Anthropic(**kwargs)
+
+        # Compact list: "id — name (unit)". LLM sees names of ALL indicators
+        # (so it can reference neighbours in formulas), but answers only for
+        # `todo` ids.
+        all_lines = "\n".join(f"- {i['name']}" + (f" ({i['unit']})" if i['unit'] else "") for i in indicators)
+        todo_ids = [i["id"] for i in todo]
+        todo_lines = "\n".join(f"- {i['id']}: {i['name']}" for i in todo)
+
+        prompt = f"""На лист финмодели добавляется разрез «{new_analytic_name}» (например: Подразделения, Регионы, Каналы).
+
+Показатели этого листа:
+{all_lines}
+
+Для каждого показателя из списка ниже определи, как консолидируется значение по этому разрезу на строке-итоге.
+
+Варианты:
+- SUM — обычная сумма детей (по умолчанию для большинства абсолютных показателей: выручка, количество, сумма).
+- Формула — в синтаксисе Pebble: `[имя показателя] / [имя другого]` или `[a] * [b]`. Использовать только имена из списка показателей этого листа. Типичные случаи:
+  * среднее/на одного: `[сумма] / [количество]`
+  * доля/процент: `[часть] / [целое]`
+  * ставки/коэффициенты: формулой, а не суммой.
+
+Ответь ТОЛЬКО JSON массивом без пояснений, в формате:
+[{{"id": "<id>", "kind": "sum"}}, {{"id": "<id>", "kind": "formula", "formula": "[a] / [b]"}}]
+
+Показатели, по которым нужен ответ:
+{todo_lines}
+"""
+
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        # Tolerate code fences
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        suggestions = json.loads(text)
+        if not isinstance(suggestions, list):
+            return 0
+    except Exception as e:
+        print(f"[suggest_consolidations] LLM failed for sheet {sheet_id}: {e}")
+        return 0
+
+    # Persist formula suggestions (skip SUM — default is SUM already).
+    written = 0
+    todo_set = {i["id"] for i in todo}
+    for s in suggestions:
+        if not isinstance(s, dict):
+            continue
+        iid = s.get("id")
+        if iid not in todo_set:
+            continue
+        kind = s.get("kind")
+        formula = (s.get("formula") or "").strip()
+        if kind != "formula" or not formula:
+            continue
+        await db.execute(
+            "INSERT INTO indicator_formula_rules "
+            "(id, sheet_id, indicator_id, kind, scope_json, priority, formula) "
+            "VALUES (?, ?, ?, 'consolidation', '{}', 0, ?)",
+            (str(uuid.uuid4()), sheet_id, iid, formula),
+        )
+        written += 1
+    if written:
+        await db.commit()
+    return written
+
+
 # ── Server-side tool execution ─────────────────────────────────────────────
 
 async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: list[dict]) -> str:
@@ -500,11 +630,17 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
         if name == "add_analytic_to_all_sheets":
             model_id = inp["model_id"]
             analytic_id = inp["analytic_id"]
+            # Resolve analytic name for the consolidation-suggestion prompt.
+            a_rows = await db.execute_fetchall(
+                "SELECT name FROM analytics WHERE id = ?", (analytic_id,),
+            )
+            analytic_name = a_rows[0]["name"] if a_rows else "аналитика"
             sheets = await db.execute_fetchall(
                 "SELECT id FROM sheets WHERE model_id = ?", (model_id,),
             )
             added = 0
             skipped = 0
+            newly_added_sheet_ids: list[str] = []
             for s in sheets:
                 sid = s["id"]
                 existing = await db.execute_fetchall(
@@ -523,9 +659,24 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
                     (str(uuid.uuid4()), sid, analytic_id, sort_order),
                 )
                 added += 1
+                newly_added_sheet_ids.append(sid)
             await db.commit()
+            # P4: ask Claude to fill in consolidation formulas (ratios/avgs)
+            # per indicator on each sheet where we just added a new analytic.
+            # Tolerant of failures — returns 0 if Claude/API is unavailable.
+            formulas_written = 0
+            for sid in newly_added_sheet_ids:
+                try:
+                    formulas_written += await _suggest_consolidations_for_sheet(
+                        db, sid, analytic_name,
+                    )
+                except Exception as e:
+                    print(f"[add_analytic_to_all_sheets] suggest failed on {sid}: {e}")
             client_actions.append({"type": "reload_model", "model_id": model_id})
-            return json.dumps({"added": added, "skipped": skipped}, ensure_ascii=False)
+            return json.dumps(
+                {"added": added, "skipped": skipped, "formulas_suggested": formulas_written},
+                ensure_ascii=False,
+            )
 
         if name == "remove_analytic_from_all_sheets":
             model_id = inp["model_id"]
