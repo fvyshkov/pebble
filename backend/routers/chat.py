@@ -475,7 +475,9 @@ async def _suggest_consolidations_for_sheet(db, sheet_id: str, new_analytic_name
 {todo_lines}
 """
 
-        resp = client.messages.create(
+        from backend.llm_cache import cached_messages_create
+        resp = cached_messages_create(
+            client,
             model="claude-sonnet-4-20250514",
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
@@ -847,8 +849,10 @@ async def chat_message(req: ChatRequest):
     client_actions: list[dict] = []
 
     # Tool-use loop (cap at 8 iterations to prevent runaway)
+    from backend.llm_cache import cached_messages_create
     for _ in range(8):
-        resp = client.messages.create(
+        resp = cached_messages_create(
+            client,
             model="claude-sonnet-4-20250514",
             max_tokens=2000,
             system=system,

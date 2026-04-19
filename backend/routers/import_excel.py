@@ -274,6 +274,9 @@ def _parse_claude_json(response_text: str) -> dict:
 _LLM_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".llm_cache")
 
 def _llm_cache_get(key: str):
+    """Legacy per-sheet-text cache (pre-shared-cache). Keeps prior warmed
+    entries usable. New calls also go through backend.llm_cache via
+    cached_messages_create in chat.py."""
     import hashlib
     h = hashlib.sha256(key.encode()).hexdigest()[:16]
     path = os.path.join(_LLM_CACHE_DIR, f"{h}.json")
