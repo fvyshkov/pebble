@@ -5,12 +5,17 @@ evaluates its dependencies until it reaches manual inputs. Results
 are cached per calculation run.
 
 Formula syntax:
-  [indicator_name]                              — same context (exact match)
-  [indicator_name](периоды="предыдущий")        — previous period
-  [Sheet::indicator_name]                       — cross-sheet reference (:: separator)
-  SUM([a], [b], [c])                            — sum function
+  [indicator_name]                                    — same context (exact match)
+  [indicator_name](периоды=предыдущий)                — previous period (unquoted)
+  [indicator_name](периоды="предыдущий")              — previous period (quoted, legacy)
+  [indicator_name](периоды=период.назад(2))           — two periods back
+  [indicator_name](периоды=Январь, подразделения=Москва) — explicit axis values
+  [Sheet::indicator_name]                             — cross-sheet reference (:: separator)
+  SUM([a], [b], [c])                                  — sum function
   Standard math: +, -, *, /, parentheses, numbers
 
+Parameters support both quoted ("value") and unquoted (value) syntax.
+Multiple params are comma-separated.
 All references resolve by EXACT name match (case-insensitive). No fuzzy matching.
 """
 
@@ -35,33 +40,54 @@ REF_RE = re.compile(r"""
     (?:\(((?:[^()]*|\([^()]*\))*)\))?     # optional params — one nesting level
 """, re.VERBOSE)
 
-PARAM_RE = re.compile(r'([\w\s]+?)\s*=\s*"([^"]*)"')
-# Matches: период=период.назад(N) or период=период
-PERIOD_FUNC_RE = re.compile(r'(\w+)\s*=\s*\1\.назад\((\d+)\)')
-PERIOD_IDENTITY_RE = re.compile(r'(\w+)\s*=\s*\1(?:\s*$|\s*,)')
+# For matching key.назад(N) function calls in param values
+_PERIOD_BACK_RE = re.compile(r'\w+\.назад\((\d+)\)')
 
 
 def parse_ref(token: str) -> dict:
+    """Parse a formula reference token like [name] or [name](key=value, ...).
+
+    Supports:
+    - Unquoted values:  [ind](периоды=Январь, подразделения=Москва)
+    - Quoted values:    [ind](периоды="предыдущий")  (legacy)
+    - Period back-ref:  [ind](периоды=период.назад(2))
+    - Period identity:  [ind](период=период)  → no-op, ignored
+    - Cross-sheet:      [Sheet::indicator]
+    """
     m = REF_RE.match(token)
     if not m:
         return {"name": token, "params": {}}
     name = m.group(1)
-    params_str = m.group(2) or ""
+    params_str = (m.group(2) or "").strip()
     params = {}
 
-    # Check for период=период.назад(N) syntax first
-    pm = PERIOD_FUNC_RE.search(params_str)
-    if pm:
-        params[pm.group(1)] = f"назад({pm.group(2)})"
-    else:
-        # Check for период=период (identity, no-op)
-        pm = PERIOD_IDENTITY_RE.search(params_str)
-        if pm:
-            pass  # Identity — don't add any param (same as no modifier)
-        else:
-            # Legacy: key="value" pairs
-            for pm in PARAM_RE.finditer(params_str):
-                params[pm.group(1)] = pm.group(2)
+    if params_str:
+        for raw_pair in params_str.split(","):
+            raw_pair = raw_pair.strip()
+            if "=" not in raw_pair:
+                continue
+            key, _, val = raw_pair.partition("=")
+            key = key.strip()
+            val = val.strip()
+            if not key:
+                continue
+
+            # Period back-reference: word.назад(N) or key=key.назад(N)
+            back_m = _PERIOD_BACK_RE.fullmatch(val)
+            if back_m:
+                params[key] = f"назад({back_m.group(1)})"
+                continue
+
+            # Identity: key=key (same value, no-op)
+            if val.lower() == key.lower():
+                continue
+
+            # Strip surrounding quotes (legacy quoted syntax)
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+
+            # "предыдущий" shorthand (keep as-is for _resolve_local)
+            params[key] = val
 
     # Cross-sheet separator is "::"
     sheet = None
