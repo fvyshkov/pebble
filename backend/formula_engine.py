@@ -781,6 +781,86 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                     if gk in computed_set:
                         consol_computed.add(gk)
 
+    # ── Compute consolidation along non-period, non-main analytics ──
+    #    E.g. HEAD = SUM(F1, F2) for every indicator × period combination.
+    #    The period consolidation above only covers parent-period records;
+    #    this covers leaf periods AND parent periods for the extra analytic axes.
+    for sid, meta in sheet_meta.items():
+        ordered_aids = meta["ordered_aids"]
+        children_by = meta["children_by_rid"]
+        record_by = meta.get("record_by_id", {})
+        name_to_rids = meta.get("name_to_rids", {})
+        main_aid = meta.get("main_aid")
+        period_aid = meta.get("period_aid")
+        if not main_aid or not period_aid:
+            continue
+
+        # Find non-main, non-period analytics that have parent records (need consolidation)
+        consol_axes: list[tuple[str, list[str]]] = []  # (aid, [parent_rids])
+        for aid in ordered_aids:
+            if aid == main_aid or aid == period_aid:
+                continue
+            parent_rids = []
+            for rid, ch in children_by.items():
+                if ch:
+                    rec = record_by.get(rid)
+                    if rec and rec.get("analytic_id") == aid:
+                        parent_rids.append(rid)
+            if parent_rids:
+                consol_axes.append((aid, parent_rids))
+        if not consol_axes:
+            continue
+
+        # Collect ALL period rids (leaf + parent)
+        all_period_rids: list[str] = []
+        for _, rids_list in name_to_rids.get(period_aid, {}).items():
+            all_period_rids.extend(rids_list)
+
+        # Collect all indicator rids
+        ind_rids2: set[str] = set()
+        for _, rids_list in name_to_rids.get(main_aid, {}).items():
+            ind_rids2.update(rids_list)
+
+        # For each consolidating axis, iterate parent records
+        for consol_aid, parent_rids in consol_axes:
+            # Other axes: all record IDs for remaining non-main, non-period, non-consol axes
+            other_axes_rids2: list[list[str]] = []
+            other_axes_aids2: list[str] = []
+            for aid in ordered_aids:
+                if aid in (main_aid, period_aid, consol_aid):
+                    continue
+                rids_for_axis = []
+                for _, rids_list in name_to_rids.get(aid, {}).items():
+                    rids_for_axis.extend(rids_list)
+                if rids_for_axis:
+                    other_axes_rids2.append(rids_for_axis)
+                    other_axes_aids2.append(aid)
+            other_combos2 = list(itertools.product(*other_axes_rids2)) if other_axes_rids2 else [()]
+
+            for p_rid in all_period_rids:
+                for ind_id in ind_rids2:
+                    for parent_rid in parent_rids:
+                        for other_vals in other_combos2:
+                            parts = []
+                            oi = 0
+                            for aid in ordered_aids:
+                                if aid == period_aid:
+                                    parts.append(p_rid)
+                                elif aid == main_aid:
+                                    parts.append(ind_id)
+                                elif aid == consol_aid:
+                                    parts.append(parent_rid)
+                                else:
+                                    parts.append(other_vals[oi])
+                                    oi += 1
+                            ck = "|".join(parts)
+                            gk = (sid, ck)
+                            if gk in computed_set:
+                                continue
+                            get_cell(sid, ck)
+                            if gk in computed_set:
+                                consol_computed.add(gk)
+
     # ── Return only cells whose value actually changed ──
     def _vals_equal(a: str, b: str) -> bool:
         if a == b:
