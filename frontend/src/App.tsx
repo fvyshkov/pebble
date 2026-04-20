@@ -517,7 +517,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 selection={selection} onSelect={handleSelect}
                 refreshKey={refreshKey} expandAfterCreate={expandAfterCreate} onCreated={onCreated}
                 sheetsOnly={isDataMode} currentUserId={isDataMode ? currentUserId : undefined}
-                onImportClick={isAdmin ? () => setShowImport(true) : undefined}
                 isAdmin={isAdmin}
               />
             </div>

@@ -74,7 +74,11 @@ Analyze ONE sheet from an Excel financial model. The text shows:
 - Header rows (dates, labels)
 - Row labels with row numbers, formatting (BOLD, indent), data presence flags
 - F1= formula for first period, F2= formula for second period (if different)
-- INPUT = manual input cell, FORMULA = computed cell
+- INPUT(bg=color) = cell has non-default background color (yellow, beige, green, etc.)
+  This usually means manual user input — numbers typed by hand, not computed.
+  If a row has INPUT(bg=...) AND has numbers but NO Excel formula, it's almost certainly manual.
+  If a row has INPUT(bg=...) AND ALSO has a FORMULA flag, the color overrides: treat as manual (keep the number, ignore the formula).
+- FORMULA = cell contains an Excel formula (computed)
 
 Return a JSON describing the sheet's indicator hierarchy WITH formulas.
 
@@ -184,12 +188,15 @@ def _extract_sheet_text(ws, sheet_name: str, max_rows: int = 500) -> str:
                     has_formula = True
                 break
 
-        # Check if input cell (theme=7)
+        # Check cell background color (non-default = likely manual input)
         is_input = False
+        cell_color = None
         for c in range(4, min(15, max_col + 1)):
-            fill = ws.cell(r, c).fill
-            if fill and fill.fgColor and fill.fgColor.theme == 7:
-                is_input = True
+            cv = ws.cell(r, c).value
+            if cv is not None:
+                cell_color = _get_cell_bg_color(ws.cell(r, c))
+                if cell_color:
+                    is_input = True
                 break
 
         # Extract first two period formulas for formula cells
@@ -218,8 +225,8 @@ def _extract_sheet_text(ws, sheet_name: str, max_rows: int = 500) -> str:
             flags.append("HAS_DATA")
         if has_formula:
             flags.append("FORMULA")
-        if is_input:
-            flags.append("INPUT")
+        if is_input and cell_color:
+            flags.append(f"INPUT(bg={cell_color})")
 
         flag_str = f" [{', '.join(flags)}]" if flags else ""
         formula_str = ""
@@ -232,31 +239,60 @@ def _extract_sheet_text(ws, sheet_name: str, max_rows: int = 500) -> str:
     return "\n".join(lines)
 
 
-def _is_input_cell(cell) -> bool:
-    """Check if cell has yellow/beige input background (theme=7 or yellow RGB)."""
+def _get_cell_bg_color(cell) -> str | None:
+    """Return human-readable background color description, or None if default/white."""
     fill = cell.fill
-    if not fill or not fill.fgColor or fill.patternType != "solid":
-        return False
+    if not fill or fill.patternType != "solid":
+        return None
     fg = fill.fgColor
-    # Theme-based yellow (theme=7 in many spreadsheets)
-    try:
-        if fg.theme == 7:
-            return True
-    except (TypeError, ValueError):
-        pass
-    # RGB-based yellow/beige detection
+    if not fg:
+        return None
+    # Theme-based colors
+    if fg.type == "theme":
+        try:
+            theme = int(fg.theme)
+            theme_names = {
+                0: None,  # white / default
+                1: None,  # black text (not a bg color)
+                2: None,  # light gray (often default)
+                3: "dark gray", 4: "blue", 5: "orange",
+                6: "green", 7: "yellow", 8: "teal", 9: "purple",
+            }
+            return theme_names.get(theme)
+        except (TypeError, ValueError):
+            pass
+    # RGB-based
     if fg.type == "rgb" and isinstance(fg.rgb, str):
-        rgb = fg.rgb.lstrip("0")[-6:] if len(fg.rgb) >= 6 else fg.rgb
-        r_val = int(rgb[0:2], 16) if len(rgb) >= 6 else 0
-        g_val = int(rgb[2:4], 16) if len(rgb) >= 6 else 0
-        b_val = int(rgb[4:6], 16) if len(rgb) >= 6 else 0
-        # Yellow-ish: high red, high green, low blue
-        if r_val > 200 and g_val > 200 and b_val < 100:
-            return True
-        # Beige/light yellow: high red, high green, medium blue
-        if r_val > 220 and g_val > 220 and b_val < 180 and b_val < r_val - 40:
-            return True
-    return False
+        raw = fg.rgb
+        # Strip alpha prefix if present (e.g. "00FFFFFF" → "FFFFFF")
+        hex6 = raw[-6:] if len(raw) >= 6 else raw
+        if hex6.upper() in ("FFFFFF", "000000"):
+            return None  # white or black (default)
+        r = int(hex6[0:2], 16)
+        g = int(hex6[2:4], 16)
+        b = int(hex6[4:6], 16)
+        if r > 240 and g > 240 and b > 240:
+            return None  # near-white
+        # Describe the color
+        if r > 200 and g > 200 and b < 100:
+            return "yellow"
+        if r > 200 and g > 180 and b < 150 and b < r - 60:
+            return "beige/light yellow"
+        if r > 200 and g < 150 and b < 150:
+            return "red/pink"
+        if r < 150 and g > 200 and b < 150:
+            return "green"
+        if r < 150 and g < 150 and b > 200:
+            return "blue"
+        if r > 200 and g > 150 and b < 100:
+            return "orange"
+        return f"#{hex6}"
+    return None
+
+
+def _is_input_cell(cell) -> bool:
+    """Check if cell has a non-default background color (likely manual input)."""
+    return _get_cell_bg_color(cell) is not None
 
 
 # ── Claude API call ────────────────────────────────────────────────────────
