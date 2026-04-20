@@ -478,9 +478,6 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 computing_set.discard(gk)
                 _computed_sources[gk] = formula_source or "rule"
                 _computed_formulas[gk] = formula
-                # Propagate unresolved from children
-                if any((sheet_id, ck) in _unresolved for ck in children):
-                    _unresolved.add(gk)
                 return result
 
             if formula == "LAST" and _is_consolidating(context, meta):
@@ -493,8 +490,6 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 computing_set.discard(gk)
                 _computed_sources[gk] = formula_source or "rule"
                 _computed_formulas[gk] = formula
-                if any((sheet_id, ck) in _unresolved for ck in children):
-                    _unresolved.add(gk)
                 return result
 
             computing_set.add(gk)
@@ -558,8 +553,8 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             computed_set.add(gk)
             computing_set.discard(gk)
             _computed_sources[gk] = "default-sum"
-            if any((sheet_id, ck) in _unresolved for ck in children_cks):
-                _unresolved.add(gk)
+            # Don't propagate unresolved to consolidation cells — SUM is valid
+            # even if some children have unresolvable refs (they contribute 0).
             return total
 
         # ── 4. Leaf manual value (stored)

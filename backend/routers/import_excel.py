@@ -1248,18 +1248,18 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
             for i, (sn, result) in enumerate(zip(sheet_names, results)):
                 if isinstance(result, Exception):
-                    yield event(f"   ✗ «{sn}»: ошибка — {result}")
+                    yield event(f"   [ERR]«{sn}»: ошибка — {result}")
                 elif result and len(result.get("indicators", [])) > 0:
                     ind_count = len(result.get("indicators", []))
                     ch_count = sum(len(x.get("children", [])) for x in result.get("indicators", []))
-                    yield event(f"   ✓ «{sn}» ({i+1}/{len(sheet_names)}): {ind_count} групп, {ch_count} показателей")
+                    yield event(f"   [OK]«{sn}» ({i+1}/{len(sheet_names)}): {ind_count} групп, {ch_count} показателей")
                     sheets_config.append(result)
                 else:
-                    yield event(f"   ✗ «{sn}»: не удалось разобрать")
+                    yield event(f"   [ERR]«{sn}»: не удалось разобрать")
 
             analysis = {"period_config": period_config, "sheets": sheets_config}
         except Exception as e:
-            yield event(f"⚠ Claude API недоступен, используем эвристики: {e}")
+            yield event(f"[WARN]Claude API недоступен, используем эвристики: {e}")
             analysis = _fallback_heuristic_analysis(wb_formulas)
 
         period_config = analysis["period_config"]
@@ -1445,7 +1445,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             done_indicators += sheet_indicators
             created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
             consol_msg = f", {n_consol} формул консолидации из Excel" if n_consol else ""
-            yield event(f"   ✓ «{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек{consol_msg} ({done_indicators}/{total_indicators})")
+            yield event(f"   [OK]«{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек{consol_msg} ({done_indicators}/{total_indicators})")
 
         await db.commit()
 
@@ -1454,7 +1454,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         actual_sheets = len(created_sheets)
         if actual_sheets < expected_sheets:
             missing = set(sheet_names) - {sc["excel_name"] for sc in sheets_config}
-            yield event(f"⚠ Импортировано {actual_sheets}/{expected_sheets} листов. Пропущены: {', '.join(missing)}")
+            yield event(f"[WARN]Импортировано {actual_sheets}/{expected_sheets} листов. Пропущены: {', '.join(missing)}")
 
         # Validate cell counts against Excel
         for cs in created_sheets:
@@ -1474,7 +1474,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             excel_cells += 1
                 ratio = cs["cells"] / excel_cells * 100 if excel_cells > 0 else 0
                 if ratio < 80:
-                    yield event(f"⚠ «{cs['name']}»: импортировано {cs['cells']}/{excel_cells} ячеек ({ratio:.0f}%)")
+                    yield event(f"[WARN]«{cs['name']}»: импортировано {cs['cells']}/{excel_cells} ячеек ({ratio:.0f}%)")
 
         # ── Post-import: detect period-consolidation formulas for ratios/averages ──
         # Ask Claude which indicators should NOT be summed across periods
@@ -1509,9 +1509,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 except Exception as e:
                     print(f"[import] propagate_consolidations failed: {e}")
             if total_rules:
-                yield event(f"   ✓ Claude подобрал {total_rules} формул консолидации по периодам")
+                yield event(f"   [OK]Claude подобрал {total_rules} формул консолидации по периодам")
 
-        yield event(f"✅ Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
+        yield event(f"[DONE]Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
                      {"done": True, "model_id": model_id, "model_name": model_name_final})
 
     return StreamingResponse(generate(), media_type="text/event-stream")

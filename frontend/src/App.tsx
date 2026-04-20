@@ -18,6 +18,7 @@ import SmartToyOutlined from '@mui/icons-material/SmartToyOutlined'
 import CheckCircleOutlined from '@mui/icons-material/CheckCircleOutlined'
 import ErrorOutlineOutlined from '@mui/icons-material/ErrorOutlineOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
+import WarningAmberOutlined from '@mui/icons-material/WarningAmberOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
@@ -96,7 +97,7 @@ function ImportDialog({ open, onClose, onImported }: {
         }
       })
     } catch (err) {
-      setLog(prev => [...prev, `❌ Ошибка: ${(err as Error).message}`])
+      setLog(prev => [...prev, `[ERR]Ошибка: ${(err as Error).message}`])
     } finally {
       setLoading(false)
       clearInterval(elapsedRef.current)
@@ -160,14 +161,15 @@ function ImportDialog({ open, onClose, onImported }: {
             }}
           >
             {log.map((line, i) => {
-              const isError = line.startsWith('❌')
-              const isSuccess = line.startsWith('✅')
-              const hasCheck = line.includes('✓')
-              const color = isError ? '#c62828' : isSuccess ? '#2e7d32' : '#333'
-              // Strip emoji prefixes for clean display with MUI icons
-              const text = line.replace(/^[❌✅]\s*/, '').replace(/✓\s*/g, '')
+              const isError = line.includes('[ERR]')
+              const isSuccess = line.includes('[DONE]')
+              const isWarn = line.includes('[WARN]')
+              const hasCheck = line.includes('[OK]')
+              const color = isError ? '#c62828' : isSuccess ? '#2e7d32' : isWarn ? '#e65100' : '#333'
+              const text = line.replace(/\[(ERR|DONE|WARN|OK)\]/g, '').trim()
               const Icon = isError ? ErrorOutlineOutlined
                 : isSuccess ? CheckCircleOutlined
+                : isWarn ? WarningAmberOutlined
                 : hasCheck ? CheckCircleOutlined
                 : null
               return (
