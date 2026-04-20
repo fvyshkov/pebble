@@ -71,9 +71,12 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
 
   useEffect(() => { load() }, [load])
 
-  // Find sheets where this analytic is bound (prefer main, fall back to any binding).
+  // Find sheets where this analytic is the main (indicator) one — only show formulas for those.
   useEffect(() => {
     let cancelled = false
+    setMainSheets([])
+    setSelectedRecordId(null)
+    setFormulas({})
     ;(async () => {
       try {
         const a = await api.getAnalytic(analyticId)
@@ -82,21 +85,15 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
         if (!mid) return
         const sheets = await api.listSheets(mid)
         const mainHits: { id: string; name: string }[] = []
-        const anyHits: { id: string; name: string }[] = []
         for (const s of sheets) {
           const bindings = await api.listSheetAnalytics(s.id)
-          const bound = bindings.some(b => b.analytic_id === analyticId)
-          if (!bound) continue
-          anyHits.push({ id: s.id, name: s.name })
-          try {
-            const m = await api.getMainAnalytic(s.id)
-            if (m.analytic_id === analyticId) mainHits.push({ id: s.id, name: s.name })
-          } catch { /* no main set */ }
+          const binding = bindings.find((b: any) => b.analytic_id === analyticId)
+          if (!binding) continue
+          if (binding.is_main) mainHits.push({ id: s.id, name: s.name })
         }
         if (!cancelled) {
-          const result = mainHits.length > 0 ? mainHits : anyHits
-          setMainSheets(result)
-          if (result.length > 0 && !activeSheetId) setActiveSheetId(result[0].id)
+          setMainSheets(mainHits)
+          if (mainHits.length > 0 && !activeSheetId) setActiveSheetId(mainHits[0].id)
         }
       } catch { /* ignore */ }
     })()

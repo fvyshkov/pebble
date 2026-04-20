@@ -52,6 +52,7 @@ export interface SheetAnalytic {
   sort_order: number
   is_fixed: number
   fixed_record_id: string | null
+  is_main: number
   analytic_name?: string
   analytic_icon?: string
 }
