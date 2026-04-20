@@ -313,9 +313,54 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
     # Track original DB cell keys (before computation adds synthetic ones)
     _original_cell_keys = set(global_cells.keys())
+    # Snapshot original values so we can detect what actually changed.
+    _original_values: dict[tuple, str] = dict(global_cells)
 
+    # ── Pre-filter: remove formulas with unresolvable cross-sheet refs ──
+    # If a formula references [Sheet::indicator] and that indicator doesn't exist
+    # on the target sheet, the formula would evaluate to 0 and destroy imported values.
+    # Better to skip evaluation entirely and keep the imported value.
+    _CROSS_SHEET_REF_RE = re.compile(r'\[([^\]]*::([^\]]+))\]')
+    _skipped_formulas: set[tuple] = set()
+    for gk, formula in list(global_formulas.items()):
+        refs = _CROSS_SHEET_REF_RE.findall(formula)
+        if not refs:
+            continue
+        has_bad_ref = False
+        for full_ref_name, _ in refs:
+            parsed = parse_ref(f"[{full_ref_name}]")
+            ref_sheet = parsed.get("sheet")
+            if not ref_sheet:
+                continue
+            target_sid = sheet_name_to_id.get(ref_sheet.lower())
+            if not target_sid:
+                has_bad_ref = True
+                break
+            target_meta = sheet_meta.get(target_sid)
+            if not target_meta:
+                has_bad_ref = True
+                break
+            name_lower = parsed["name"].lower()
+            found = False
+            for aid, nmap in target_meta["name_to_rids"].items():
+                if aid == target_meta["period_aid"]:
+                    continue
+                if nmap.get(name_lower):
+                    found = True
+                    break
+            if not found:
+                has_bad_ref = True
+                break
+        if has_bad_ref:
+            _skipped_formulas.add(gk)
+    for gk in _skipped_formulas:
+        del global_formulas[gk]
+    if _skipped_formulas:
+        print(f"[formula_engine] Skipped {len(_skipped_formulas)} formulas with unresolvable cross-sheet refs")
     # ── Lazy evaluator ──
-    computed_set = set()
+    # Pre-seed computed_set with skipped formulas so get_cell() returns their stored value
+    # without trying indicator rules or consolidation logic.
+    computed_set = set(_skipped_formulas)
     computing_set = set()
     # Track which branch produced a cell's value — for resolve-formulas API.
     _computed_sources: dict[tuple, str] = {}  # gk → 'cell' | 'rule:<id>' | 'default-sum'
@@ -395,6 +440,9 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 return rule["formula"], f"rule:{rule['id']}"
         return None
 
+    # Track cells with unresolvable references — don't overwrite their DB values.
+    _unresolved: set[tuple] = set()
+
     def get_cell(sheet_id: str, coord_key: str) -> float:
         gk = (sheet_id, coord_key)
         if gk in computed_set:
@@ -430,6 +478,9 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 computing_set.discard(gk)
                 _computed_sources[gk] = formula_source or "rule"
                 _computed_formulas[gk] = formula
+                # Propagate unresolved from children
+                if any((sheet_id, ck) in _unresolved for ck in children):
+                    _unresolved.add(gk)
                 return result
 
             if formula == "LAST" and _is_consolidating(context, meta):
@@ -442,19 +493,47 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 computing_set.discard(gk)
                 _computed_sources[gk] = formula_source or "rule"
                 _computed_formulas[gk] = formula
+                if any((sheet_id, ck) in _unresolved for ck in children):
+                    _unresolved.add(gk)
                 return result
 
             computing_set.add(gk)
+            _has_unresolved_ref = False
 
             def get_ref_value(ref_token: str) -> float:
+                nonlocal _has_unresolved_ref
                 ref = parse_ref(ref_token)
                 ref_sheet = ref.get("sheet")
                 if ref_sheet:
-                    return _resolve_cross_sheet(ref, context, meta, sheet_id)
+                    val = _resolve_cross_sheet(ref, context, meta, sheet_id)
+                    if val == 0.0:
+                        # Check if the reference actually resolved to a real cell
+                        target_sid = sheet_name_to_id.get(ref["sheet"].lower())
+                        if not target_sid:
+                            _has_unresolved_ref = True
+                        else:
+                            # Check if indicator was found
+                            target_meta = sheet_meta.get(target_sid)
+                            if target_meta:
+                                name_lower = ref["name"].lower()
+                                found = False
+                                for aid, nmap in target_meta["name_to_rids"].items():
+                                    if aid == target_meta["period_aid"]:
+                                        continue
+                                    if nmap.get(name_lower):
+                                        found = True
+                                        break
+                                if not found:
+                                    _has_unresolved_ref = True
+                    return val
                 rs = _resolve_local(ref, context, meta)
                 if not rs or rs == coord_key:
                     return 0.0
-                return get_cell(sheet_id, rs)
+                val = get_cell(sheet_id, rs)
+                # Propagate unresolved status from dependencies
+                if (sheet_id, rs) in _unresolved:
+                    _has_unresolved_ref = True
+                return val
 
             result = evaluate(formula, get_ref_value)
             result_str = str(round(result, 6)) if result != 0 else "0"
@@ -463,19 +542,24 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             computing_set.discard(gk)
             _computed_sources[gk] = formula_source or "cell"
             _computed_formulas[gk] = formula
+            if _has_unresolved_ref:
+                _unresolved.add(gk)
             return result
 
         # ── 3. Consolidating coord with no formula → default SUM over children
         if _is_consolidating(context, meta):
             computing_set.add(gk)
+            children_cks = list(_expand_children_one_level(coord_key, context, meta))
             total = 0.0
-            for child_ck in _expand_children_one_level(coord_key, context, meta):
+            for child_ck in children_cks:
                 total += get_cell(sheet_id, child_ck)
             total_str = str(round(total, 6)) if total != 0 else "0"
             global_cells[gk] = total_str
             computed_set.add(gk)
             computing_set.discard(gk)
             _computed_sources[gk] = "default-sum"
+            if any((sheet_id, ck) in _unresolved for ck in children_cks):
+                _unresolved.add(gk)
             return total
 
         # ── 4. Leaf manual value (stored)
@@ -617,7 +701,7 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     #    should be computed via the indicator's consolidation / scoped rule.
     rule_driven: set[tuple] = set()
     for gk in list(_original_cell_keys):
-        if gk in global_formulas:
+        if gk in global_formulas or gk in _skipped_formulas:
             continue
         sid, ck = gk
         meta = sheet_meta.get(sid)
@@ -697,11 +781,35 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                     if gk in computed_set:
                         consol_computed.add(gk)
 
-    # ── Return all computed values grouped by sheet ──
+    # ── Return only cells whose value actually changed ──
+    def _vals_equal(a: str, b: str) -> bool:
+        if a == b:
+            return True
+        try:
+            fa, fb = float(a), float(b)
+            if fa == fb:
+                return True
+            if fa == 0 and fb == 0:
+                return True
+            # Relative tolerance
+            if abs(fa) > 1e-9:
+                return abs(fa - fb) / abs(fa) < 1e-6
+        except (ValueError, TypeError):
+            pass
+        return False
+
+    if _unresolved:
+        print(f"[formula_engine] {len(_unresolved)} cells have unresolvable refs — skipping them")
     result: dict[str, dict[str, str]] = {}
     for gk in list(global_formulas) + list(rule_driven) + list(consol_computed):
+        if gk in _unresolved:
+            continue  # Don't overwrite cells with unresolvable cross-sheet refs
         sid, ck = gk
         new_val = global_cells.get(gk, "")
+        old_val = _original_values.get(gk, "")
+        # Skip if value didn't change.
+        if _vals_equal(old_val, new_val):
+            continue
         result.setdefault(sid, {})[ck] = new_val
 
     return result

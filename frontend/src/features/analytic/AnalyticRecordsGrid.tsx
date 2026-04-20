@@ -126,17 +126,20 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
   }, [analyticId])
 
   // Load formulas for all records in one batch request.
+  const recordCount = records.length
   useEffect(() => {
-    if (!activeSheetId || records.length === 0) return
+    if (!activeSheetId || recordCount === 0) return
     let cancelled = false
     ;(async () => {
       try {
+        console.log('[formulas] fetching for sheet', activeSheetId, 'records:', recordCount)
         const all = await api.getAllIndicatorRules(activeSheetId)
+        console.log('[formulas] got', Object.keys(all).length, 'entries, cancelled:', cancelled)
         if (!cancelled) setFormulas(all)
       } catch (e) { console.warn('getAllIndicatorRules failed', e) }
     })()
     return () => { cancelled = true }
-  }, [activeSheetId, records])
+  }, [activeSheetId, recordCount])
 
   const buildTree = (): TreeNode[] => {
     const byParent: Record<string, AnalyticRecord[]> = { root: [] }
