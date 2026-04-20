@@ -15,6 +15,9 @@ import LogoutOutlined from '@mui/icons-material/LogoutOutlined'
 import CalculateOutlined from '@mui/icons-material/CalculateOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import SmartToyOutlined from '@mui/icons-material/SmartToyOutlined'
+import CheckCircleOutlined from '@mui/icons-material/CheckCircleOutlined'
+import ErrorOutlineOutlined from '@mui/icons-material/ErrorOutlineOutlined'
+import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
@@ -156,11 +159,24 @@ function ImportDialog({ open, onClose, onImported }: {
               border: '1px solid #e0e0e0',
             }}
           >
-            {log.map((line, i) => (
-              <div key={i} style={{ color: line.startsWith('❌') ? '#c62828' : line.startsWith('✅') ? '#2e7d32' : '#333' }}>
-                {line}
-              </div>
-            ))}
+            {log.map((line, i) => {
+              const isError = line.startsWith('❌')
+              const isSuccess = line.startsWith('✅')
+              const hasCheck = line.includes('✓')
+              const color = isError ? '#c62828' : isSuccess ? '#2e7d32' : '#333'
+              // Strip emoji prefixes for clean display with MUI icons
+              const text = line.replace(/^[❌✅]\s*/, '').replace(/✓\s*/g, '')
+              const Icon = isError ? ErrorOutlineOutlined
+                : isSuccess ? CheckCircleOutlined
+                : hasCheck ? CheckCircleOutlined
+                : null
+              return (
+                <Box key={i} sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, color }}>
+                  {Icon && <Icon sx={{ fontSize: 14, mt: '2px', flexShrink: 0 }} />}
+                  <span>{text}</span>
+                </Box>
+              )
+            })}
             {loading && !done && (() => {
               const mins = Math.floor(elapsed / 60)
               const secs = String(elapsed % 60).padStart(2, '0')
@@ -174,7 +190,7 @@ function ImportDialog({ open, onClose, onImported }: {
         )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={handleClose} disabled={loading}>
+        <Button onClick={handleClose} disabled={loading} startIcon={done ? <CloseOutlined /> : undefined}>
           {done ? 'Закрыть' : 'Отмена'}
         </Button>
         {!done && (
