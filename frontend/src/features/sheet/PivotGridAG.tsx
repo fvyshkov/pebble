@@ -1060,9 +1060,9 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           if (resolved?.formula) {
             return resolved.formula
           }
-          if (rule === 'sum_children') return 'Σ сумма нижестоящих'
+          if (rule === 'sum_children') return 'ƒ SUM'
           if (rule === 'empty') return '∅'
-          if (!p.data?.isLeaf) return 'Σ сумма нижестоящих'
+          if (!p.data?.isLeaf) return 'ƒ SUM'
           return '✎ ввод'
         }
         if (rule === 'empty') return ''
@@ -1154,7 +1154,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         const resolved = resolvedFormulaMapRef.current[coordKey]
         if (resolved?.formula) return `ƒ ${resolved.formula}`
         // Consolidating cells (group indicator or period parent)
-        if (!isLeaf || rule === 'sum_children') return 'Σ сумма нижестоящих'
+        if (!isLeaf || rule === 'sum_children') return 'ƒ SUM'
         return null
       },
       tooltipComponent: FormulaTooltip,
@@ -1217,8 +1217,10 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       editable: false,
       valueGetter: (p: any) => {
         if (!p.data) return ''
-        // Check for server-computed consolidation value first.
-        // Construct coord_key by replacing the period leaf with the group record ID.
+        // Check for server-computed consolidation value — but ONLY when
+        // the indicator has a non-SUM consolidation formula (ratio, LAST, etc.).
+        // For SUM (default), always compute client-side to avoid stale zeros
+        // from failed formula resolution.
         if (groupRecordId && p.data.recordIds) {
           const dbOrd = dbOrdRef.current
           const colAId = colAIdRef.current
@@ -1232,14 +1234,19 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           }
           if (parts.length >= 2) {
             const key = parts.join('|')
-            const serverVal = cellMapRef.current[key]
-            if (serverVal != null && serverVal !== '') {
-              const n = parseFloat(String(serverVal))
-              if (!Number.isNaN(n)) return n
+            // Only use server value if there's a non-trivial consolidation formula
+            const resolved = resolvedFormulaMapRef.current[key]
+            const hasConsolFormula = resolved?.formula && resolved.formula !== 'SUM'
+            if (hasConsolFormula) {
+              const serverVal = cellMapRef.current[key]
+              if (serverVal != null && serverVal !== '') {
+                const n = parseFloat(String(serverVal))
+                if (!Number.isNaN(n)) return n
+              }
             }
           }
         }
-        // Fallback: client-side SUM of leaf values
+        // Client-side SUM of leaf values (default consolidation)
         let s = 0, has = false
         for (const id of leafIds) {
           const v = p.data[`p_${id}`]
@@ -1281,7 +1288,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         if (f) return `ƒ ${f}`
         const resolved = resolvedFormulaMapRef.current[key]
         if (resolved?.formula) return `ƒ ${resolved.formula}`
-        return 'Σ сумма нижестоящих'
+        return 'ƒ SUM'
       },
       tooltipComponent: FormulaTooltip,
     }
