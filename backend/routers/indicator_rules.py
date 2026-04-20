@@ -68,6 +68,46 @@ async def get_rules(sheet_id: str, indicator_id: str):
                 "priority": r["priority"] or 0,
                 "formula": r["formula"] or "",
             })
+    # Fallback: if no rules found, look for per-cell formulas in cell_data
+    if not leaf and not consolidation and not scoped:
+        bindings = await db.execute_fetchall(
+            "SELECT analytic_id, is_main FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order",
+            (sheet_id,),
+        )
+        main_idx = next((i for i, b in enumerate(bindings) if b["is_main"]), None)
+        if main_idx is not None:
+            cell_row = await db.execute_fetchall(
+                """SELECT formula FROM cell_data
+                   WHERE sheet_id = ? AND formula IS NOT NULL AND formula != ''
+                   LIMIT 100""",
+                (sheet_id,),
+            )
+            for cr in cell_row:
+                # Not efficient but coord_key is not indexed by indicator_id alone;
+                # match cells whose coord_key has indicator_id at main_idx position.
+                pass
+            # Simpler approach: query by coord_key LIKE pattern
+            # coord_key parts are joined with |, indicator_id is at main_idx
+            like_patterns = []
+            if main_idx == 0:
+                like_patterns.append(f"{indicator_id}|%")
+            elif main_idx == 1:
+                like_patterns.append(f"%|{indicator_id}")
+            else:
+                like_patterns.append(f"%|{indicator_id}|%")
+
+            for pat in like_patterns:
+                cell_row = await db.execute_fetchall(
+                    """SELECT formula FROM cell_data
+                       WHERE sheet_id = ? AND coord_key LIKE ?
+                       AND formula IS NOT NULL AND formula != ''
+                       LIMIT 1""",
+                    (sheet_id, pat),
+                )
+                if cell_row:
+                    leaf = cell_row[0]["formula"] or ""
+                    break
+
     return {"leaf": leaf, "consolidation": consolidation, "scoped": scoped}
 
 

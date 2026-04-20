@@ -1002,12 +1002,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           }
           const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
           const resolved = coordKey ? resolvedFormulaMapRef.current[coordKey] : undefined
-          if (resolved) {
-            // Badge: source → short tag
-            const tag = resolved.source.startsWith('rule:')
-              ? (resolved.kind === 'consolidation' ? 'consol' : resolved.kind === 'leaf' ? 'leaf' : 'rule')
-              : resolved.source
-            return `[${tag}] ${resolved.formula}`
+          if (resolved?.formula) {
+            return resolved.formula
           }
           if (rule === 'sum_children') return 'Σ сумма'
           if (rule === 'empty') return '∅'
@@ -1060,6 +1056,9 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           // rule labels and formula text read naturally.
           s.fontSize = 11
           s.background = '#fafbfc'
+          s.whiteSpace = 'normal'
+          s.lineHeight = '1.4'
+          s.overflow = 'visible'
           if (rule === 'formula') s.color = '#1565c0'
           else if (rule === 'sum_children' || !isLeaf) s.color = '#2e7d32'
           else if (rule === 'empty') s.color = '#bbb'
@@ -1101,13 +1100,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         const formatted = p.valueFormatted != null && p.valueFormatted !== ''
           ? p.valueFormatted
           : (p.value == null ? '' : String(p.value))
-        if (!isLeaf || !coordKey || mode !== 'formulas') {
+        if (!coordKey || mode !== 'formulas') {
           return <span>{formatted}</span>
         }
         return (
           <span
             className="cell-with-menu"
-            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', gap: 4 }}
+            style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', width: '100%', gap: 4 }}
           >
             <span style={{ flex: 1, wordBreak: 'break-word', whiteSpace: 'normal' }}>
               {formatted}
@@ -1733,19 +1732,20 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       <FormulaEditor
         open={formulaEditorOpen}
         formula={formulaMapRef.current[formulaEditorKey] || ''}
+        rule={cellRuleRef.current[formulaEditorKey] || 'manual'}
         modelId={modelId}
         currentSheetId={sheetId}
         onClose={() => setFormulaEditorOpen(false)}
-        onSave={async text => {
+        onSave={async (text, rule) => {
           try {
             await api.saveCells(sheetId, [{
               coord_key: formulaEditorKey,
               formula: text,
-              rule: 'formula',
+              rule: rule as any,
               user_id: currentUserId,
             }])
             formulaMapRef.current[formulaEditorKey] = text
-            cellRuleRef.current[formulaEditorKey] = 'formula'
+            cellRuleRef.current[formulaEditorKey] = rule as any
             // Offer to promote this per-cell formula to a rule on the indicator
             // (P3 snackbar). Requires we know the main analytic — extract
             // indicator_id from coord_key by slicing at its index in dbOrd.

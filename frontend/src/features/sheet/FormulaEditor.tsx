@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button,
-  Box, Typography, TextField, Chip, Divider,
+  Box, Typography, TextField, Chip, Divider, ToggleButtonGroup, ToggleButton,
 } from '@mui/material'
 import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
 import ChevronRightOutlined from '@mui/icons-material/ChevronRightOutlined'
@@ -52,19 +52,24 @@ const TEMPLATES = [
 interface Props {
   open: boolean
   formula: string
-  onSave: (formula: string) => void
+  rule?: string
+  onSave: (formula: string, rule: string) => void
   onClose: () => void
   modelId: string
   currentSheetId?: string
 }
 
-export default function FormulaEditor({ open, formula, onSave, onClose, modelId, currentSheetId }: Props) {
+export default function FormulaEditor({ open, formula, rule: initialRule, onSave, onClose, modelId, currentSheetId }: Props) {
   const [text, setText] = useState(formula)
+  const [rule, setRule] = useState<string>(initialRule || (formula ? 'formula' : 'manual'))
   const [sheets, setSheets] = useState<SheetTree[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const textRef = useRef<HTMLTextAreaElement>(null)
 
-  useEffect(() => { setText(formula) }, [formula])
+  useEffect(() => {
+    setText(formula)
+    setRule(initialRule || (formula ? 'formula' : 'manual'))
+  }, [formula, initialRule])
 
   useEffect(() => {
     if (!open || !modelId) return
@@ -291,9 +296,28 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId,
 
         {/* Center: formula editor */}
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-          <Typography variant="caption" sx={{ color: '#999', mb: 0.5 }}>
-            Формула — клик по показателю вставляет ссылку; клик по значению оси добавляет параметр
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+            <ToggleButtonGroup
+              value={rule}
+              exclusive
+              onChange={(_e, v) => { if (v) setRule(v) }}
+              size="small"
+              sx={{ '& .MuiToggleButton-root': { py: 0.3, px: 1.5, fontSize: 12, textTransform: 'none' } }}
+            >
+              <ToggleButton value="formula">Формула</ToggleButton>
+              <ToggleButton value="manual">Ручной ввод</ToggleButton>
+              <ToggleButton value="sum_children">Σ Сумма</ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
+          {rule === 'manual' ? (
+            <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
+              <Typography variant="body2">Значение вводится вручную</Typography>
+            </Box>
+          ) : rule === 'sum_children' ? (
+            <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
+              <Typography variant="body2">Автосумма дочерних элементов</Typography>
+            </Box>
+          ) : (
           <textarea
             ref={textRef}
             value={text}
@@ -305,6 +329,7 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId,
             }}
             placeholder={'Пример:\nесли [Выручка] > 0 то\n  [Выручка] * 0.2\nиначе\n  0\nконец_если'}
           />
+          )}
         </Box>
 
         {/* Right: expression templates */}
@@ -330,7 +355,7 @@ export default function FormulaEditor({ open, formula, onSave, onClose, modelId,
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Отмена</Button>
-        <Button variant="contained" onClick={() => { onSave(text); onClose() }}>Сохранить</Button>
+        <Button variant="contained" onClick={() => { onSave(rule === 'manual' || rule === 'sum_children' ? '' : text, rule); onClose() }}>Сохранить</Button>
       </DialogActions>
     </Dialog>
   )
