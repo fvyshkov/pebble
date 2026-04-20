@@ -976,15 +976,22 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     end_d = date.fromisoformat(period_end)
     month_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
 
-    # ── Step 5: Process each sheet ──
+    # ── Step 5: Process each sheet (two passes: 1. create structure, 2. import cells) ──
+    from backend.excel_formula_translator import translate_excel_formula
+
     created_sheets = []
     analytic_sort = 1  # 0 is periods
     sheet_sort = 0
 
+    # First pass: create indicator hierarchies for ALL sheets (needed for cross-sheet formula translation)
+    all_sheet_row_maps: dict[str, dict[int, str]] = {}  # {excel_sheet_name: {row: indicator_name}}
+    all_sheet_display_names: dict[str, str] = {}  # {excel_sheet_name: pebble_display_name}
+    all_sheet_data_starts: dict[str, int] = {}  # {excel_sheet_name: data_start_col}
+    sheet_meta: list[dict] = []  # store per-sheet metadata for second pass
+
     for sheet_cfg in sheets_config:
         excel_name = sheet_cfg["excel_name"]
         display_name = sheet_cfg.get("display_name", excel_name)
-        # Sheet name: "ExcelTab. Title" (e.g. "BS. Баланс BaaS")
         sheet_display = display_name if display_name != excel_name else excel_name
         indicators = sheet_cfg.get("indicators", [])
         data_start_col = sheet_cfg.get("data_start_col", 4)
@@ -1009,7 +1016,6 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         )
         analytic_sort += 1
 
-        # Create indicator fields (proper Russian names)
         for sort_i, (fname, fcode, ftype) in enumerate([
             ("Наименование", "name", "string"),
             ("Единица измерения", "unit", "string"),
@@ -1020,10 +1026,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 (fid, indicator_analytic_id, fname, fcode, ftype, sort_i),
             )
 
-        # Fix grouping hierarchy (safety net after Claude/heuristic analysis)
         indicators = _fix_indicator_hierarchy(indicators)
-
-        # Create hierarchical indicator records
         row_to_rid, rid_to_formula, row_to_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
         # Create Pebble sheet
@@ -1034,7 +1037,6 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         )
         sheet_sort += 1
 
-        # Bind analytics: periods first (columns), then indicators (rows)
         for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
             sa_id = str(uuid.uuid4())
             is_main = 1 if aid == indicator_analytic_id else 0
@@ -1043,7 +1045,6 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 (sa_id, pebble_sheet_id, aid, bind_idx, is_main),
             )
 
-        # Grant permissions to all users
         users = await db.execute_fetchall("SELECT id FROM users")
         for u in users:
             pid = str(uuid.uuid4())
@@ -1055,9 +1056,36 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             except Exception:
                 pass
 
+        # Store cross-sheet maps
+        all_sheet_row_maps[excel_name] = row_to_name
+        all_sheet_display_names[excel_name] = sheet_display
+        all_sheet_data_starts[excel_name] = data_start_col
+
+        sheet_meta.append({
+            "excel_name": excel_name,
+            "sheet_display": sheet_display,
+            "pebble_sheet_id": pebble_sheet_id,
+            "row_to_rid": row_to_rid,
+            "rid_to_formula": rid_to_formula,
+            "row_to_name": row_to_name,
+            "data_start_col": data_start_col,
+        })
+
+    # Second pass: import cell data (now all sheet row maps are available for cross-sheet refs)
+    for meta in sheet_meta:
+        excel_name = meta["excel_name"]
+        sheet_display = meta["sheet_display"]
+        pebble_sheet_id = meta["pebble_sheet_id"]
+        row_to_rid = meta["row_to_rid"]
+        rid_to_formula = meta["rid_to_formula"]
+        row_to_name = meta["row_to_name"]
+        data_start_col = meta["data_start_col"]
+
+        ws_f = wb_formulas[excel_name]
+        ws_d = wb_data[excel_name]
+
         # ── Import cell data ──
         # Build col -> month_record_id mapping from date headers
-        # Use ws_d (data_only) because formula-derived dates (=C4+31) are only resolved there
         sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200))
         col_to_period_rid = {}
         for sp in sheet_periods:
@@ -1093,23 +1121,37 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 # if a formula exists. We keep the numeric value Excel computed.
                 is_yellow = _is_input_cell(ws_f.cell(row_num, col_num))
 
-                # Determine rule and formula from Claude analysis
+                # Determine rule and formula — prefer actual Excel formula translated deterministically
                 if is_yellow:
                     rule = "manual"
                     formula_text = ""
-                elif formula_info:
-                    rule = "formula"
-                    is_first = (period_rid == first_period_rid)
-                    if is_first and formula_info.get("formula_first"):
-                        formula_text = formula_info["formula_first"]
-                    else:
-                        formula_text = formula_info.get("formula", "")
                 else:
-                    # Fallback: check Excel formula workbook directly
+                    # Try actual Excel formula first (deterministic, handles cross-sheet)
                     excel_formula = ws_f.cell(row_num, col_num).value
+                    is_first = (period_rid == first_period_rid)
                     if isinstance(excel_formula, str) and excel_formula.startswith("="):
                         rule = "formula"
-                        formula_text = excel_formula  # raw Excel formula as reference
+                        try:
+                            formula_text = translate_excel_formula(
+                                excel_formula,
+                                base_col=col_num,
+                                data_start_col=data_start_col,
+                                row_to_name=row_to_name,
+                                sheet_row_maps=all_sheet_row_maps,
+                                sheet_display_names=all_sheet_display_names,
+                                is_first_period=is_first,
+                                sheet_data_starts=all_sheet_data_starts,
+                            )
+                        except Exception:
+                            # Fallback to Claude's formula if translator fails
+                            formula_text = (formula_info or {}).get("formula", excel_formula)
+                    elif formula_info:
+                        # No Excel formula but Claude detected one (rare edge case)
+                        rule = "formula"
+                        if is_first and formula_info.get("formula_first"):
+                            formula_text = formula_info["formula_first"]
+                        else:
+                            formula_text = formula_info.get("formula", "")
                     else:
                         rule = "manual"
                         formula_text = ""
@@ -1308,26 +1350,32 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         done_indicators = 0
         yield event(f"📊 Всего {total_indicators} показателей в {len(sheets_config)} листах")
 
-        # Process sheets
+        # Process sheets (two passes: 1. create structure, 2. import cells)
+        from backend.excel_formula_translator import translate_excel_formula
+
         created_sheets = []
         analytic_sort = 1
         sheet_sort = 0
         total_cells = 0
+
+        # First pass: create indicator hierarchies for ALL sheets
+        all_sheet_row_maps: dict[str, dict[int, str]] = {}
+        all_sheet_display_names: dict[str, str] = {}
+        all_sheet_data_starts: dict[str, int] = {}
+        sheet_meta: list[dict] = []
 
         for sheet_cfg in sheets_config:
             excel_name = sheet_cfg["excel_name"]
             display_name = sheet_cfg.get("display_name", excel_name)
             sheet_display = display_name if display_name != excel_name else excel_name
             indicators = sheet_cfg.get("indicators", [])
+            data_start_col = sheet_cfg.get("data_start_col", 4)
 
             if excel_name not in wb_formulas.sheetnames or not indicators:
                 continue
 
-            ws_f = wb_formulas[excel_name]
-            ws_d = wb_data[excel_name]
-
             sheet_indicators = _count_indicators(indicators)
-            yield event(f"📋 Создаю лист «{sheet_display}» ({done_indicators}/{total_indicators})...")
+            yield event(f"Создаю структуру «{sheet_display}» ({done_indicators}/{total_indicators})...")
 
             indicator_analytic_id = str(uuid.uuid4())
             await db.execute(
@@ -1348,9 +1396,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     (str(uuid.uuid4()), indicator_analytic_id, fname, fcode, ftype, sort_i),
                 )
 
-            # Fix grouping hierarchy (safety net after Claude/heuristic analysis)
             indicators = _fix_indicator_hierarchy(indicators)
-
             row_to_rid, rid_to_formula, row_to_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
@@ -1375,7 +1421,37 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 except Exception:
                     pass
 
-            # Import cells
+            all_sheet_row_maps[excel_name] = row_to_name
+            all_sheet_display_names[excel_name] = sheet_display
+            all_sheet_data_starts[excel_name] = data_start_col
+
+            done_indicators += sheet_indicators
+            sheet_meta.append({
+                "excel_name": excel_name,
+                "sheet_display": sheet_display,
+                "pebble_sheet_id": pebble_sheet_id,
+                "row_to_rid": row_to_rid,
+                "rid_to_formula": rid_to_formula,
+                "row_to_name": row_to_name,
+                "data_start_col": data_start_col,
+                "sheet_indicators": sheet_indicators,
+            })
+
+        yield event(f"Структура создана. Импорт данных ({len(sheet_meta)} листов)...")
+
+        # Second pass: import cells using deterministic formula translator
+        for meta in sheet_meta:
+            excel_name = meta["excel_name"]
+            sheet_display = meta["sheet_display"]
+            pebble_sheet_id = meta["pebble_sheet_id"]
+            row_to_rid = meta["row_to_rid"]
+            rid_to_formula = meta["rid_to_formula"]
+            row_to_name = meta["row_to_name"]
+            data_start_col = meta["data_start_col"]
+
+            ws_f = wb_formulas[excel_name]
+            ws_d = wb_data[excel_name]
+
             sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200))
             col_to_period_rid = {}
             for sp in sheet_periods:
@@ -1395,31 +1471,39 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     val = ws_d.cell(row_num, col_num).value
                     if val is None:
                         continue
-                    # Skip non-numeric strings (month codes like m1/m2, labels, etc.)
                     if isinstance(val, str):
                         try:
                             val = float(val.replace(",", ".").replace(" ", ""))
                         except (ValueError, AttributeError):
                             continue
-                    # Cell color is authoritative: yellow fill = user input,
-                    # even if a formula exists. Keep the value Excel computed.
                     is_yellow = _is_input_cell(ws_f.cell(row_num, col_num))
                     if is_yellow:
                         rule = "manual"
                         formula_text = ""
-                    elif formula_info:
-                        rule = "formula"
-                        is_first = (period_rid == first_period_rid)
-                        if is_first and formula_info.get("formula_first"):
-                            formula_text = formula_info["formula_first"]
-                        else:
-                            formula_text = formula_info.get("formula", "")
                     else:
-                        # Fallback: check Excel formula workbook directly
                         excel_formula = ws_f.cell(row_num, col_num).value
+                        is_first = (period_rid == first_period_rid)
                         if isinstance(excel_formula, str) and excel_formula.startswith("="):
                             rule = "formula"
-                            formula_text = excel_formula
+                            try:
+                                formula_text = translate_excel_formula(
+                                    excel_formula,
+                                    base_col=col_num,
+                                    data_start_col=data_start_col,
+                                    row_to_name=row_to_name,
+                                    sheet_row_maps=all_sheet_row_maps,
+                                    sheet_display_names=all_sheet_display_names,
+                                    is_first_period=is_first,
+                                    sheet_data_starts=all_sheet_data_starts,
+                                )
+                            except Exception:
+                                formula_text = (formula_info or {}).get("formula", excel_formula)
+                        elif formula_info:
+                            rule = "formula"
+                            if is_first and formula_info.get("formula_first"):
+                                formula_text = formula_info["formula_first"]
+                            else:
+                                formula_text = formula_info.get("formula", "")
                         else:
                             rule = "manual"
                             formula_text = ""
@@ -1442,7 +1526,6 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 )
 
             total_cells += cell_count
-            done_indicators += sheet_indicators
             created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
             consol_msg = f", {n_consol} формул консолидации из Excel" if n_consol else ""
             yield event(f"   [OK]«{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек{consol_msg} ({done_indicators}/{total_indicators})")

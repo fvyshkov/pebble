@@ -199,7 +199,7 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     Returns {sheet_id: {coord_key: new_value}}.
     """
     all_sheets = await db.execute_fetchall(
-        "SELECT id, name FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,))
+        "SELECT id, name, excel_code FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,))
     if not all_sheets:
         return {}
 
@@ -219,6 +219,10 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
         # Register sheet by display name AND common aliases (case-insensitive)
         sheet_name_to_id[sname.lower()] = sid
+        # Register by excel_code (tab name) if available
+        excel_code = s["excel_code"] if "excel_code" in s.keys() else None
+        if excel_code:
+            sheet_name_to_id[excel_code.lower()] = sid
         # Register by known aliases
         nl = sname.lower()
         if "параметр" in nl:
