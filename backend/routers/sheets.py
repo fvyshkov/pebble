@@ -152,10 +152,9 @@ async def add_sheet_analytic(sheet_id: str, body: SheetAnalyticIn):
     )
 
     # Migrate existing cell data: append first leaf record of new analytic to coord_keys.
-    # Values move to the first leaf; other leaves start empty.
-    # Per-cell formulas are stripped (set rule=manual) — indicator formula rules
-    # (stored on indicator_formula_rules, not cell_data) remain and apply uniformly
-    # to ALL records of the new analytic.
+    # Values AND formulas move to the first leaf; other leaves start empty.
+    # Per-cell formulas (e.g. [выдачи]/[партнёры]) keep working because they
+    # reference indicators by name — same-context resolution with the new dimension.
     # HEAD = SUM(leaves) is computed by the formula engine's consolidation phase.
     first_leaf = await _find_first_leaf(db, body.analytic_id)
     if first_leaf:
@@ -165,7 +164,7 @@ async def add_sheet_analytic(sheet_id: str, body: SheetAnalyticIn):
         for c in cells:
             new_key = c["coord_key"] + "|" + first_leaf
             await db.execute(
-                "UPDATE cell_data SET coord_key = ?, rule = 'manual', formula = '' WHERE id = ?",
+                "UPDATE cell_data SET coord_key = ? WHERE id = ?",
                 (new_key, c["id"])
             )
 

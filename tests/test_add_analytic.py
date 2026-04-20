@@ -191,8 +191,9 @@ def test_cells_migrated_to_f1(model, dept):
         assert float(rev["value"]) == 100, f"revenue F1 should be 100, got {rev['value']}"
 
 
-def test_f1_cells_are_manual(model, dept):
-    """Migrated cells should have rule=manual (per-cell formulas stripped)."""
+def test_f1_cells_keep_formulas(model, dept):
+    """Migrated cells should keep their per-cell formulas (they still work
+    with the new dimension because they reference indicators by name)."""
     cells = _cells_by_coord(model["sheet_id"])
     f1 = dept["f1_id"]
 
@@ -200,10 +201,10 @@ def test_f1_cells_are_manual(model, dept):
         profit_key = f"{m}|{model['profit_id']}|{f1}"
         profit = cells.get(profit_key)
         assert profit, f"profit on F1 should exist"
-        assert profit["rule"] == "manual", \
-            f"profit F1 should be manual (indicator rules apply), got rule={profit['rule']}"
-        assert not profit.get("formula"), \
-            f"profit F1 should have no per-cell formula, got: {profit.get('formula')}"
+        assert profit["rule"] == "formula", \
+            f"profit F1 should keep formula rule, got rule={profit['rule']}"
+        assert profit.get("formula") == "[выручка] - [расходы]", \
+            f"profit F1 should keep formula, got: {profit.get('formula')}"
 
 
 def test_f2_cells_empty(model, dept):
