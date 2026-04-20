@@ -377,7 +377,9 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   ))}
                   {mainSheets.length > 0 && (() => {
                     const f = formulas[node.record.id]
-                    const txt = f?.leaf || f?.consolidation || ''
+                    const leaf = f?.leaf || ''
+                    const consol = f?.consolidation || ''
+                    const txt = leaf || consol || ''
                     return (
                       <TableCell
                         data-testid={`formula-cell-${node.record.id}`}
@@ -392,7 +394,8 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                         }}
                         title={txt || 'Нет формулы — нажмите для настройки'}
                       >
-                        {txt || '—'}
+                        {leaf || '—'}
+                        {consol && <span style={{ color: '#999', fontSize: 10, marginLeft: leaf ? 4 : 0 }}>{leaf ? ` [${consol}]` : consol}</span>}
                       </TableCell>
                     )
                   })()}
