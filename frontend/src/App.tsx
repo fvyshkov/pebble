@@ -341,7 +341,19 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const handleImported = useCallback((modelId: string) => {
     setSelection({ type: 'model', id: modelId, modelId })
     setRefreshKey(k => k + 1)
-    // No auto-recalc after import — Excel values are already correct
+    // Auto-recalc after import — consolidation formulas need computation
+    const startedAt = Date.now()
+    setCalcRunning(true)
+    setCalcProgress({ done: 0, total: 1, startedAt })
+    api.calculateModelStream(modelId, (data) => {
+      if (data.phase === 'start') {
+        setCalcProgress({ done: 0, total: data.total_sheets || 1, totalCells: data.total_cells ?? undefined, computed: 0, startedAt })
+      } else if (data.phase === 'sheet_done') {
+        setCalcProgress({ done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet, totalCells: data.total_cells ?? undefined, computed: data.computed ?? undefined, startedAt })
+      } else if (data.phase === 'done') {
+        setCalcProgress(null); setCalcRunning(false)
+      }
+    }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
   }, [])
 
   // When switching to data/formulas mode, if a sheet is selected — keep it.
