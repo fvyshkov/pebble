@@ -277,11 +277,15 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
               let removed = 0
               for (let i = 0; i < sheets.length; i++) {
                 const sheet = sheets[i]
-                const existing = await api.listSheetAnalytics(sheet.id)
-                const sa = existing.find((s: any) => s.analytic_id === analyticId)
-                if (sa) {
-                  await api.removeSheetAnalytic(sheet.id, sa.id)
-                  removed++
+                try {
+                  const existing = await api.listSheetAnalytics(sheet.id)
+                  const sa = existing.find((s: any) => s.analytic_id === analyticId)
+                  if (sa) {
+                    await api.removeSheetAnalytic(sheet.id, sa.id)
+                    removed++
+                  }
+                } catch (e) {
+                  console.error(`Failed to remove analytic from sheet ${sheet.name}:`, e)
                 }
                 setBulkProgress({ done: i + 1, total: sheets.length })
               }

@@ -208,21 +208,38 @@ async def remove_sheet_analytic(sheet_id: str, sa_id: str):
         for r in recs:
             rec_ids.add(r["id"])
 
-        # Strip the part from coord_keys
+        # Strip the part from coord_keys.
+        # Multiple cells (HEAD, F1, F2) may collapse to the same key — keep the
+        # one with the most data (longest value) and delete duplicates.
         cells = await db.execute_fetchall(
-            "SELECT id, coord_key FROM cell_data WHERE sheet_id = ?", (sheet_id,)
+            "SELECT id, coord_key, value FROM cell_data WHERE sheet_id = ?", (sheet_id,)
         )
+        # Group by new_key to detect collisions
+        new_key_map: dict[str, list] = {}  # new_key → [(cell_id, value_len)]
+        delete_ids: list[str] = []
         for c in cells:
             parts = c["coord_key"].split("|")
             if pos < len(parts) and parts[pos] in rec_ids:
                 new_parts = parts[:pos] + parts[pos + 1:]
-                if new_parts:
-                    await db.execute(
-                        "UPDATE cell_data SET coord_key = ? WHERE id = ?",
-                        ("|".join(new_parts), c["id"]),
-                    )
+                if not new_parts:
+                    delete_ids.append(c["id"])
                 else:
-                    await db.execute("DELETE FROM cell_data WHERE id = ?", (c["id"],))
+                    nk = "|".join(new_parts)
+                    val_len = len(c["value"] or "") if c["value"] and c["value"] != "0" else 0
+                    new_key_map.setdefault(nk, []).append((c["id"], val_len, nk))
+
+        for nk, entries in new_key_map.items():
+            # Keep the entry with the longest value, delete the rest
+            entries.sort(key=lambda x: x[1], reverse=True)
+            keep_id, _, _ = entries[0]
+            await db.execute(
+                "UPDATE cell_data SET coord_key = ? WHERE id = ?", (nk, keep_id)
+            )
+            for cid, _, _ in entries[1:]:
+                delete_ids.append(cid)
+
+        for cid in delete_ids:
+            await db.execute("DELETE FROM cell_data WHERE id = ?", (cid,))
 
     await db.execute("DELETE FROM sheet_analytics WHERE id = ? AND sheet_id = ?", (sa_id, sheet_id))
     await db.commit()

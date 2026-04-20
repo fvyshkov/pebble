@@ -1744,7 +1744,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           onColumnMoved={e => { if (e.finished) captureColumnState() }}
           onColumnPinned={captureColumnState}
           onColumnVisible={captureColumnState}
-          tooltipShowDelay={300}
+          tooltipShowDelay={1000}
           animateRows={false}
           stopEditingWhenCellsLoseFocus
           singleClickEdit={false}
