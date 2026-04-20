@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import {
   Box, Typography, IconButton, Tooltip, Table, TableHead, TableBody,
   TableRow, TableCell, TextField, MenuItem, Select, FormControl, InputLabel,
@@ -62,6 +62,30 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
   const [panelWidth, setPanelWidth] = useState<number>(420)
   // Formulas map: recordId → { leaf, consolidation } for display in the grid.
   const [formulas, setFormulas] = useState<Record<string, { leaf: string; consolidation: string }>>({})
+  // Resizable column widths: key = field.id or 'formula', value = width in px.
+  const [colWidths, setColWidths] = useState<Record<string, number>>({})
+  const resizingRef = useRef<{ key: string; startX: number; startW: number } | null>(null)
+
+  const handleResizeStart = (key: string, e: ReactMouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const startX = e.clientX
+    const startW = colWidths[key] || 150
+    resizingRef.current = { key, startX, startW }
+    const onMove = (ev: globalThis.MouseEvent) => {
+      if (!resizingRef.current) return
+      const delta = ev.clientX - resizingRef.current.startX
+      const newW = Math.max(60, resizingRef.current.startW + delta)
+      setColWidths(prev => ({ ...prev, [resizingRef.current!.key]: newW }))
+    }
+    const onUp = () => {
+      resizingRef.current = null
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
 
   const load = useCallback(async () => {
     const [fs, rs] = await Promise.all([api.listFields(analyticId), api.listRecords(analyticId)])
@@ -264,12 +288,35 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
       </Box>
 
       {fields.length > 0 && (
-        <Table size="small" sx={{ '& td, & th': { py: 0.5, px: 1 } }}>
+        <Table size="small" sx={{ tableLayout: 'fixed', '& td, & th': { py: 0.5, px: 1, wordBreak: 'break-word' } }}>
           <TableHead>
             <TableRow>
-              {fields.map(f => <TableCell key={f.id}>{f.name}</TableCell>)}
+              {fields.map(f => (
+                <TableCell
+                  key={f.id}
+                  sx={{ position: 'relative', width: colWidths[f.id] || 'auto', userSelect: 'none' }}
+                >
+                  {f.name}
+                  <Box
+                    onMouseDown={e => handleResizeStart(f.id, e)}
+                    sx={{
+                      position: 'absolute', right: 0, top: 0, bottom: 0, width: 5,
+                      cursor: 'col-resize', '&:hover': { bgcolor: '#1976d2' },
+                    }}
+                  />
+                </TableCell>
+              ))}
               {mainSheets.length > 0 && (
-                <TableCell sx={{ minWidth: 200 }}>Формула</TableCell>
+                <TableCell sx={{ position: 'relative', width: colWidths['formula'] || 200, userSelect: 'none' }}>
+                  Формула
+                  <Box
+                    onMouseDown={e => handleResizeStart('formula', e)}
+                    sx={{
+                      position: 'absolute', right: 0, top: 0, bottom: 0, width: 5,
+                      cursor: 'col-resize', '&:hover': { bgcolor: '#1976d2' },
+                    }}
+                  />
+                </TableCell>
               )}
             </TableRow>
           </TableHead>
@@ -339,10 +386,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                           fontFamily: 'monospace',
                           fontSize: 12,
                           color: txt ? 'text.secondary' : 'text.disabled',
-                          maxWidth: 300,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
+                          wordBreak: 'break-word',
                           '&:hover': { bgcolor: '#e3f2fd' },
                         }}
                         title={txt || 'Нет формулы — нажмите для настройки'}
