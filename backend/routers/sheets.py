@@ -151,19 +151,18 @@ async def add_sheet_analytic(sheet_id: str, body: SheetAnalyticIn):
         (said, sheet_id, body.analytic_id, body.sort_order, int(body.is_fixed), body.fixed_record_id),
     )
 
-    # Migrate existing cell data: append root (HEAD) record of new analytic to coord_keys.
-    # This keeps old values at the HEAD level; leaf records (F1, F2, ...) start empty and editable.
-    # Strip formulas — HEAD should consolidate (SUM of leaves), not re-evaluate old leaf formulas.
-    root_rec = await _find_root_record(db, body.analytic_id)
-    if root_rec:
+    # Migrate existing cell data: append first leaf record of new analytic to coord_keys.
+    # Old values + formulas move to the first leaf (e.g. F1); other leaves (F2, ...) start empty.
+    # HEAD = SUM(leaves) is computed by the formula engine's consolidation phase.
+    first_leaf = await _find_first_leaf(db, body.analytic_id)
+    if first_leaf:
         cells = await db.execute_fetchall(
             "SELECT id, coord_key FROM cell_data WHERE sheet_id = ?", (sheet_id,)
         )
         for c in cells:
-            new_key = c["coord_key"] + "|" + root_rec
+            new_key = c["coord_key"] + "|" + first_leaf
             await db.execute(
-                "UPDATE cell_data SET coord_key = ?, rule = 'manual', formula = '' WHERE id = ?",
-                (new_key, c["id"])
+                "UPDATE cell_data SET coord_key = ? WHERE id = ?", (new_key, c["id"])
             )
 
     await db.commit()
