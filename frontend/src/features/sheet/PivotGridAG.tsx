@@ -1617,9 +1617,11 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     for (let depth = leafPath.length - 1; depth >= 1; depth--) {
       const parentPath = leafPath.slice(0, depth)
       const parent = byPath[parentPath.join('|')]
-      if (!parent) continue
+      if (!parent || parent.isLeaf) continue
+      // Always propagate SUM upward for group rows as immediate feedback.
+      // Server recalc will correct with proper formula values (weighted avg, etc.).
       const rule = parent[`__rule_${leafId}`]
-      if (rule !== 'sum_children') continue
+      if (rule === 'empty') continue
       const kids = kidsByPath[parentPath.join('|')] || []
       let s = 0, has = false
       for (const k of kids) {
