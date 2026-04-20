@@ -233,10 +233,29 @@ def _extract_sheet_text(ws, sheet_name: str, max_rows: int = 500) -> str:
 
 
 def _is_input_cell(cell) -> bool:
-    """Check if cell has beige/yellow input background (theme=7)."""
+    """Check if cell has yellow/beige input background (theme=7 or yellow RGB)."""
     fill = cell.fill
-    if fill and fill.fgColor and fill.fgColor.theme == 7:
-        return True
+    if not fill or not fill.fgColor or fill.patternType != "solid":
+        return False
+    fg = fill.fgColor
+    # Theme-based yellow (theme=7 in many spreadsheets)
+    try:
+        if fg.theme == 7:
+            return True
+    except (TypeError, ValueError):
+        pass
+    # RGB-based yellow/beige detection
+    if fg.type == "rgb" and isinstance(fg.rgb, str):
+        rgb = fg.rgb.lstrip("0")[-6:] if len(fg.rgb) >= 6 else fg.rgb
+        r_val = int(rgb[0:2], 16) if len(rgb) >= 6 else 0
+        g_val = int(rgb[2:4], 16) if len(rgb) >= 6 else 0
+        b_val = int(rgb[4:6], 16) if len(rgb) >= 6 else 0
+        # Yellow-ish: high red, high green, low blue
+        if r_val > 200 and g_val > 200 and b_val < 100:
+            return True
+        # Beige/light yellow: high red, high green, medium blue
+        if r_val > 220 and g_val > 220 and b_val < 180 and b_val < r_val - 40:
+            return True
     return False
 
 
