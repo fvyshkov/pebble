@@ -270,13 +270,14 @@ class ViewSettingsIn(BaseModel):
 
 
 @router.get("/{sheet_id}/view-settings")
-async def get_view_settings(sheet_id: str):
+async def get_view_settings(sheet_id: str, user_id: str = ""):
     db = get_db()
+    import json
     rows = await db.execute_fetchall(
-        "SELECT settings FROM sheet_view_settings WHERE sheet_id = ?", (sheet_id,)
+        "SELECT settings FROM sheet_view_settings WHERE sheet_id = ? AND user_id = ?",
+        (sheet_id, user_id),
     )
     if rows:
-        import json
         return json.loads(rows[0]["settings"])
     return {}
 
@@ -285,19 +286,12 @@ async def get_view_settings(sheet_id: str):
 async def save_view_settings(sheet_id: str, body: ViewSettingsIn):
     db = get_db()
     import json
+    user_id = body.settings.pop("_user_id", "") if isinstance(body.settings, dict) else ""
     settings_json = json.dumps(body.settings, ensure_ascii=False)
-    existing = await db.execute_fetchall(
-        "SELECT sheet_id FROM sheet_view_settings WHERE sheet_id = ?", (sheet_id,)
+    await db.execute(
+        """INSERT INTO sheet_view_settings (sheet_id, user_id, settings) VALUES (?, ?, ?)
+           ON CONFLICT(sheet_id, user_id) DO UPDATE SET settings = excluded.settings""",
+        (sheet_id, user_id, settings_json),
     )
-    if existing:
-        await db.execute(
-            "UPDATE sheet_view_settings SET settings = ? WHERE sheet_id = ?",
-            (settings_json, sheet_id),
-        )
-    else:
-        await db.execute(
-            "INSERT INTO sheet_view_settings (sheet_id, settings) VALUES (?, ?)",
-            (sheet_id, settings_json),
-        )
     await db.commit()
     return {"ok": True}

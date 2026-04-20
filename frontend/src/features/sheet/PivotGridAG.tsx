@@ -461,7 +461,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       let effectivePinned = pinned
       if (!vsLoadedRef.current) {
         try {
-          const vs: any = await api.getViewSettings(sheetId)
+          const vs: any = await api.getViewSettings(sheetId, currentUserId)
           if (vs?.order?.length) {
             const valid = new Set(dbOrd)
             curOrder = vs.order.filter((id: string) => valid.has(id))
@@ -473,6 +473,9 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           }
           if (vs?.columnState && Array.isArray(vs.columnState) && vs.columnState.length > 0) {
             savedColumnStateRef.current = vs.columnState
+          }
+          if (vs?.colLevelToggles && typeof vs.colLevelToggles === 'object') {
+            setColLevelToggles(vs.colLevelToggles)
           }
         } catch { /* ignore */ }
         vsLoadedRef.current = true
@@ -502,6 +505,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       }
       walkForLabel(colTree, 0)
       setColLevelNames(detectedLevels)
+      // Default all period levels to ON (expanded) unless user saved a preference.
+      if (Object.keys(colLevelTogglesRef.current).length === 0 && detectedLevels.length > 0) {
+        const defaults: Record<number, boolean> = {}
+        for (const { level } of detectedLevels) defaults[level] = true
+        setColLevelToggles(defaults)
+        colLevelTogglesRef.current = defaults
+      }
 
       // ── Column definitions ──────────────────────────────────────────────
       // Reset sum-col leaf map — populated as makeSumColDef runs below.
@@ -752,12 +762,14 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       api.saveViewSettings(sheetId, {
         pinned,
         columnState: savedColumnStateRef.current,
+        colLevelToggles,
+        _user_id: currentUserId,
       }).catch(() => { /* ignore */ })
     }, 500)
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     }
-  }, [pinned, columnStateVersion, sheetId])
+  }, [pinned, columnStateVersion, sheetId, colLevelToggles, currentUserId])
 
   const handlePin = useCallback((analyticId: string, recordId: string) => {
     // Don't pin the column analytic — it's the grid's column axis.

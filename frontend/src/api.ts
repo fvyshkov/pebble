@@ -94,8 +94,8 @@ export const getAllIndicatorRules = (sheetId: string) =>
   fetch(`${BASE}/sheets/${sheetId}/indicator-rules-all`).then(r => json<Record<string, { leaf: string; consolidation: string }>>(r))
 
 // View settings
-export const getViewSettings = (sheetId: string) =>
-  fetch(`${BASE}/sheets/${sheetId}/view-settings`).then(r => json<any>(r))
+export const getViewSettings = (sheetId: string, userId?: string) =>
+  fetch(`${BASE}/sheets/${sheetId}/view-settings${userId ? `?user_id=${userId}` : ''}`).then(r => json<any>(r))
 export const saveViewSettings = (sheetId: string, settings: any) =>
   fetch(`${BASE}/sheets/${sheetId}/view-settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings }) }).then(r => json<any>(r))
 

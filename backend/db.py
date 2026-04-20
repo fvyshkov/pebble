@@ -132,8 +132,10 @@ CREATE INDEX IF NOT EXISTS idx_ch_sheet_coord ON cell_history(sheet_id, coord_ke
 
 -- ── Sheet View Settings ─────────────────────────────────────
 CREATE TABLE IF NOT EXISTS sheet_view_settings (
-    sheet_id    TEXT PRIMARY KEY REFERENCES sheets(id) ON DELETE CASCADE,
-    settings    TEXT NOT NULL DEFAULT '{}'
+    sheet_id    TEXT NOT NULL REFERENCES sheets(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL DEFAULT '',
+    settings    TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (sheet_id, user_id)
 );
 
 -- ── Analytic Record Permissions ─────────────────────────────
@@ -201,6 +203,24 @@ async def init_db():
             await _db.execute(sql)
         except Exception:
             pass
+    # Migrate sheet_view_settings: add user_id column (composite PK)
+    try:
+        await _db.execute("ALTER TABLE sheet_view_settings ADD COLUMN user_id TEXT NOT NULL DEFAULT ''")
+        # Recreate with composite PK — SQLite can't alter PK, so rebuild
+        await _db.executescript("""
+            CREATE TABLE IF NOT EXISTS sheet_view_settings_new (
+                sheet_id TEXT NOT NULL REFERENCES sheets(id) ON DELETE CASCADE,
+                user_id  TEXT NOT NULL DEFAULT '',
+                settings TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (sheet_id, user_id)
+            );
+            INSERT OR IGNORE INTO sheet_view_settings_new (sheet_id, user_id, settings)
+                SELECT sheet_id, COALESCE(user_id, ''), settings FROM sheet_view_settings;
+            DROP TABLE sheet_view_settings;
+            ALTER TABLE sheet_view_settings_new RENAME TO sheet_view_settings;
+        """)
+    except Exception:
+        pass
     # Ensure default admin user exists
     existing = await _db.execute("SELECT id FROM users WHERE username = 'admin'")
     row = await existing.fetchone()
