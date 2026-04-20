@@ -371,25 +371,19 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     _computed_formulas: dict[tuple, str] = {}  # gk → formula text used
 
     def _is_consolidating(context: dict, meta: dict) -> bool:
-        """True if any non-main-analytic coord points to a record with children."""
-        main = meta.get("main_aid")
+        """True if ANY axis (including main) coord points to a record with children."""
         children = meta.get("children_by_rid", {})
         for aid, rid in context.items():
-            if aid == main:
-                continue
             if children.get(rid):
                 return True
         return False
 
     def _expand_children_one_level(coord_key: str, context: dict, meta: dict) -> list[str]:
-        """Cartesian of 1-level children along every consolidating non-main axis."""
-        main = meta.get("main_aid")
+        """Cartesian of 1-level children along every consolidating axis (including main)."""
         children = meta.get("children_by_rid", {})
         ordered_aids = meta["ordered_aids"]
         axes = []
         for aid in ordered_aids:
-            if aid == main:
-                continue
             rid = context.get(aid)
             if rid and children.get(rid):
                 axes.append((aid, children[rid]))
@@ -854,11 +848,12 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         if not main_aid or not period_aid:
             continue
 
-        # Find non-main, non-period analytics that have parent records (need consolidation)
+        # Find ALL analytics (including main) that have parent records needing consolidation.
+        # Main-axis parents (e.g. "Итого" group indicators) also need SUM over children.
         consol_axes: list[tuple[str, list[str]]] = []  # (aid, [parent_rids])
         for aid in ordered_aids:
-            if aid == main_aid or aid == period_aid:
-                continue
+            if aid == period_aid:
+                continue  # period consolidation handled above
             parent_rids = []
             for rid, ch in children_by.items():
                 if ch:
@@ -896,8 +891,10 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                     other_axes_aids2.append(aid)
             other_combos2 = list(itertools.product(*other_axes_rids2)) if other_axes_rids2 else [()]
 
-            for p_rid in all_period_rids:
-                for ind_id in ind_rids2:
+            if consol_aid == main_aid:
+                # Main-axis consolidation: parent indicator records
+                # (e.g. "Итого" group) are the parents, not a separate axis.
+                for p_rid in all_period_rids:
                     for parent_rid in parent_rids:
                         for other_vals in other_combos2:
                             parts = []
@@ -906,8 +903,6 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                                 if aid == period_aid:
                                     parts.append(p_rid)
                                 elif aid == main_aid:
-                                    parts.append(ind_id)
-                                elif aid == consol_aid:
                                     parts.append(parent_rid)
                                 else:
                                     parts.append(other_vals[oi])
@@ -918,6 +913,29 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                                 get_cell(sid, ck)
                             if gk in computed_set:
                                 consol_computed.add(gk)
+            else:
+                for p_rid in all_period_rids:
+                    for ind_id in ind_rids2:
+                        for parent_rid in parent_rids:
+                            for other_vals in other_combos2:
+                                parts = []
+                                oi = 0
+                                for aid in ordered_aids:
+                                    if aid == period_aid:
+                                        parts.append(p_rid)
+                                    elif aid == main_aid:
+                                        parts.append(ind_id)
+                                    elif aid == consol_aid:
+                                        parts.append(parent_rid)
+                                    else:
+                                        parts.append(other_vals[oi])
+                                        oi += 1
+                                ck = "|".join(parts)
+                                gk = (sid, ck)
+                                if gk not in computed_set:
+                                    get_cell(sid, ck)
+                                if gk in computed_set:
+                                    consol_computed.add(gk)
 
     # ── Return only cells whose value actually changed ──
     def _vals_equal(a: str, b: str) -> bool:
@@ -1036,7 +1054,7 @@ async def resolve_formula_for_display(db, sheet_id: str, coord_key: str) -> dict
 
     # 3. Base consolidation / leaf.
     is_consol = any(
-        aid != main_aid and children_by_rid.get(rid)
+        children_by_rid.get(rid)
         for aid, rid in context.items()
     )
     base_kind = "consolidation" if is_consol else "leaf"

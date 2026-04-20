@@ -429,6 +429,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   const colAIdRef = useRef<string>('')
   const pinnedRef = useRef<Record<string, string>>({})
   const analyticsRef = useRef<Record<string, Analytic>>({})
+  /** For each row analytic, the single root record ID (if exactly one root with children exists). */
+  const rootRecordByAidRef = useRef<Record<string, string>>({})
 
   // Build coord key for (row × period) using DB order and right-truncation
   // lookup against cellMapRef.
@@ -467,6 +469,16 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       analyticsRef.current = aMap
       setAnalyticsMap(aMap)
       setRecordNames(recNameMap)
+
+      // Build root record map: for each analytic, if there's a single root node
+      // with children, store its ID. Used to fill missing analytics in Σ column keys.
+      const rootMap: Record<string, string> = {}
+      for (const [aid, nodes] of Object.entries(rMap)) {
+        if (nodes.length === 1 && nodes[0].children.length > 0) {
+          rootMap[aid] = nodes[0].record.id
+        }
+      }
+      rootRecordByAidRef.current = rootMap
 
       const dbOrd = sa.map(b => b.analytic_id)
       dbOrdRef.current = dbOrd
@@ -1195,6 +1207,22 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   // Level-aggregate column (e.g. year total across quarters). Non-editable,
   // summed from the group's leaf period fields for the current row.
   function makeSumColDef(groupLabel: string, leafIds: string[], groupRecordId?: string): ColDef {
+    /** Build coord_key for Σ column, filling missing analytics from rootRecordByAidRef. */
+    const buildSumKey = (recordIds: Record<string, string> | undefined): string | null => {
+      if (!groupRecordId || !recordIds) return null
+      const dbOrd = dbOrdRef.current
+      const colAId = colAIdRef.current
+      const roots = rootRecordByAidRef.current
+      const parts: string[] = []
+      for (const a of dbOrd) {
+        if (a === colAId) parts.push(groupRecordId)
+        else {
+          const rid = recordIds[a] || roots[a]
+          if (rid) parts.push(rid)
+        }
+      }
+      return parts.length === dbOrd.length ? parts.join('|') : null
+    }
     const label = `Σ ${groupLabel}`
     // Stable colId so we can target flashing — suffixed with leaf-id joins so
     // two different Σ columns covering different leaf sets stay distinct.
@@ -1209,23 +1237,12 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       editable: false,
       valueGetter: (p: any) => {
         if (!p.data) return ''
-        // Server-computed consolidation value — only for LEAF indicator rows.
-        // Group indicator rows (Итого, Потребительский кредит, etc.) don't have
-        // month-level cells, so their quarter cell is always 0 in the engine.
-        // For groups, fall through to client-side SUM which aggregates visible month data.
-        if (groupRecordId && p.data.recordIds && p.data.isLeaf) {
-          const dbOrd = dbOrdRef.current
-          const colAId = colAIdRef.current
-          const parts: string[] = []
-          for (const a of dbOrd) {
-            if (a === colAId) parts.push(groupRecordId)
-            else {
-              const rid = p.data.recordIds[a]
-              if (rid) parts.push(rid)
-            }
-          }
-          if (parts.length >= 2) {
-            const key = parts.join('|')
+        // Server-computed consolidation value — single source of truth.
+        // The formula engine computes these from indicator_formula_rules,
+        // including for group indicator rows (sum of children).
+        {
+          const key = buildSumKey(p.data.recordIds)
+          if (key) {
             const serverVal = cellMapRef.current[key]
             if (serverVal != null && serverVal !== '') {
               const n = parseFloat(String(serverVal))
@@ -1233,8 +1250,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             }
           }
         }
-        // Client-side SUM: sum leaf period values for this row.
-        // Used for group rows (always) and leaf rows without server data (before recalc).
+        // Fallback: client-side SUM when no server cell exists yet
+        // (e.g. before first recalc).
         let s = 0, has = false
         for (const id of leafIds) {
           const v = p.data[`p_${id}`]
@@ -1246,20 +1263,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       },
       valueFormatter: (p: any) => {
         if (mode === 'formulas') {
-          // Show the consolidation formula for this indicator
-          if (!groupRecordId || !p.data?.recordIds) return 'ƒ SUM'
-          const dbOrd = dbOrdRef.current
-          const colAId = colAIdRef.current
-          const parts: string[] = []
-          for (const a of dbOrd) {
-            if (a === colAId) parts.push(groupRecordId)
-            else {
-              const rid = p.data.recordIds[a]
-              if (rid) parts.push(rid)
-            }
-          }
-          if (parts.length >= 2) {
-            const key = parts.join('|')
+          const key = buildSumKey(p.data?.recordIds)
+          if (key) {
             const resolved = resolvedFormulaMapRef.current[key]
             if (resolved?.formula) return resolved.formula
           }
@@ -1279,21 +1284,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         ...(mode === 'formulas' ? { fontSize: 11, fontFamily: 'monospace', whiteSpace: 'normal', lineHeight: '1.4', overflow: 'visible' } : {}),
       }),
       tooltipValueGetter: (p: any) => {
-        if (!groupRecordId || !p.data?.recordIds) return null
-        const dbOrd = dbOrdRef.current
-        const colAId = colAIdRef.current
-        const parts: string[] = []
-        for (const a of dbOrd) {
-          if (a === colAId) parts.push(groupRecordId)
-          else {
-            const rid = p.data.recordIds[a]
-            if (rid) parts.push(rid)
-          }
-        }
-        if (parts.length < 2) return null
-        const key = parts.join('|')
-        // Σ columns are consolidation cells — show consolidation formula from
-        // indicator rules (single source of truth), not per-cell formula.
+        const key = buildSumKey(p.data?.recordIds)
+        if (!key) return null
         const resolved = resolvedFormulaMapRef.current[key]
         if (resolved?.formula) return `ƒ ${resolved.formula}`
         return 'ƒ SUM'

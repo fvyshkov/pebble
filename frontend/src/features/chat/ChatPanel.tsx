@@ -330,7 +330,7 @@ export default function ChatPanel({
           <Tooltip title={
             voiceUnsupported
               ? 'Голосовой ввод не поддерживается в этом браузере'
-              : listening ? 'Выключить голосовой ввод' : 'Голосовой ввод (авто-отправка через паузу)'
+              : listening ? 'Выключить голосовой ввод (⎵⎵)' : 'Голосовой ввод (⎵⎵ — двойной пробел)'
           }>
             <span>
               <IconButton
