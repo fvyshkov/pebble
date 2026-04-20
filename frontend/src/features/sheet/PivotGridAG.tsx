@@ -1005,9 +1005,9 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           if (resolved?.formula) {
             return resolved.formula
           }
-          if (rule === 'sum_children') return 'Σ сумма'
+          if (rule === 'sum_children') return 'Σ сумма нижестоящих'
           if (rule === 'empty') return '∅'
-          if (!p.data?.isLeaf) return 'Σ сумма'
+          if (!p.data?.isLeaf) return 'Σ сумма нижестоящих'
           return '✎ ввод'
         }
         if (rule === 'empty') return ''
@@ -1059,6 +1059,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           s.whiteSpace = 'normal'
           s.lineHeight = '1.4'
           s.overflow = 'visible'
+          s.paddingTop = '4px'
           if (rule === 'formula') s.color = '#1565c0'
           else if (rule === 'sum_children' || !isLeaf) s.color = '#2e7d32'
           else if (rule === 'empty') s.color = '#bbb'
