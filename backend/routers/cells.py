@@ -172,7 +172,12 @@ async def _recalc_model(db, sheet_id: str) -> int:
     total = 0
     for sid, changes in result.items():
         for ck, val in changes.items():
-            await db.execute("UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?", (val, sid, ck))
+            await db.execute(
+                """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
+                   VALUES (?, ?, ?, ?, 'formula')
+                   ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value""",
+                (str(__import__('uuid').uuid4()), sid, ck, val),
+            )
         total += len(changes)
     return total
 
@@ -249,7 +254,12 @@ async def calculate_model_stream(model_id: str):
         done_sheets = 0
         for sid, changes in result.items():
             for ck, val in changes.items():
-                await db.execute("UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?", (val, sid, ck))
+                await db.execute(
+                    """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
+                       VALUES (?, ?, ?, ?, 'formula')
+                       ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value""",
+                    (str(__import__('uuid').uuid4()), sid, ck, val),
+                )
             total += len(changes)
             done_sheets += 1
             sheet_name = next((s["name"] for s in sheets if s["id"] == sid), sid)

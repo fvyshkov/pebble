@@ -445,6 +445,14 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                 modelId={modelId!}
                 indicatorId={selectedRecordId!}
                 indicatorName={selectedRecordName}
+                onRulesChanged={(leaf, consolidation) => {
+                  if (selectedRecordId) {
+                    setFormulas(prev => ({
+                      ...prev,
+                      [selectedRecordId]: { leaf, consolidation },
+                    }))
+                  }
+                }}
               />
             </Box>
           </>

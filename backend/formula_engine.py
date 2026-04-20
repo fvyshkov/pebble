@@ -418,6 +418,32 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 formula, formula_source = resolved
 
         if formula:
+            # Special consolidation keywords: AVERAGE, LAST
+            if formula == "AVERAGE" and _is_consolidating(context, meta):
+                computing_set.add(gk)
+                children = list(_expand_children_one_level(coord_key, context, meta))
+                total = sum(get_cell(sheet_id, ck) for ck in children)
+                result = total / len(children) if children else 0.0
+                result_str = str(round(result, 6)) if result != 0 else "0"
+                global_cells[gk] = result_str
+                computed_set.add(gk)
+                computing_set.discard(gk)
+                _computed_sources[gk] = formula_source or "rule"
+                _computed_formulas[gk] = formula
+                return result
+
+            if formula == "LAST" and _is_consolidating(context, meta):
+                computing_set.add(gk)
+                children = list(_expand_children_one_level(coord_key, context, meta))
+                result = get_cell(sheet_id, children[-1]) if children else 0.0
+                result_str = str(round(result, 6)) if result != 0 else "0"
+                global_cells[gk] = result_str
+                computed_set.add(gk)
+                computing_set.discard(gk)
+                _computed_sources[gk] = formula_source or "rule"
+                _computed_formulas[gk] = formula
+                return result
+
             computing_set.add(gk)
 
             def get_ref_value(ref_token: str) -> float:
@@ -602,9 +628,78 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             get_cell(sid, ck)
             rule_driven.add(gk)
 
+    # ── Compute consolidation cells for parent periods (year/quarter totals).
+    #    These cells may not exist in cell_data but need to be computed by
+    #    aggregating children (months → quarter → year).
+    consol_computed: set[tuple] = set()
+    for sid, meta in sheet_meta.items():
+        ordered_aids = meta["ordered_aids"]
+        children_by = meta["children_by_rid"]
+        record_by = meta.get("record_by_id", {})
+        name_to_rids = meta.get("name_to_rids", {})
+        main_aid = meta.get("main_aid")
+        period_aid = meta.get("period_aid")
+        if not main_aid or not period_aid:
+            continue
+
+        # Collect all indicator record IDs (main analytic)
+        ind_rids: set[str] = set()
+        for _, rids_list in name_to_rids.get(main_aid, {}).items():
+            ind_rids.update(rids_list)
+        if not ind_rids:
+            continue
+
+        # Collect parent period records (those with children in the period analytic)
+        parent_period_rids: list[str] = []
+        for rid, ch in children_by.items():
+            if ch:
+                rec = record_by.get(rid)
+                if rec and rec.get("analytic_id") == period_aid:
+                    parent_period_rids.append(rid)
+
+        # Collect all record IDs for non-main, non-period analytics
+        other_axes_rids: list[list[str]] = []
+        other_axes_aids: list[str] = []
+        for aid in ordered_aids:
+            if aid == main_aid or aid == period_aid:
+                continue
+            rids_for_axis = []
+            for _, rids_list in name_to_rids.get(aid, {}).items():
+                rids_for_axis.extend(rids_list)
+            if rids_for_axis:
+                other_axes_rids.append(rids_for_axis)
+                other_axes_aids.append(aid)
+
+        # Build all combos of other axes (usually empty for 2-analytic sheets)
+        if other_axes_rids:
+            other_combos = list(itertools.product(*other_axes_rids))
+        else:
+            other_combos = [()]
+
+        for prec_id in parent_period_rids:
+            for ind_id in ind_rids:
+                for other_vals in other_combos:
+                    parts = []
+                    oi = 0
+                    for aid in ordered_aids:
+                        if aid == period_aid:
+                            parts.append(prec_id)
+                        elif aid == main_aid:
+                            parts.append(ind_id)
+                        else:
+                            parts.append(other_vals[oi])
+                            oi += 1
+                    ck = "|".join(parts)
+                    gk = (sid, ck)
+                    if gk in computed_set:
+                        continue
+                    get_cell(sid, ck)
+                    if gk in computed_set:
+                        consol_computed.add(gk)
+
     # ── Return all computed values grouped by sheet ──
     result: dict[str, dict[str, str]] = {}
-    for gk in list(global_formulas) + list(rule_driven):
+    for gk in list(global_formulas) + list(rule_driven) + list(consol_computed):
         sid, ck = gk
         new_val = global_cells.get(gk, "")
         result.setdefault(sid, {})[ck] = new_val

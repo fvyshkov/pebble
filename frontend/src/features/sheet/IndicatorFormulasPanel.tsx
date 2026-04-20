@@ -21,6 +21,7 @@ interface Props {
   modelId: string
   indicatorId: string
   indicatorName: string
+  onRulesChanged?: (leaf: string, consolidation: string) => void
 }
 
 type Mode = 'manual' | 'formula'
@@ -165,7 +166,7 @@ function RecordTreePicker({
 }
 
 export default function IndicatorFormulasPanel({
-  sheetId, modelId, indicatorId, indicatorName,
+  sheetId, modelId, indicatorId, indicatorName, onRulesChanged,
 }: Props) {
   const { addOp, getOverrides } = usePending()
   const [leafFormula, setLeafFormula] = useState('')
@@ -199,14 +200,16 @@ export default function IndicatorFormulasPanel({
   // Auto-queue a pending op whenever edited state changes.
   useEffect(() => {
     if (!editedRef.current) return
+    const leafVal = leafMode === 'formula' ? leafFormula : ''
+    const consolVal = consolMode === 'formula' ? consolFormula : ''
     addOp({
       key: `indicatorRules:${sheetId}:${indicatorId}`,
       type: 'putIndicatorRules',
       id: sheetId,
       parentId: indicatorId,
       data: {
-        consolidation: consolMode === 'formula' ? consolFormula : '',
-        leaf: leafMode === 'formula' ? leafFormula : '',
+        consolidation: consolVal,
+        leaf: leafVal,
         scoped: scoped.map(r => ({
           id: r.id,
           scope: r.scope,
@@ -215,6 +218,7 @@ export default function IndicatorFormulasPanel({
         })),
       },
     })
+    onRulesChanged?.(leafVal, consolVal)
   }, [consolFormula, consolMode, leafFormula, leafMode, scoped])
 
   useEffect(() => {

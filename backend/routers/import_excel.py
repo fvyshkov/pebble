@@ -403,6 +403,223 @@ def _detect_periods_from_headers(ws, max_col: int) -> list[dict]:
     return periods
 
 
+# ── Total column detection (year / quarter totals) ────────────────────────
+
+import re as _re_total
+
+_YEAR_RE = _re_total.compile(r'^\s*(\d{4})\s*$')
+_QUARTER_RE = _re_total.compile(
+    r'(?:\d[- ]?й?\s*)?(?:кв(?:артал)?|Q)\s*\d?\s*\d{4}|'
+    r'\d{4}\s*(?:кв(?:артал)?|Q)\s*\d|'
+    r'(?:итого|всего)\s+за\s+(?:год|квартал)',
+    _re_total.IGNORECASE,
+)
+_TOTAL_KEYWORDS = _re_total.compile(
+    r'(?:итого|всего|total|год|year)',
+    _re_total.IGNORECASE,
+)
+# Simple SUM pattern: =SUM(...) where interior is a single range or comma-separated refs
+_SUM_ONLY_RE = _re_total.compile(
+    r'^=?\s*SUM\s*\([^)]+\)\s*$',
+    _re_total.IGNORECASE,
+)
+# Simple addition: =A1+B1+C1+... (all same-row refs, no division/multiplication)
+_SIMPLE_ADD_RE = _re_total.compile(
+    r'^=?\s*\$?[A-Z]{1,3}\$?\d+(?:\s*\+\s*\$?[A-Z]{1,3}\$?\d+)+\s*$',
+    _re_total.IGNORECASE,
+)
+
+
+def _detect_total_columns(
+    ws_data, ws_formulas, col_to_period_rid: dict[int, str], max_col: int,
+) -> list[dict]:
+    """Detect year/quarter total columns by scanning headers.
+
+    Returns list of {col, type: 'year'|'quarter', label}.
+    Skips columns that are already in col_to_period_rid (monthly data columns).
+    """
+    totals = []
+    period_cols = set(col_to_period_rid.keys())
+
+    for c in range(1, min(max_col + 1, 100)):
+        if c in period_cols:
+            continue
+        # Scan first 6 header rows for year/quarter/total markers
+        for r in range(1, 7):
+            val = ws_data.cell(r, c).value
+            if val is None:
+                continue
+            sval = str(val).strip()
+            # Year total: header is just a 4-digit year
+            ym = _YEAR_RE.match(sval)
+            if ym:
+                year = int(ym.group(1))
+                if 1990 <= year <= 2100:
+                    totals.append({"col": c, "type": "year", "label": sval})
+                    break
+            # Quarter total
+            if _QUARTER_RE.search(sval):
+                totals.append({"col": c, "type": "quarter", "label": sval})
+                break
+            # Generic total keywords
+            if _TOTAL_KEYWORDS.search(sval):
+                totals.append({"col": c, "type": "year", "label": sval})
+                break
+
+    return totals
+
+
+def _is_sum_formula(excel_formula: str) -> bool:
+    """Check if an Excel formula is a plain SUM or simple addition."""
+    if not excel_formula or not isinstance(excel_formula, str):
+        return False
+    f = excel_formula.strip()
+    if not f.startswith("="):
+        return False
+    if _SUM_ONLY_RE.match(f):
+        return True
+    if _SIMPLE_ADD_RE.match(f):
+        return True
+    return False
+
+
+# Pattern for AVERAGE(range)
+_AVERAGE_RE = _re_total.compile(r'^=?\s*AVERAGE\s*\([^)]+\)\s*$', _re_total.IGNORECASE)
+# Single cell ref: =O13 or =$O$13
+_SINGLE_REF_RE = _re_total.compile(r'^=?\s*\$?([A-Z]{1,3})\$?(\d+)\s*$', _re_total.IGNORECASE)
+# Same-column formula: refs only to cells in the same column as the total
+# E.g. =AO5/AO2 where AO is the total column
+_SAME_COL_FORMULA_RE = _re_total.compile(r'\$?([A-Z]{1,3})\$?(\d+)')
+
+
+def _classify_consolidation_formula(
+    excel_formula: str,
+    target_col: int,
+    row_num: int,
+    row_to_name: dict[int, str],
+    period_cols: set[int],
+) -> str | None:
+    """Classify a year/quarter total column formula and return a Pebble
+    consolidation formula, or None to skip (SUM = default).
+
+    Returns:
+      - None: SUM/default, don't store
+      - "AVERAGE": average consolidation
+      - "LAST": take last child value (stock/balance indicator)
+      - formula string: Pebble formula like "[indicator_a] / [indicator_b]"
+    """
+    from openpyxl.utils import column_index_from_string
+
+    if not excel_formula or not isinstance(excel_formula, str):
+        return None
+    f = excel_formula.strip().lstrip("=").strip()
+    if not f:
+        return None
+
+    full = excel_formula.strip()
+
+    # 1. SUM → skip
+    if _is_sum_formula(full):
+        return None
+
+    # 2. AVERAGE → special consolidation
+    if _AVERAGE_RE.match(full):
+        return "AVERAGE"
+
+    # 3. Single cell reference (e.g. =O13) — points to a monthly column in same row
+    sm = _SINGLE_REF_RE.match(full)
+    if sm:
+        ref_col = column_index_from_string(sm.group(1).replace("$", ""))
+        ref_row = int(sm.group(2).replace("$", ""))
+        if ref_row == row_num and ref_col in period_cols:
+            return "LAST"
+        # Single ref to different row in same column → just a copy, skip
+        if ref_col == target_col:
+            return None
+        return None
+
+    # 4. Formula with refs only in the same total column → ratio formula
+    # E.g. =AO5/AO2 where AO is col 41
+    refs = _SAME_COL_FORMULA_RE.findall(f)
+    if refs:
+        all_same_col = all(
+            column_index_from_string(col_str.replace("$", "")) == target_col
+            for col_str, _ in refs
+        )
+        if all_same_col:
+            # Translate: replace each cell ref with [indicator_name]
+            result = f
+            for col_str, row_str in refs:
+                ref_row = int(row_str.replace("$", ""))
+                name = row_to_name.get(ref_row)
+                if not name:
+                    return None  # can't resolve → skip
+                result = result.replace(f"{col_str}{row_str}", f"[{name}]", 1)
+                # Also handle $ variants
+                result = result.replace(f"${col_str}${row_str}", f"[{name}]")
+                result = result.replace(f"${col_str}{row_str}", f"[{name}]")
+                result = result.replace(f"{col_str}${row_str}", f"[{name}]")
+            return result
+
+    return None
+
+
+async def _extract_and_store_consolidation_rules(
+    db,
+    ws_formulas,
+    total_cols: list[dict],
+    row_to_rid: dict[int, str],
+    row_to_name: dict[int, str],
+    pebble_sheet_id: str,
+    period_cols: set[int] | None = None,
+    sheet_row_maps: dict[str, dict[int, str]] | None = None,
+    sheet_display_names: dict[str, str] | None = None,
+) -> int:
+    """Extract consolidation formulas from total columns and store non-SUM ones
+    as indicator_formula_rules(kind='consolidation').
+
+    Returns the number of rules written.
+    """
+    if not total_cols:
+        return 0
+
+    # Prefer year-level total columns over quarter-level
+    year_cols = [tc for tc in total_cols if tc["type"] == "year"]
+    target_cols = year_cols if year_cols else total_cols
+
+    # Use the first suitable total column
+    target_col = target_cols[0]["col"]
+    pcols = period_cols or set()
+
+    written = 0
+    seen_indicators: set[str] = set()
+
+    for row_num, indicator_rid in row_to_rid.items():
+        if indicator_rid in seen_indicators:
+            continue
+
+        cell_val = ws_formulas.cell(row_num, target_col).value
+        if not cell_val or not isinstance(cell_val, str) or not cell_val.startswith("="):
+            continue
+
+        pebble_formula = _classify_consolidation_formula(
+            cell_val, target_col, row_num, row_to_name, pcols,
+        )
+        if pebble_formula is None:
+            continue  # SUM or unrecognized → default
+
+        seen_indicators.add(indicator_rid)
+        await db.execute(
+            "INSERT OR IGNORE INTO indicator_formula_rules "
+            "(id, sheet_id, indicator_id, kind, scope_json, priority, formula) "
+            "VALUES (?, ?, ?, 'consolidation', '{}', 0, ?)",
+            (str(uuid.uuid4()), pebble_sheet_id, indicator_rid, pebble_formula),
+        )
+        written += 1
+
+    return written
+
+
 # ── Period hierarchy creation (mirrors generate_periods from analytics.py) ─
 
 async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str],
@@ -583,7 +800,18 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
                 await insert_items(item["children"], rid)
 
     await insert_items(indicators, None)
-    return row_to_rid, rid_to_formula
+
+    # Build row_to_name mapping for formula translator
+    row_to_name: dict[int, str] = {}
+    def collect_names(items: list[dict]):
+        for item in items:
+            if item.get("row") and item.get("name"):
+                row_to_name[item["row"]] = item["name"]
+            if item.get("children"):
+                collect_names(item["children"])
+    collect_names(indicators)
+
+    return row_to_rid, rid_to_formula, row_to_name
 
 
 # ── Main import endpoint ───────────────────────────────────────────────────
@@ -710,7 +938,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         indicators = _fix_indicator_hierarchy(indicators)
 
         # Create hierarchical indicator records
-        row_to_rid, rid_to_formula = await _create_indicator_records(db, indicator_analytic_id, indicators)
+        row_to_rid, rid_to_formula, row_to_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
         # Create Pebble sheet
         pebble_sheet_id = str(uuid.uuid4())
@@ -812,6 +1040,16 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     cell_count += 1
                 except Exception:
                     pass  # Skip duplicates
+
+        # Extract consolidation formulas from total columns (year/quarter totals)
+        total_cols = _detect_total_columns(ws_d, ws_f, col_to_period_rid, min(ws_d.max_column or 1, 200))
+        if total_cols:
+            n_consol = await _extract_and_store_consolidation_rules(
+                db, ws_f, total_cols, row_to_rid, row_to_name, pebble_sheet_id,
+                period_cols=set(col_to_period_rid.keys()),
+            )
+            if n_consol:
+                log.info(f"[import] Extracted {n_consol} consolidation formulas from Excel totals for «{sheet_display}»")
 
         created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
 
@@ -1023,7 +1261,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             # Fix grouping hierarchy (safety net after Claude/heuristic analysis)
             indicators = _fix_indicator_hierarchy(indicators)
 
-            row_to_rid, rid_to_formula = await _create_indicator_records(db, indicator_analytic_id, indicators)
+            row_to_rid, rid_to_formula, row_to_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
             await db.execute("INSERT INTO sheets (id, model_id, name, sort_order, excel_code) VALUES (?,?,?,?,?)",
@@ -1104,10 +1342,20 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     except Exception:
                         pass
 
+            # Extract consolidation formulas from total columns
+            total_cols = _detect_total_columns(ws_d, ws_f, col_to_period_rid, min(ws_d.max_column or 1, 200))
+            n_consol = 0
+            if total_cols:
+                n_consol = await _extract_and_store_consolidation_rules(
+                    db, ws_f, total_cols, row_to_rid, row_to_name, pebble_sheet_id,
+                    period_cols=set(col_to_period_rid.keys()),
+                )
+
             total_cells += cell_count
             done_indicators += sheet_indicators
             created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
-            yield event(f"   ✓ «{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек ({done_indicators}/{total_indicators})")
+            consol_msg = f", {n_consol} формул консолидации из Excel" if n_consol else ""
+            yield event(f"   ✓ «{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек{consol_msg} ({done_indicators}/{total_indicators})")
 
         await db.commit()
 
