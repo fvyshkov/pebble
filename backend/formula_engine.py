@@ -712,6 +712,65 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             get_cell(sid, ck)
             rule_driven.add(gk)
 
+    # ── Evaluate indicator rules for ALL leaf combos (not just existing cells).
+    #    When a new analytic dimension is added, cells for non-first leaves
+    #    don't exist in cell_data yet, but indicator rules should still apply.
+    for sid, meta in sheet_meta.items():
+        if not meta.get("rules_by_indicator"):
+            continue
+        ordered_aids = meta["ordered_aids"]
+        main_aid = meta.get("main_aid")
+        period_aid = meta.get("period_aid")
+        if not main_aid or not period_aid:
+            continue
+        children_by = meta["children_by_rid"]
+        name_to_rids = meta.get("name_to_rids", {})
+
+        # Indicators that have rules
+        indicators_with_rules = set(meta["rules_by_indicator"].keys())
+        if not indicators_with_rules:
+            continue
+
+        # Collect leaf records for each axis
+        leaf_rids_by_aid: dict[str, list[str]] = {}
+        for aid in ordered_aids:
+            if aid == main_aid:
+                continue
+            all_rids = []
+            for _, rids_list in name_to_rids.get(aid, {}).items():
+                all_rids.extend(rids_list)
+            # Leaf = no children
+            leaves = [r for r in all_rids if not children_by.get(r)]
+            leaf_rids_by_aid[aid] = leaves if leaves else all_rids
+
+        # Generate all leaf-level combos for indicators with rules
+        axes_order = [aid for aid in ordered_aids if aid != main_aid]
+        if not axes_order:
+            continue
+        axes_rids = [leaf_rids_by_aid.get(aid, []) for aid in axes_order]
+        if not all(axes_rids):
+            continue
+
+        for ind_rid in indicators_with_rules:
+            for combo in itertools.product(*axes_rids):
+                parts = []
+                ci = 0
+                for aid in ordered_aids:
+                    if aid == main_aid:
+                        parts.append(ind_rid)
+                    else:
+                        parts.append(combo[ci])
+                        ci += 1
+                ck = "|".join(parts)
+                gk = (sid, ck)
+                if gk in computed_set:
+                    continue
+                context = _context_from_key(ck, ordered_aids)
+                if _resolve_indicator_formula(sid, context, meta) is not None:
+                    get_cell(sid, ck)
+                    if gk in computed_set:
+                        rule_driven.add(gk)
+
     # ── Compute consolidation cells for parent periods (year/quarter totals).
     #    These cells may not exist in cell_data but need to be computed by
     #    aggregating children (months → quarter → year).
