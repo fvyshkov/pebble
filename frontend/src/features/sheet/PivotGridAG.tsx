@@ -1755,8 +1755,28 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             if (indicatorId) {
               setPromoteSnack({ coordKey: formulaEditorKey, formula: text, indicatorId })
             }
-            // Reload to pull recomputed values + flash changed cells.
-            load()
+            // Fetch only the updated cell(s) instead of reloading the entire grid.
+            const freshCells = await api.getCellsPartial(sheetId, [formulaEditorKey], currentUserId)
+            for (const c of freshCells) {
+              cellMapRef.current[c.coord_key] = c.value ?? ''
+              if (c.rule) cellRuleRef.current[c.coord_key] = c.rule as CellRule
+              if (c.formula) formulaMapRef.current[c.coord_key] = c.formula
+            }
+            // Find the period column from coord_key and update the row node in-place.
+            const colAIdx = dbOrdRef.current.indexOf(colAIdRef.current)
+            const periodRecId = colAIdx >= 0 && colAIdx < parts.length ? parts[colAIdx] : ''
+            const colId = periodRecId ? `p_${periodRecId}` : ''
+            const grid = gridApiRef.current
+            if (grid && colId) {
+              const newVal = cellMapRef.current[formulaEditorKey] ?? ''
+              grid.forEachNode(node => {
+                if (node.data?.[`__coord_${periodRecId}`] === formulaEditorKey) {
+                  node.data[colId] = newVal
+                  grid.refreshCells({ rowNodes: [node], columns: [colId], force: true })
+                  grid.flashCells({ rowNodes: [node], columns: [colId] })
+                }
+              })
+            }
           } catch (err: any) {
             setError(`Не удалось сохранить формулу: ${err?.message || err}`)
           }

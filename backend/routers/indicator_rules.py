@@ -177,10 +177,7 @@ async def get_all_rules(sheet_id: str):
         elif r["kind"] == "consolidation" and not entry["consolidation"]:
             entry["consolidation"] = r["formula"] or ""
 
-    if result:
-        return result
-
-    # 2. Fallback: extract per-indicator formulas from cell_data.
+    # 2. Also extract per-indicator formulas from cell_data (merge with rules).
     # coord_key = "period_rec_id|indicator_rec_id" — take the indicator part.
     # Pick any one non-empty formula per indicator record (they're typically the same).
     cell_rows = await db.execute_fetchall(
@@ -208,9 +205,12 @@ async def get_all_rules(sheet_id: str):
         if len(parts) <= main_idx:
             continue
         rec_id = parts[main_idx]
-        if rec_id in result:
-            continue  # already have a formula for this record
-        result[rec_id] = {"leaf": cr["formula"] or "", "consolidation": ""}
+        if rec_id in result and result[rec_id]["leaf"]:
+            continue  # already have a formula from indicator_formula_rules
+        if rec_id not in result:
+            result[rec_id] = {"leaf": cr["formula"] or "", "consolidation": ""}
+        elif not result[rec_id]["leaf"]:
+            result[rec_id]["leaf"] = cr["formula"] or ""
 
     return result
 

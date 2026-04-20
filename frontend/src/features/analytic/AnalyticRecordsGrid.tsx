@@ -101,6 +101,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
     setMainSheets([])
     setSelectedRecordId(null)
     setFormulas({})
+    setActiveSheetId(null)
     ;(async () => {
       try {
         const a = await api.getAnalytic(analyticId)
@@ -117,7 +118,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
         }
         if (!cancelled) {
           setMainSheets(mainHits)
-          if (mainHits.length > 0 && !activeSheetId) setActiveSheetId(mainHits[0].id)
+          if (mainHits.length > 0) setActiveSheetId(mainHits[0].id)
         }
       } catch { /* ignore */ }
     })()
@@ -132,7 +133,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
       try {
         const all = await api.getAllIndicatorRules(activeSheetId)
         if (!cancelled) setFormulas(all)
-      } catch { /* no rules */ }
+      } catch (e) { console.warn('getAllIndicatorRules failed', e) }
     })()
     return () => { cancelled = true }
   }, [activeSheetId, records])
@@ -288,7 +289,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
       </Box>
 
       {fields.length > 0 && (
-        <Table size="small" sx={{ tableLayout: 'fixed', '& td, & th': { py: 0.5, px: 1, wordBreak: 'break-word' } }}>
+        <Table size="small" sx={{ tableLayout: 'fixed', '& td, & th': { py: 0.5, px: 1, wordBreak: 'break-word', whiteSpace: 'normal', overflow: 'hidden' } }}>
           <TableHead>
             <TableRow>
               {fields.map(f => (
