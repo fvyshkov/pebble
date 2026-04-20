@@ -22,6 +22,7 @@ interface Props {
   sheetsOnly?: boolean
   currentUserId?: string
   onImportClick?: () => void
+  isAdmin?: boolean
 }
 
 interface ModelTree {
@@ -30,7 +31,7 @@ interface ModelTree {
   analytics: Analytic[]
 }
 
-export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId, onImportClick }: Props) {
+export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId, onImportClick, isAdmin }: Props) {
   const [trees, setTrees] = useState<ModelTree[]>([])
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string[]>([])
@@ -89,8 +90,10 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
     onSelect({ type: 'model', id: m.id, modelId: m.id })
   }
 
-  const handleDeleteModel = async (e: React.MouseEvent, id: string) => {
+  const handleDeleteModel = async (e: React.MouseEvent, id: string, name?: string) => {
     e.stopPropagation()
+    const label = name || 'эту модель'
+    if (!window.confirm(`Удалить модель «${label}»? Все листы, данные и формулы будут удалены безвозвратно.`)) return
     await api.deleteModel(id)
     if (selection?.modelId === id) onSelect(null)
     load()
@@ -182,7 +185,20 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                 <TreeItem
                   key={model.id}
                   itemId={`model:${model.id}`}
-                  label={<div className="tree-item-label"><span style={{ fontWeight: 600 }}>{model.name || 'Без названия'}</span></div>}
+                  label={
+                    <div className="tree-item-label">
+                      <span style={{ fontWeight: 600 }}>{model.name || 'Без названия'}</span>
+                      {isAdmin && (
+                        <span className="actions">
+                          <Tooltip title="Удалить модель">
+                            <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, model.name)}>
+                              <DeleteOutlineOutlined sx={{ fontSize: 16 }} />
+                            </IconButton>
+                          </Tooltip>
+                        </span>
+                      )}
+                    </div>
+                  }
                 >
                   {filteredSheets.map(s => (
                     <TreeItem
@@ -247,9 +263,11 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                   <div className="tree-item-label">
                     <span>{model.name || 'Без названия'}</span>
                     <span className="actions">
-                      <IconButton size="small" onClick={e => handleDeleteModel(e, model.id)}>
-                        <DeleteOutlineOutlined sx={{ fontSize: 16 }} />
-                      </IconButton>
+                      <Tooltip title="Удалить модель">
+                        <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, model.name)}>
+                          <DeleteOutlineOutlined sx={{ fontSize: 16 }} />
+                        </IconButton>
+                      </Tooltip>
                     </span>
                   </div>
                 }
