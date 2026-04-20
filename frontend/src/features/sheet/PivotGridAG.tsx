@@ -721,7 +721,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   // (so HEAD cells driven by consolidation/scoped rules show their formula +
   // source badge in the grid instead of a generic "Σ сумма" label).
   useEffect(() => {
-    if (mode !== 'formulas' || !sheetId) return
+    if (!sheetId) return
     const keys = Object.keys(cellMapRef.current)
     if (keys.length === 0) return
     let cancelled = false
@@ -1137,12 +1137,16 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       tooltipValueGetter: (p: any) => {
         const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
         if (!coordKey) return null
+        const rule: CellRule = p.data?.[`__rule_${periodRecId}`] || 'manual'
+        const isLeaf = !!p.data?.isLeaf
         // Per-cell formula
         const f = formulaMapRef.current[coordKey]
         if (f) return `ƒ ${f}`
         // Resolved indicator rule formula
         const resolved = resolvedFormulaMapRef.current[coordKey]
         if (resolved?.formula) return `ƒ ${resolved.formula}`
+        // Consolidating cells (group indicator or period parent)
+        if (!isLeaf || rule === 'sum_children') return 'Σ сумма нижестоящих'
         return null
       },
       tooltipComponent: FormulaTooltip,
