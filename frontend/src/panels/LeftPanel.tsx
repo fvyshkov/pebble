@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { SimpleTreeView } from '@mui/x-tree-view/SimpleTreeView'
 import { TreeItem } from '@mui/x-tree-view/TreeItem'
-import { IconButton, Tooltip } from '@mui/material'
+import { IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button } from '@mui/material'
 import AddOutlined from '@mui/icons-material/AddOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
@@ -37,6 +37,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
   const [expanded, setExpanded] = useState<string[]>([])
   const [dragSheet, setDragSheet] = useState<{ modelId: string; sheetId: string } | null>(null)
   const [dragOverSheet, setDragOverSheet] = useState<string | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null)
 
   const load = useCallback(async () => {
     if (sheetsOnly && currentUserId) {
@@ -92,8 +93,13 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
 
   const handleDeleteModel = async (e: React.MouseEvent, id: string, name?: string) => {
     e.stopPropagation()
-    const label = name || 'эту модель'
-    if (!window.confirm(`Удалить модель «${label}»? Все листы, данные и формулы будут удалены безвозвратно.`)) return
+    setDeleteConfirm({ id, name: name || 'Без названия' })
+  }
+
+  const confirmDeleteModel = async () => {
+    if (!deleteConfirm) return
+    const { id } = deleteConfirm
+    setDeleteConfirm(null)
     await api.deleteModel(id)
     if (selection?.modelId === id) onSelect(null)
     load()
@@ -223,6 +229,18 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
             })}
           </SimpleTreeView>
         </div>
+        <Dialog open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)}>
+          <DialogTitle>Удалить модель</DialogTitle>
+          <DialogContent>
+            <DialogContentText>
+              Удалить модель «{deleteConfirm?.name}»? Все листы, данные и формулы будут удалены безвозвратно.
+            </DialogContentText>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setDeleteConfirm(null)}>Отмена</Button>
+            <Button onClick={confirmDeleteModel} color="error" variant="contained">Удалить</Button>
+          </DialogActions>
+        </Dialog>
       </div>
     )
   }
@@ -359,6 +377,18 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
           })}
         </SimpleTreeView>
       </div>
+      <Dialog open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)}>
+        <DialogTitle>Удалить модель</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Удалить модель «{deleteConfirm?.name}»? Все листы, данные и формулы будут удалены безвозвратно.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteConfirm(null)}>Отмена</Button>
+          <Button onClick={confirmDeleteModel} color="error" variant="contained">Удалить</Button>
+        </DialogActions>
+      </Dialog>
     </div>
   )
 }

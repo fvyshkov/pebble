@@ -369,8 +369,12 @@ def _detect_periods_from_headers(ws, max_col: int) -> list[dict]:
     =C4+31 accumulate drift (e.g. March 4 instead of March 1), but the
     intent is always month-start boundaries.
     """
+    # Build lowercase month-name → month-number lookup for text-based headers
+    _MONTH_LOWER = {name.lower(): i + 1 for i, name in enumerate(MONTH_NAMES_RU)}
+
     periods = []
     date_row = None
+    text_date_row = None  # fallback: row with text like "январь 2026"
 
     for r in range(1, 7):
         for c in range(1, min(max_col + 1, 50)):
@@ -378,25 +382,45 @@ def _detect_periods_from_headers(ws, max_col: int) -> list[dict]:
             if isinstance(v, datetime):
                 date_row = r
                 break
+            # Check for text-based month headers: "январь 2026", "Февраль 2025", etc.
+            if isinstance(v, str) and not text_date_row:
+                parts = v.strip().split()
+                if len(parts) == 2 and parts[0].lower() in _MONTH_LOWER:
+                    try:
+                        int(parts[1])
+                        text_date_row = r
+                    except ValueError:
+                        pass
         if date_row:
             break
 
-    if date_row is None:
+    if date_row is None and text_date_row is None:
         return []
 
     seen_months = set()
+    scan_row = date_row or text_date_row
     for c in range(1, max_col + 1):
-        v = ws.cell(date_row, c).value
+        v = ws.cell(scan_row, c).value
+        year, month = None, None
         if isinstance(v, datetime):
-            # Normalize to 1st of month (fixes drift from =C4+31 formulas)
-            normalized = datetime(v.year, v.month, 1)
-            month_key = f"{v.year}-{v.month:02d}"
+            year, month = v.year, v.month
+        elif isinstance(v, str):
+            parts = v.strip().split()
+            if len(parts) == 2 and parts[0].lower() in _MONTH_LOWER:
+                try:
+                    year = int(parts[1])
+                    month = _MONTH_LOWER[parts[0].lower()]
+                except ValueError:
+                    pass
+        if year and month:
+            normalized = datetime(year, month, 1)
+            month_key = f"{year}-{month:02d}"
             if month_key in seen_months:
                 continue  # Skip duplicate months
             seen_months.add(month_key)
             periods.append({
                 "col": c,
-                "name": f"{MONTH_NAMES_RU[v.month - 1]} {v.year}",
+                "name": f"{MONTH_NAMES_RU[month - 1]} {year}",
                 "date": normalized,
             })
 
@@ -836,11 +860,15 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         ws = wb_formulas[sn]
         sheet_texts[sn] = _extract_sheet_text(ws, sn)
         # Collect dates for period detection (normalize to 1st of month)
-        for r in range(1, 7):
-            for c in range(1, min((ws.max_column or 1) + 1, 200)):
-                v = ws.cell(r, c).value
-                if isinstance(v, datetime):
-                    all_dates.append(datetime(v.year, v.month, 1))
+        # Scan BOTH formulas and data_only workbooks (formula-derived dates like =B1+31
+        # only resolve in data_only mode)
+        ws_d_scan = wb_data[sn] if sn in wb_data.sheetnames else None
+        for scan_ws in ([ws, ws_d_scan] if ws_d_scan else [ws]):
+            for r in range(1, 7):
+                for c in range(1, min((scan_ws.max_column or 1) + 1, 200)):
+                    v = scan_ws.cell(r, c).value
+                    if isinstance(v, datetime):
+                        all_dates.append(datetime(v.year, v.month, 1))
 
     # ── Step 2: Analyze with Claude API (per sheet) ──
     try:
