@@ -186,17 +186,18 @@ def test_formula_rules_sync(imported):
 
     The grid uses GET /sheets/{sid}/indicator-rules-all (batch).
     The right panel uses GET /sheets/{sid}/indicators/{iid}/rules (individual).
-    Both must return the same leaf formula for each indicator.
+    Both must return the same leaf AND consolidation formulas for each indicator.
     """
     sid = imported["sheet_id"]
     # Batch endpoint (used by grid)
     all_rules = _ok(_req("get", f"/sheets/{sid}/indicator-rules-all"), "batch rules").json()
     assert len(all_rules) > 0, "Should have formula rules for some indicators"
 
-    # For each indicator that has a leaf formula in the batch, check individual endpoint
+    # For each indicator, check individual endpoint matches batch
     for ind_id, batch_entry in all_rules.items():
         batch_leaf = batch_entry.get("leaf", "")
-        if not batch_leaf:
+        batch_consol = batch_entry.get("consolidation", "")
+        if not batch_leaf and not batch_consol:
             continue
         # Individual endpoint (used by right panel)
         ind_rules = _ok(
@@ -204,8 +205,33 @@ def test_formula_rules_sync(imported):
             f"individual rules for {ind_id}",
         ).json()
         panel_leaf = ind_rules.get("leaf", "")
+        panel_consol = ind_rules.get("consolidation", "")
         assert panel_leaf == batch_leaf, \
-            f"Formula mismatch for indicator {ind_id}: grid={batch_leaf!r}, panel={panel_leaf!r}"
+            f"Leaf formula mismatch for {ind_id}: grid={batch_leaf!r}, panel={panel_leaf!r}"
+        assert panel_consol == batch_consol, \
+            f"Consolidation formula mismatch for {ind_id}: grid={batch_consol!r}, panel={panel_consol!r}"
+
+
+def test_formula_columns_separate(imported):
+    """Grid should have separate leaf and consolidation formulas.
+
+    After import, indicators should have:
+    - 2 indicators with consolidation formulas (non-SUM: weighted avg, ratio)
+    - 2 indicators with leaf formulas (from cell_data)
+    - 1 indicator with neither (количество партнеров — pure manual)
+    """
+    sid = imported["sheet_id"]
+    all_rules = _ok(_req("get", f"/sheets/{sid}/indicator-rules-all"), "batch rules").json()
+
+    leaf_count = sum(1 for e in all_rules.values() if e.get("leaf"))
+    consol_count = sum(1 for e in all_rules.values() if e.get("consolidation"))
+
+    assert leaf_count == 2, f"Expected 2 indicators with leaf formulas, got {leaf_count}"
+    assert consol_count == 2, f"Expected 2 indicators with consolidation formulas, got {consol_count}"
+
+    # No indicator should have both leaf AND consolidation
+    both_count = sum(1 for e in all_rules.values() if e.get("leaf") and e.get("consolidation"))
+    assert both_count == 0, f"No indicator should have both leaf and consolidation, got {both_count}"
 
 
 def test_manual_indicators_have_no_formula_rules(imported):

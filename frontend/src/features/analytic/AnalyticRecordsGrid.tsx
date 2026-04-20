@@ -313,7 +313,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   />
                 </TableCell>
               )})}
-              {mainSheets.length > 0 && (
+              {mainSheets.length > 0 && (<>
                 <TableCell sx={{ position: 'relative', width: colWidths['formula'] || 200, userSelect: 'none' }}>
                   Формула
                   <Box
@@ -324,7 +324,17 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                     }}
                   />
                 </TableCell>
-              )}
+                <TableCell sx={{ position: 'relative', width: colWidths['consolidation'] || 200, userSelect: 'none' }}>
+                  Консолидация
+                  <Box
+                    onMouseDown={e => handleResizeStart('consolidation', e)}
+                    sx={{
+                      position: 'absolute', right: 0, top: 0, bottom: 0, width: 5,
+                      cursor: 'col-resize', '&:hover': { bgcolor: '#1976d2' },
+                    }}
+                  />
+                </TableCell>
+              </>)}
             </TableRow>
           </TableHead>
           <TableBody>
@@ -385,30 +395,33 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                     const f = formulas[node.record.id]
                     const leaf = f?.leaf || ''
                     const consol = f?.consolidation || ''
-                    const hasFormula = !!(leaf || consol)
-                    return (
+                    const formulaCellSx = (txt: string) => ({
+                      cursor: 'pointer',
+                      fontFamily: txt ? 'monospace' : undefined,
+                      fontSize: 12,
+                      color: txt ? 'text.secondary' : 'text.disabled',
+                      fontStyle: txt ? undefined : 'italic' as const,
+                      wordBreak: 'break-word' as const,
+                      '&:hover': { bgcolor: '#e3f2fd' },
+                    })
+                    return (<>
                       <TableCell
                         data-testid={`formula-cell-${node.record.id}`}
                         onClick={e => { e.stopPropagation(); setSelectedRecordId(node.record.id) }}
-                        sx={{
-                          cursor: 'pointer',
-                          fontFamily: hasFormula ? 'monospace' : undefined,
-                          fontSize: 12,
-                          color: hasFormula ? 'text.secondary' : 'text.disabled',
-                          fontStyle: hasFormula ? undefined : 'italic',
-                          wordBreak: 'break-word',
-                          '&:hover': { bgcolor: '#e3f2fd' },
-                        }}
-                        title={hasFormula ? (leaf || consol) : 'Ручной ввод — нажмите для настройки'}
+                        sx={formulaCellSx(leaf)}
+                        title={leaf || 'Ручной ввод — нажмите для настройки'}
                       >
-                        {hasFormula ? (
-                          <>
-                            {leaf}
-                            {consol && <span style={{ color: '#999', fontSize: 10, marginLeft: leaf ? 4 : 0 }}>{leaf ? ` [${consol}]` : consol}</span>}
-                          </>
-                        ) : 'ручной ввод'}
+                        {leaf || 'ручной ввод'}
                       </TableCell>
-                    )
+                      <TableCell
+                        data-testid={`consol-cell-${node.record.id}`}
+                        onClick={e => { e.stopPropagation(); setSelectedRecordId(node.record.id) }}
+                        sx={formulaCellSx(consol)}
+                        title={consol || 'SUM (по умолчанию)'}
+                      >
+                        {consol || 'SUM'}
+                      </TableCell>
+                    </>)
                   })()}
                 </TableRow>
               )
