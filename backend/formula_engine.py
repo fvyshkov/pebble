@@ -159,7 +159,7 @@ def evaluate(formula: str, get_ref_value) -> float:
             t = peek()
             if t and t[0] == "OP" and t[1] in ("*", "/"):
                 op = advance()[1]; right = parse_unary()
-                left = left * right if op == "*" else (left / right if right != 0 else 0.0)
+                left = left * right if op == "*" else (left / right if right != 0 else float('nan'))
             else: break
         return left
 
@@ -187,7 +187,7 @@ def evaluate(formula: str, get_ref_value) -> float:
 
     try:
         result = parse_expr()
-        return result if math.isfinite(result) else 0.0
+        return result if not math.isinf(result) else 0.0
     except Exception:
         return 0.0
 
@@ -529,15 +529,22 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 return val
 
             result = evaluate(formula, get_ref_value)
-            result_str = str(round(result, 6)) if result != 0 else "0"
-            global_cells[gk] = result_str
-            computed_set.add(gk)
-            computing_set.discard(gk)
-            _computed_sources[gk] = formula_source or "cell"
-            _computed_formulas[gk] = formula
-            if _has_unresolved_ref:
-                _unresolved.add(gk)
-            return result
+            # Division by zero in consolidation formula → fall through to SUM
+            if not math.isfinite(result) and _is_consolidating(context, meta):
+                computing_set.discard(gk)
+                pass  # fall through to step 3 (default SUM)
+            else:
+                if not math.isfinite(result):
+                    result = 0.0
+                result_str = str(round(result, 6)) if result != 0 else "0"
+                global_cells[gk] = result_str
+                computed_set.add(gk)
+                computing_set.discard(gk)
+                _computed_sources[gk] = formula_source or "cell"
+                _computed_formulas[gk] = formula
+                if _has_unresolved_ref:
+                    _unresolved.add(gk)
+                return result
 
         # ── 3. Consolidating coord with no formula → default SUM over children
         if _is_consolidating(context, meta):
