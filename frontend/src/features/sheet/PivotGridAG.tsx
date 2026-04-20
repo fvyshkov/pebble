@@ -187,6 +187,28 @@ function SelectionStatusPanel() {
   )
 }
 
+// ── Formula tooltip: green on black ─
+function FormulaTooltip(props: any) {
+  const { value } = props
+  if (!value) return null
+  return (
+    <div style={{
+      background: '#1a1a1a',
+      color: '#4caf50',
+      padding: '8px 12px',
+      borderRadius: 6,
+      fontSize: 13,
+      fontFamily: 'monospace',
+      maxWidth: 400,
+      wordBreak: 'break-word',
+      whiteSpace: 'pre-wrap',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+    }}>
+      {value}
+    </div>
+  )
+}
+
 // ── Small recalc progress indicator (spinner + tooltip, no extra section) ─
 function CalcProgressChip({ calcProgress, localRunning }: {
   calcProgress?: CalcProgress | null
@@ -1113,11 +1135,17 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         return s
       },
       tooltipValueGetter: (p: any) => {
-        if (mode !== 'formulas') return null
         const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
-        const f = coordKey ? formulaMapRef.current[coordKey] : ''
-        return f ? `ƒ ${f}` : null
+        if (!coordKey) return null
+        // Per-cell formula
+        const f = formulaMapRef.current[coordKey]
+        if (f) return `ƒ ${f}`
+        // Resolved indicator rule formula
+        const resolved = resolvedFormulaMapRef.current[coordKey]
+        if (resolved?.formula) return `ƒ ${resolved.formula}`
+        return null
       },
+      tooltipComponent: FormulaTooltip,
       // Hover ⋮ button → opens FormulaEditor for this cell.
       // Only on leaf rows (group rows don't have an editable formula).
       cellRenderer: (p: any) => {
@@ -1716,6 +1744,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           onColumnMoved={e => { if (e.finished) captureColumnState() }}
           onColumnPinned={captureColumnState}
           onColumnVisible={captureColumnState}
+          tooltipShowDelay={300}
           animateRows={false}
           stopEditingWhenCellsLoseFocus
           singleClickEdit={false}

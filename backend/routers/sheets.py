@@ -21,6 +21,28 @@ async def _find_first_leaf(db, analytic_id: str) -> str | None:
     return recs[0]["id"]
 
 
+async def _find_root_record(db, analytic_id: str) -> str | None:
+    """Find the root (top-level parent) record of an analytic.
+    If there's a single root with children, return it. Otherwise return first leaf."""
+    recs = await db.execute_fetchall(
+        "SELECT id, parent_id FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+        (analytic_id,),
+    )
+    if not recs:
+        return None
+    roots = [r for r in recs if not r["parent_id"]]
+    parent_ids = {r["id"] for r in recs if any(c["parent_id"] == r["id"] for c in recs)}
+    # If there's exactly one root that has children, use it (HEAD)
+    root_parents = [r for r in roots if r["id"] in parent_ids]
+    if len(root_parents) == 1:
+        return root_parents[0]["id"]
+    # Fallback to first leaf
+    for r in recs:
+        if r["id"] not in parent_ids:
+            return r["id"]
+    return recs[0]["id"]
+
+
 class SheetIn(BaseModel):
     model_id: str | None = None
     name: str = ""
@@ -129,8 +151,9 @@ async def add_sheet_analytic(sheet_id: str, body: SheetAnalyticIn):
         (said, sheet_id, body.analytic_id, body.sort_order, int(body.is_fixed), body.fixed_record_id),
     )
 
-    # Migrate existing cell data: append first leaf record of new analytic to coord_keys
-    first_leaf = await _find_first_leaf(db, body.analytic_id)
+    # Migrate existing cell data: append root (HEAD) record of new analytic to coord_keys.
+    # This keeps old values at the HEAD level; leaf records (F1, F2, ...) start empty and editable.
+    first_leaf = await _find_root_record(db, body.analytic_id)
     if first_leaf:
         cells = await db.execute_fetchall(
             "SELECT id, coord_key FROM cell_data WHERE sheet_id = ?", (sheet_id,)
