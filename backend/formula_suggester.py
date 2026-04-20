@@ -78,7 +78,9 @@ async def suggest_consolidations_for_sheet(
             f"- {i['name']}" + (f" ({i['unit']})" if i["unit"] else "")
             for i in indicators
         )
-        todo_lines = "\n".join(f"- {i['id']}: {i['name']}" for i in todo)
+        # Use names (not UUIDs) in prompt so cache key is stable across re-imports
+        todo_lines = "\n".join(f"- {i['name']}" for i in todo)
+        name_to_id = {i["name"]: i["id"] for i in todo}
 
         prompt = f"""На лист финмодели добавляется разрез «{new_analytic_name}».
 
@@ -99,19 +101,21 @@ async def suggest_consolidations_for_sheet(
 «доля» — почти всегда формула.
 
 Ответь ТОЛЬКО JSON массивом без пояснений:
-[{{"id": "<id>", "kind": "sum"}}, {{"id": "<id>", "kind": "formula", "formula": "[a] / [b]"}}]
+[{{"name": "<имя>", "kind": "sum"}}, {{"name": "<имя>", "kind": "formula", "formula": "[a] / [b]"}}]
 
 Показатели, по которым нужен ответ:
 {todo_lines}
 """
 
+        import asyncio
         from backend.llm_cache import cached_messages_create
-        resp = cached_messages_create(
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(None, lambda: cached_messages_create(
             client,
             model="claude-sonnet-4-20250514",
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
-        )
+        ))
         text = "".join(
             b.text for b in resp.content if getattr(b, "type", "") == "text"
         ).strip()
@@ -128,12 +132,12 @@ async def suggest_consolidations_for_sheet(
         return 0
 
     written = 0
-    todo_set = {i["id"] for i in todo}
     for s in suggestions:
         if not isinstance(s, dict):
             continue
-        iid = s.get("id")
-        if iid not in todo_set:
+        # Support both name-based and legacy id-based responses
+        iid = s.get("id") or name_to_id.get(s.get("name", ""))
+        if not iid or iid not in name_to_id.values():
             continue
         if s.get("kind") != "formula":
             continue

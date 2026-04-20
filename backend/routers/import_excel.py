@@ -1403,12 +1403,14 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             except Exception:
                 pass
             total_rules = 0
-            for cs in created_sheets:
+            async def _suggest_one(cs):
                 try:
-                    n = await suggest_consolidations_for_sheet(db, cs["id"], period_analytic_name)
-                    total_rules += n
+                    return await suggest_consolidations_for_sheet(db, cs["id"], period_analytic_name)
                 except Exception as e:
                     print(f"[import] suggest_consolidations failed for {cs['id']}: {e}")
+                    return 0
+            suggest_results = await asyncio.gather(*[_suggest_one(cs) for cs in created_sheets])
+            total_rules = sum(suggest_results)
             if total_rules:
                 yield event(f"   ✓ Claude подобрал {total_rules} формул консолидации по периодам")
 
