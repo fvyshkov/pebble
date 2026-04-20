@@ -1209,9 +1209,11 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       editable: false,
       valueGetter: (p: any) => {
         if (!p.data) return ''
-        // Server-computed consolidation value — single source of truth.
-        // The formula engine computes these from indicator_formula_rules.
-        if (groupRecordId && p.data.recordIds) {
+        // Server-computed consolidation value — only for LEAF indicator rows.
+        // Group indicator rows (Итого, Потребительский кредит, etc.) don't have
+        // month-level cells, so their quarter cell is always 0 in the engine.
+        // For groups, fall through to client-side SUM which aggregates visible month data.
+        if (groupRecordId && p.data.recordIds && p.data.isLeaf) {
           const dbOrd = dbOrdRef.current
           const colAId = colAIdRef.current
           const parts: string[] = []
@@ -1231,8 +1233,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             }
           }
         }
-        // Fallback: client-side SUM when no server cell exists yet
-        // (e.g. before first recalc)
+        // Client-side SUM: sum leaf period values for this row.
+        // Used for group rows (always) and leaf rows without server data (before recalc).
         let s = 0, has = false
         for (const id of leafIds) {
           const v = p.data[`p_${id}`]
