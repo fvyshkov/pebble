@@ -554,7 +554,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           // Inject sum column for this group when its level toggle is on.
           if (colLevelTogglesRef.current[lvl]) {
             const leafIds = getLeaves([n]).map(l => l.record.id)
-            out.push(makeSumColDef(label, leafIds))
+            out.push(makeSumColDef(label, leafIds, n.record.id))
           }
         }
         return out
@@ -758,7 +758,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         } as ColGroupDef)
         if (colLevelToggles[lvl]) {
           const leafIds = getLeaves([n]).map(l => l.record.id)
-          out.push(makeSumColDef(label, leafIds))
+          out.push(makeSumColDef(label, leafIds, n.record.id))
         }
       }
       return out
@@ -911,6 +911,12 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       }
       cellMapRef.current = freshMap
       cellRuleRef.current = freshRule
+      // Refresh Σ (sum) columns so their valueGetters pick up server-computed
+      // consolidation values from the updated cellMapRef.
+      const sumColIds = Object.keys(sumColLeavesRef.current)
+      if (sumColIds.length > 0) {
+        grid.refreshCells({ columns: sumColIds, force: true })
+      }
     } catch (e) { console.error('[flash] error', e) }
   }, [sheetId, currentUserId])
 
@@ -1194,7 +1200,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
 
   // Level-aggregate column (e.g. year total across quarters). Non-editable,
   // summed from the group's leaf period fields for the current row.
-  function makeSumColDef(groupLabel: string, leafIds: string[]): ColDef {
+  function makeSumColDef(groupLabel: string, leafIds: string[], groupRecordId?: string): ColDef {
     const label = `Σ ${groupLabel}`
     // Stable colId so we can target flashing — suffixed with leaf-id joins so
     // two different Σ columns covering different leaf sets stay distinct.
@@ -1209,6 +1215,29 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       editable: false,
       valueGetter: (p: any) => {
         if (!p.data) return ''
+        // Check for server-computed consolidation value first.
+        // Construct coord_key by replacing the period leaf with the group record ID.
+        if (groupRecordId && p.data.recordIds) {
+          const dbOrd = dbOrdRef.current
+          const colAId = colAIdRef.current
+          const parts: string[] = []
+          for (const a of dbOrd) {
+            if (a === colAId) parts.push(groupRecordId)
+            else {
+              const rid = p.data.recordIds[a]
+              if (rid) parts.push(rid)
+            }
+          }
+          if (parts.length >= 2) {
+            const key = parts.join('|')
+            const serverVal = cellMapRef.current[key]
+            if (serverVal != null && serverVal !== '') {
+              const n = parseFloat(String(serverVal))
+              if (!Number.isNaN(n)) return n
+            }
+          }
+        }
+        // Fallback: client-side SUM of leaf values
         let s = 0, has = false
         for (const id of leafIds) {
           const v = p.data[`p_${id}`]
