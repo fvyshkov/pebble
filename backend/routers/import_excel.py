@@ -1190,11 +1190,15 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         for sn in sheet_names:
             ws = wb_formulas[sn]
             sheet_texts[sn] = _extract_sheet_text(ws, sn)
-            for r in range(1, 7):
-                for c in range(1, min((ws.max_column or 1) + 1, 200)):
-                    v = ws.cell(r, c).value
-                    if isinstance(v, datetime):
-                        all_dates.append(datetime(v.year, v.month, 1))
+            # Scan BOTH formulas and data_only workbooks for dates
+            # (formula-derived dates like =B1+31 only resolve in data_only)
+            ws_d_scan = wb_data[sn] if sn in wb_data.sheetnames else None
+            for scan_ws in ([ws, ws_d_scan] if ws_d_scan else [ws]):
+                for r in range(1, 7):
+                    for c in range(1, min((scan_ws.max_column or 1) + 1, 200)):
+                        v = scan_ws.cell(r, c).value
+                        if isinstance(v, datetime):
+                            all_dates.append(datetime(v.year, v.month, 1))
 
         yield event("Анализ структуры с помощью Claude AI...")
 
