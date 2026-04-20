@@ -1224,7 +1224,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       }
       return parts.length === dbOrd.length ? parts.join('|') : null
     }
-    const label = `Σ ${groupLabel}`
+    const label = groupLabel
     // Stable colId so we can target flashing — suffixed with leaf-id joins so
     // two different Σ columns covering different leaf sets stay distinct.
     const colId = `sum__${leafIds.join('_').slice(0, 80)}__${leafIds.length}`
