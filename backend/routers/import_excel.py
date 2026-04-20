@@ -601,9 +601,12 @@ def _classify_consolidation_formula(
     if _is_sum_formula(full):
         return None
 
-    # 2. AVERAGE → special consolidation
+    # 2. AVERAGE → skip (let LLM determine the correct ratio formula).
+    # AVERAGE is almost always wrong for business metrics — weighted averages
+    # like "average loans per partner" should be [total_loans]/[partners],
+    # not arithmetic mean of monthly values.
     if _AVERAGE_RE.match(full):
-        return "AVERAGE"
+        return None
 
     # 3. Single cell reference (e.g. =O13) — points to a monthly column in same row
     sm = _SINGLE_REF_RE.match(full)

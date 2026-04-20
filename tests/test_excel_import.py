@@ -212,6 +212,19 @@ def test_formula_rules_sync(imported):
             f"Consolidation formula mismatch for {ind_id}: grid={batch_consol!r}, panel={panel_consol!r}"
 
 
+def test_no_average_consolidation(imported):
+    """AVERAGE consolidation should never be used — it's mathematically wrong
+    for weighted averages. Excel AVERAGE formulas should be skipped so the LLM
+    provides correct ratio formulas instead."""
+    sid = imported["sheet_id"]
+    all_rules = _ok(_req("get", f"/sheets/{sid}/indicator-rules-all"), "batch rules").json()
+
+    for ind_id, entry in all_rules.items():
+        consol = entry.get("consolidation", "")
+        assert consol != "AVERAGE", \
+            f"Indicator {ind_id} has AVERAGE consolidation — should be a ratio formula"
+
+
 def test_formula_columns_separate(imported):
     """Grid should have separate leaf and consolidation formulas.
 
