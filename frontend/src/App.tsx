@@ -13,6 +13,7 @@ import FunctionsOutlined from '@mui/icons-material/FunctionsOutlined'
 import PeopleOutlined from '@mui/icons-material/PeopleOutlined'
 import LogoutOutlined from '@mui/icons-material/LogoutOutlined'
 import CalculateOutlined from '@mui/icons-material/CalculateOutlined'
+import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import SmartToyOutlined from '@mui/icons-material/SmartToyOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
@@ -370,6 +371,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               <MenuOutlined fontSize="small" />
             </IconButton>
           </Tooltip>
+          {isAdmin && (
+            <Tooltip title="Импорт модели из Excel">
+              <IconButton size="small" onClick={() => setShowImport(true)}>
+                <FileUploadOutlined fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
           <Tooltip title="Обновить">
             <IconButton size="small" onClick={onRefresh}>
               <RefreshOutlined fontSize="small" />
@@ -399,7 +407,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             )}
           </ToggleButtonGroup>
 
-          {/* Import moved to LeftPanel toolbar (next to "add model"). */}
 
           {/* Calc mode toggle + calculate button */}
           <Tooltip title={calcMode === 'auto' ? 'Авто-расчёт (при каждом сохранении)' : 'Ручной расчёт (по кнопке)'}>
