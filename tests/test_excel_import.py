@@ -10,6 +10,7 @@ Verifies:
   6. Recalc produces correct consolidation values
   7. Formula rules sync: getAllIndicatorRules and getIndicatorRules return same formulas
   8. Adding a new analytic (подразделения) with hierarchy D1→D11,D12
+  9. Large model (models.xlsx): all avg/rate indicators get consolidation formulas (not SUM)
 """
 from __future__ import annotations
 
@@ -20,6 +21,12 @@ import requests
 
 API = os.environ.get("PEBBLE_API", "http://localhost:8000/api")
 EXCEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test-avg.xlsx")
+MODELS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models.xlsx")
+
+# Indicator name patterns that should NEVER be SUM-consolidated.
+# These are rates, averages, shares — must use ratio formulas.
+# Note: "% доход/расход" is interest income/expense (absolute) — not a rate.
+_AVG_RATE_PATTERNS = ("средн", "ср. ", "ставка", "доля ", "на 1 ")
 
 
 def _req(method, path, **kw):
@@ -329,3 +336,88 @@ def test_add_analytic_with_hierarchy(imported):
     _ok(_req("post", f"/cells/calculate/{sid}"), "recalc after adding analytic")
     cells = _ok(_req("get", f"/cells/by-sheet/{sid}")).json()
     assert len(cells) >= 15, f"Should still have at least 15 cells, got {len(cells)}"
+
+
+# ---------------------------------------------------------------------------
+# Large model tests (models.xlsx — multi-sheet financial model)
+# ---------------------------------------------------------------------------
+
+def _get_indicator_names(tree: dict) -> dict[str, str]:
+    """Build {record_id: name} from analytics records."""
+    names = {}
+    for a in tree.get("analytics", []):
+        if a.get("is_periods"):
+            continue
+        recs = _ok(_req("get", f"/analytics/{a['id']}/records"), "records").json()
+        for r in recs:
+            dj = r.get("data_json", {})
+            if isinstance(dj, str):
+                dj = json.loads(dj)
+            nm = (dj or {}).get("name", "")
+            if nm:
+                names[r["id"]] = nm
+    return names
+
+
+@pytest.fixture(scope="module")
+def large_model():
+    """Import models.xlsx and gather per-sheet info."""
+    if not os.path.exists(MODELS_XLSX):
+        pytest.skip("models.xlsx not found")
+
+    data = _import_via_stream(MODELS_XLSX)
+    model_id = data["model_id"]
+    tree = _ok(_req("get", f"/models/{model_id}/tree"), "get tree").json()
+    sheets = tree.get("sheets", [])
+    ind_names = _get_indicator_names(tree)
+
+    info: dict[str, dict] = {}
+    for sh in sheets:
+        sid = sh["id"]
+        rules = _ok(_req("get", f"/sheets/{sid}/indicator-rules-all"), "rules").json()
+        # Attach names to rules
+        named_rules = {}
+        for ind_id, entry in rules.items():
+            entry["name"] = ind_names.get(ind_id, "")
+            named_rules[ind_id] = entry
+        info[sh["name"]] = {
+            "id": sid,
+            "rules": named_rules,
+            "indicator_count": len(named_rules),
+        }
+
+    yield {"model_id": model_id, "sheets": info}
+
+    _req("delete", f"/models/{model_id}")
+
+
+def test_large_model_imports_all_sheets(large_model):
+    """models.xlsx should produce 7 sheets."""
+    assert len(large_model["sheets"]) == 7, \
+        f"Expected 7 sheets, got {len(large_model['sheets'])}"
+
+
+def test_large_model_avg_indicators_have_formulas(large_model):
+    """Every indicator with 'средн/ср./ставка/доля' in name must have
+    a consolidation formula — never plain SUM."""
+    missing = []
+    for sheet_name, info in large_model["sheets"].items():
+        for ind_id, entry in info["rules"].items():
+            ind_name = entry.get("name", "").lower()
+            consol = entry.get("consolidation", "")
+            if any(p in ind_name for p in _AVG_RATE_PATTERNS):
+                if not consol or consol == "SUM":
+                    missing.append(f"{sheet_name}: {entry.get('name', ind_id)}")
+    assert not missing, \
+        f"Avg/rate indicators without consolidation formula:\n" + "\n".join(missing[:20])
+
+
+def test_large_model_no_average_consolidation(large_model):
+    """No indicator should have AVERAGE as consolidation — it's always wrong."""
+    bad = []
+    for sheet_name, info in large_model["sheets"].items():
+        for ind_id, entry in info["rules"].items():
+            if entry.get("consolidation") == "AVERAGE":
+                bad.append(f"{sheet_name}: {entry.get('name', ind_id)}")
+    assert not bad, \
+        f"Indicators with AVERAGE consolidation:\n" + "\n".join(bad[:20])

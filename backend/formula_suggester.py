@@ -9,6 +9,80 @@ import json
 import os
 import uuid
 
+# Max indicators per LLM call — keeps response within token limits
+_BATCH_SIZE = 50
+
+
+def _build_prompt(analytic_name: str, all_lines: str, todo_lines: str) -> str:
+    return f"""На лист финмодели добавляется разрез «{analytic_name}».
+
+Показатели этого листа:
+{all_lines}
+
+Для каждого показателя из списка ниже определи, как консолидируется значение \
+по этому разрезу на строке-итоге (или при свёртке периодов).
+
+Варианты:
+- SUM — обычная сумма (по умолчанию для большинства абсолютных: выручка, количество).
+- Формула — в синтаксисе Pebble: `[имя показателя] / [имя другого]`. \
+Использовать только имена из списка показателей этого листа. Типичные случаи:
+  * среднее/на одного: `[сумма] / [количество]`
+  * доля/процент: `[числитель] / [знаменатель]`
+  * ставки/коэффициенты/средние: формулой, а НЕ суммой.
+  * если показатель называется «средний», «ср.», «на 1 ...», «% ...», «ставка», \
+«доля» — почти всегда формула.
+
+ВАЖНО: ответь для КАЖДОГО показателя из списка ниже, ни один не пропускай.
+
+Ответь ТОЛЬКО JSON массивом без пояснений:
+[{{"name": "<имя>", "kind": "sum"}}, {{"name": "<имя>", "kind": "formula", "formula": "[a] / [b]"}}]
+
+Показатели, по которым нужен ответ:
+{todo_lines}
+"""
+
+
+def _parse_llm_response(text: str) -> list[dict]:
+    """Parse LLM response into a list of suggestion dicts."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    result = json.loads(text)
+    if not isinstance(result, list):
+        return []
+    return result
+
+
+async def _write_suggestions(
+    db, sheet_id: str, suggestions: list[dict], name_to_id: dict[str, str]
+) -> int:
+    """Write non-SUM suggestions to the database. Returns count written."""
+    written = 0
+    for s in suggestions:
+        if not isinstance(s, dict):
+            continue
+        iid = s.get("id") or name_to_id.get(s.get("name", ""))
+        if not iid or iid not in name_to_id.values():
+            continue
+        if s.get("kind") != "formula":
+            continue
+        formula = (s.get("formula") or "").strip()
+        if not formula:
+            continue
+        await db.execute(
+            "INSERT INTO indicator_formula_rules "
+            "(id, sheet_id, indicator_id, kind, scope_json, priority, formula) "
+            "VALUES (?, ?, ?, 'consolidation', '{}', 0, ?)",
+            (str(uuid.uuid4()), sheet_id, iid, formula),
+        )
+        written += 1
+    if written:
+        await db.commit()
+    return written
+
 
 async def suggest_consolidations_for_sheet(
     db, sheet_id: str, new_analytic_name: str
@@ -73,84 +147,44 @@ async def suggest_consolidations_for_sheet(
         if base_url:
             kwargs["base_url"] = base_url
         client = anthropic.Anthropic(**kwargs)
-
-        all_lines = "\n".join(
-            f"- {i['name']}" + (f" ({i['unit']})" if i["unit"] else "")
-            for i in indicators
-        )
-        # Use names (not UUIDs) in prompt so cache key is stable across re-imports
-        todo_lines = "\n".join(f"- {i['name']}" for i in todo)
-        name_to_id = {i["name"]: i["id"] for i in todo}
-
-        prompt = f"""На лист финмодели добавляется разрез «{new_analytic_name}».
-
-Показатели этого листа:
-{all_lines}
-
-Для каждого показателя из списка ниже определи, как консолидируется значение \
-по этому разрезу на строке-итоге (или при свёртке периодов).
-
-Варианты:
-- SUM — обычная сумма (по умолчанию для большинства абсолютных: выручка, количество).
-- Формула — в синтаксисе Pebble: `[имя показателя] / [имя другого]`. \
-Использовать только имена из списка показателей этого листа. Типичные случаи:
-  * среднее/на одного: `[сумма] / [количество]`
-  * доля/процент: `[числитель] / [знаменатель]`
-  * ставки/коэффициенты/средние: формулой, а НЕ суммой.
-  * если показатель называется «средний», «ср.», «на 1 ...», «% ...», «ставка», \
-«доля» — почти всегда формула.
-
-Ответь ТОЛЬКО JSON массивом без пояснений:
-[{{"name": "<имя>", "kind": "sum"}}, {{"name": "<имя>", "kind": "formula", "formula": "[a] / [b]"}}]
-
-Показатели, по которым нужен ответ:
-{todo_lines}
-"""
-
-        import asyncio
-        from backend.llm_cache import cached_messages_create
-        loop = asyncio.get_event_loop()
-        resp = await loop.run_in_executor(None, lambda: cached_messages_create(
-            client,
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
-        ))
-        text = "".join(
-            b.text for b in resp.content if getattr(b, "type", "") == "text"
-        ).strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        suggestions = json.loads(text)
-        if not isinstance(suggestions, list):
-            return 0
     except Exception as e:
-        print(f"[suggest_consolidations] LLM failed for sheet {sheet_id}: {e}")
+        print(f"[suggest_consolidations] Anthropic init failed: {e}")
         return 0
 
+    all_lines = "\n".join(
+        f"- {i['name']}" + (f" ({i['unit']})" if i["unit"] else "")
+        for i in indicators
+    )
+    name_to_id = {i["name"]: i["id"] for i in todo}
+
+    # Batch indicators to keep responses within token limits
+    batches = [todo[i:i + _BATCH_SIZE] for i in range(0, len(todo), _BATCH_SIZE)]
     written = 0
-    for s in suggestions:
-        if not isinstance(s, dict):
+
+    for batch in batches:
+        todo_lines = "\n".join(f"- {i['name']}" for i in batch)
+        prompt = _build_prompt(new_analytic_name, all_lines, todo_lines)
+
+        # Scale max_tokens with batch size
+        max_tokens = max(2000, len(batch) * 60)
+
+        try:
+            import asyncio
+            from backend.llm_cache import cached_messages_create
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, lambda: cached_messages_create(
+                client,
+                model="claude-sonnet-4-20250514",
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            ))
+            text = "".join(
+                b.text for b in resp.content if getattr(b, "type", "") == "text"
+            ).strip()
+            suggestions = _parse_llm_response(text)
+            written += await _write_suggestions(db, sheet_id, suggestions, name_to_id)
+        except Exception as e:
+            print(f"[suggest_consolidations] LLM batch failed for sheet {sheet_id}: {e}")
             continue
-        # Support both name-based and legacy id-based responses
-        iid = s.get("id") or name_to_id.get(s.get("name", ""))
-        if not iid or iid not in name_to_id.values():
-            continue
-        if s.get("kind") != "formula":
-            continue
-        formula = (s.get("formula") or "").strip()
-        if not formula:
-            continue
-        await db.execute(
-            "INSERT INTO indicator_formula_rules "
-            "(id, sheet_id, indicator_id, kind, scope_json, priority, formula) "
-            "VALUES (?, ?, ?, 'consolidation', '{}', 0, ?)",
-            (str(uuid.uuid4()), sheet_id, iid, formula),
-        )
-        written += 1
-    if written:
-        await db.commit()
+
     return written
