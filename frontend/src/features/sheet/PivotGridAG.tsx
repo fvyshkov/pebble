@@ -394,9 +394,6 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
 
   // Refs (stable across re-renders, avoid stale closure in editors/handlers)
   const gridApiRef = useRef<GridApi | null>(null)
-  /** Guard: when true, setDataValue calls from refreshAndFlashParents should
-   *  NOT re-trigger onCellValueChanged (prevents save→refresh→save loop). */
-  const refreshingRef = useRef(false)
   const cellMapRef = useRef<Record<string, string>>({})
   const cellRuleRef = useRef<Record<string, CellRule>>({})
   /** coord_key → formula text (only populated for `formula`-rule cells). */
@@ -783,7 +780,6 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   const refreshAndFlashParents = useCallback(async () => {
     const grid = gridApiRef.current
     if (!grid) return
-    refreshingRef.current = true
     try {
       const fresh: CellData[] = await api.getCells(sheetId, currentUserId)
       const freshMap: Record<string, string> = {}
@@ -796,8 +792,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       }
       formulaMapRef.current = freshFormula
       // Pass 1: update every LEAF row's period values silently.
+      // Use direct data mutation + refreshCells (NOT setDataValue which
+      // would re-trigger onCellValueChanged and cause save loops).
+      const changedLeafNodes: any[] = []
+      const changedLeafCols = new Set<string>()
       grid.forEachNode(node => {
         if (!node.data || !node.data.isLeaf) return
+        let rowChanged = false
         for (const leafId of colLeafIdsRef.current) {
           const coordKey: string | undefined = node.data[`__coord_${leafId}`]
           if (!coordKey) continue
@@ -808,10 +809,16 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             node.data[`__rule_${leafId}`] = newRule
           }
           if (String(newVal) !== String(oldVal)) {
-            node.setDataValue(`p_${leafId}`, newVal)
+            node.data[`p_${leafId}`] = newVal
+            rowChanged = true
+            changedLeafCols.add(`p_${leafId}`)
           }
         }
+        if (rowChanged) changedLeafNodes.push(node)
       })
+      if (changedLeafNodes.length > 0) {
+        grid.refreshCells({ rowNodes: changedLeafNodes, columns: Array.from(changedLeafCols), force: true })
+      }
       // Pass 2: recompute parent (non-leaf) rows bottom-up; flash changes.
       const allNodes: any[] = []
       grid.forEachNode(n => { if (n.data) allNodes.push(n) })
@@ -852,7 +859,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           }
           const oldVal = (pNode.data[field] ?? '') as string | number
           if (String(newVal) !== String(oldVal)) {
-            pNode.setDataValue(field, newVal)
+            pNode.data[field] = newVal
             rowChanged = true
             flashColSet.add(field)
           }
@@ -860,6 +867,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         if (rowChanged) flashRowNodes.push(pNode)
       }
       if (flashRowNodes.length > 0 && flashColSet.size > 0) {
+        grid.refreshCells({ rowNodes: flashRowNodes, columns: Array.from(flashColSet), force: true })
         grid.flashCells({
           rowNodes: flashRowNodes,
           columns: Array.from(flashColSet),
@@ -870,7 +878,6 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       cellMapRef.current = freshMap
       cellRuleRef.current = freshRule
     } catch (e) { console.error('[flash] error', e) }
-    finally { refreshingRef.current = false }
   }, [sheetId, currentUserId])
 
   // When a model-wide recalc ends (calcProgress truthy → null), refetch and
@@ -1571,7 +1578,6 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
 
   // ── Cell edit → save (non-blocking) ────────────────────────────────────
   const onCellValueChanged = useCallback((e: CellValueChangedEvent) => {
-    if (refreshingRef.current) return  // guard: ignore programmatic updates during refresh
     const field: string | undefined = e.colDef.field
     if (!field || !field.startsWith('p_')) return
     const leafId = field.slice(2)
