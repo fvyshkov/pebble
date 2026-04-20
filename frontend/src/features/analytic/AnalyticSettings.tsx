@@ -30,6 +30,7 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
   const [sheetStatus, setSheetStatus] = useState<string>('')
   const [bulkBusy, setBulkBusy] = useState<null | 'add' | 'remove'>(null)
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
+  const [isMain, setIsMain] = useState(false)
   const { addOp, getOverrides } = usePending()
 
   useEffect(() => {
@@ -41,6 +42,17 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
         setData(a)
       }
     })
+    // Check if this analytic is main on any sheet.
+    ;(async () => {
+      try {
+        const sheets = await api.listSheets(modelId)
+        for (const s of sheets) {
+          const m = await api.getMainAnalytic(s.id)
+          if (m.analytic_id === analyticId) { setIsMain(true); return }
+        }
+        setIsMain(false)
+      } catch { /* ignore */ }
+    })()
   }, [analyticId])
 
   if (!data) return null
@@ -140,11 +152,30 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
         InputProps={{ sx: { fontFamily: 'monospace' } }}
       />
 
-      <FormControlLabel
-        control={<Switch checked={isPeriods} onChange={e => change({ is_periods: e.target.checked ? 1 : 0 } as any)} />}
-        label="Периоды"
-        sx={{ mb: 2 }}
-      />
+      <Box sx={{ display: 'flex', gap: 3, mb: 2 }}>
+        <FormControlLabel
+          control={<Switch checked={isPeriods} onChange={e => change({ is_periods: e.target.checked ? 1 : 0 } as any)} />}
+          label="Периоды"
+        />
+        <FormControlLabel
+          control={<Switch checked={isMain} onChange={async e => {
+            const on = e.target.checked
+            setIsMain(on)
+            if (on) {
+              // Set this analytic as main on all sheets it's bound to
+              const sheets = await api.listSheets(modelId)
+              for (const s of sheets) {
+                const bindings = await api.listSheetAnalytics(s.id)
+                if (bindings.some((b: any) => b.analytic_id === analyticId)) {
+                  await api.setMainAnalytic(s.id, analyticId)
+                }
+              }
+            }
+            // Note: toggling off is not implemented — another analytic should be set as main instead
+          }} />}
+          label="Показатели"
+        />
+      </Box>
 
       <FormControl fullWidth sx={{ mb: 2 }}>
         <InputLabel>Тип данных</InputLabel>
