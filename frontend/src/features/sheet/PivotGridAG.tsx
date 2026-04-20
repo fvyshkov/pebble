@@ -394,6 +394,9 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
 
   // Refs (stable across re-renders, avoid stale closure in editors/handlers)
   const gridApiRef = useRef<GridApi | null>(null)
+  /** Guard: when true, setDataValue calls from refreshAndFlashParents should
+   *  NOT re-trigger onCellValueChanged (prevents save→refresh→save loop). */
+  const refreshingRef = useRef(false)
   const cellMapRef = useRef<Record<string, string>>({})
   const cellRuleRef = useRef<Record<string, CellRule>>({})
   /** coord_key → formula text (only populated for `formula`-rule cells). */
@@ -780,6 +783,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   const refreshAndFlashParents = useCallback(async () => {
     const grid = gridApiRef.current
     if (!grid) return
+    refreshingRef.current = true
     try {
       const fresh: CellData[] = await api.getCells(sheetId, currentUserId)
       const freshMap: Record<string, string> = {}
@@ -866,6 +870,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       cellMapRef.current = freshMap
       cellRuleRef.current = freshRule
     } catch (e) { console.error('[flash] error', e) }
+    finally { refreshingRef.current = false }
   }, [sheetId, currentUserId])
 
   // When a model-wide recalc ends (calcProgress truthy → null), refetch and
@@ -974,7 +979,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       headerClass: 'ag-center-header',
       width: autoWidth,
       minWidth: 90,
-      ...(mode === 'formulas' ? { wrapText: true, autoHeight: true } : {}),
+      wrapText: true,
+      autoHeight: true,
       // NB: do NOT set enableCellChangeFlash here — we only want to flash
       // DERIVED cells (sums/formulas that recomputed), not the manual cell
       // the user just typed into. Flash is triggered explicitly via
@@ -1184,6 +1190,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     headerName: 'Аналитика',
     minWidth: 280,
     pinned: 'left',
+    wrapText: true,
+    autoHeight: true,
     cellRendererParams: {
       suppressCount: true,
       innerRenderer: (p: any) => {
@@ -1563,6 +1571,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
 
   // ── Cell edit → save (non-blocking) ────────────────────────────────────
   const onCellValueChanged = useCallback((e: CellValueChangedEvent) => {
+    if (refreshingRef.current) return  // guard: ignore programmatic updates during refresh
     const field: string | undefined = e.colDef.field
     if (!field || !field.startsWith('p_')) return
     const leafId = field.slice(2)
