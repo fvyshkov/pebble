@@ -321,20 +321,26 @@ def test_aggrid_column_resize_persists_in_dom(sheet_page: Page):
 # ── Period-level totals chips ──────────────────────────────────────────────
 
 def test_aggrid_period_totals_toggle_adds_sum_column(sheet_page: Page):
-    """Clicking a period-level chip (Годы / Кварталы) should inject a
-    Σ-column into the grid. Smoke-tests the chip + columnDefs rebuild."""
+    """Clicking a period-level chip (Годы / Кварталы) should toggle a
+    Σ-column in the grid. Smoke-tests the chip + columnDefs rebuild.
+
+    Chips default to ON (expanded), so we first turn all OFF, then verify
+    that turning one back ON increases the column count."""
     page = sheet_page
     _enable_aggrid(page)
     page.wait_for_timeout(600)
-    # Find a level chip. It has label starting with 'Σ ' ('Σ Годы' etc).
     chips = page.locator("[data-testid^='col-level-chip-']")
     n_chips = chips.count()
     if n_chips == 0:
         pytest.skip("No period-level chips — column hierarchy too flat for this sheet")
-    # Click chips one at a time — some levels may not have groups to sum.
-    cols_before = page.evaluate(
+    # Turn all chips OFF first (they default to ON).
+    for i in range(n_chips):
+        chips.nth(i).click()
+        page.wait_for_timeout(400)
+    cols_all_off = page.evaluate(
         "() => window.__pebbleGridApi ? window.__pebbleGridApi.getColumns().length : 0"
     )
+    # Now turn one chip ON and verify columns grow.
     grew = False
     clicked = []
     for i in range(n_chips):
@@ -346,7 +352,7 @@ def test_aggrid_period_totals_toggle_adds_sum_column(sheet_page: Page):
         cols_now = page.evaluate(
             "() => window.__pebbleGridApi.getColumns().length"
         )
-        if cols_now > cols_before:
+        if cols_now > cols_all_off:
             grew = True
             # Toggle off to leave state clean.
             chip.click()
@@ -357,7 +363,7 @@ def test_aggrid_period_totals_toggle_adds_sum_column(sheet_page: Page):
         page.wait_for_timeout(400)
     assert grew, (
         f"Expected some level chip to add Σ column(s); clicked={clicked} "
-        f"cols_before={cols_before}"
+        f"cols_all_off={cols_all_off}"
     )
 
 
@@ -440,6 +446,11 @@ def test_aggrid_formula_cell_dotdot_menu_opens_formula_editor(sheet_page: Page):
     page = sheet_page
     _enable_aggrid(page)
     _unpin_all(page)
+    # Switch to formulas mode — ⋮ button only appears in formulas view.
+    formulas_btn = page.locator("button.MuiToggleButton-root[value='formulas']")
+    if formulas_btn.count() > 0:
+        formulas_btn.click()
+        page.wait_for_timeout(600)
     labels = page.locator(".tree-item-label")
     for i in range(labels.count()):
         try:
