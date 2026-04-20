@@ -1217,10 +1217,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       editable: false,
       valueGetter: (p: any) => {
         if (!p.data) return ''
-        // Check for server-computed consolidation value — but ONLY when
-        // the indicator has a non-SUM consolidation formula (ratio, LAST, etc.).
-        // For SUM (default), always compute client-side to avoid stale zeros
-        // from failed formula resolution.
+        // Server-computed consolidation value — single source of truth.
+        // The formula engine computes these from indicator_formula_rules.
         if (groupRecordId && p.data.recordIds) {
           const dbOrd = dbOrdRef.current
           const colAId = colAIdRef.current
@@ -1234,19 +1232,15 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           }
           if (parts.length >= 2) {
             const key = parts.join('|')
-            // Only use server value if there's a non-trivial consolidation formula
-            const resolved = resolvedFormulaMapRef.current[key]
-            const hasConsolFormula = resolved?.formula && resolved.formula !== 'SUM'
-            if (hasConsolFormula) {
-              const serverVal = cellMapRef.current[key]
-              if (serverVal != null && serverVal !== '') {
-                const n = parseFloat(String(serverVal))
-                if (!Number.isNaN(n)) return n
-              }
+            const serverVal = cellMapRef.current[key]
+            if (serverVal != null && serverVal !== '') {
+              const n = parseFloat(String(serverVal))
+              if (!Number.isNaN(n)) return n
             }
           }
         }
-        // Client-side SUM of leaf values (default consolidation)
+        // Fallback: client-side SUM when no server cell exists yet
+        // (e.g. before first recalc)
         let s = 0, has = false
         for (const id of leafIds) {
           const v = p.data[`p_${id}`]
