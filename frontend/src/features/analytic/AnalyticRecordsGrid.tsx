@@ -9,7 +9,6 @@ import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
 import ChevronRightOutlined from '@mui/icons-material/ChevronRightOutlined'
 import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
-import FunctionsOutlined from '@mui/icons-material/FunctionsOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import { usePending } from '../../store/PendingContext'
 import * as api from '../../api'
@@ -301,17 +300,6 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                                 <DeleteOutlineOutlined sx={{ fontSize: 14 }} />
                               </IconButton>
                             </Tooltip>
-                            {mainSheets.length > 0 && (
-                              <Tooltip title="Показать формулы показателя">
-                                <IconButton
-                                  size="small"
-                                  onClick={() => setSelectedRecordId(node.record.id)}
-                                  color={selectedRecordId === node.record.id ? 'primary' : 'default'}
-                                >
-                                  <FunctionsOutlined sx={{ fontSize: 14 }} />
-                                </IconButton>
-                              </Tooltip>
-                            )}
                           </Box>
                           {hasChildren ? (
                             <IconButton size="small" sx={{ flexShrink: 0 }} onClick={() => toggle(node.record.id)}>
@@ -344,12 +332,12 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                           cursor: 'pointer',
                           fontFamily: 'monospace',
                           fontSize: 12,
-                          color: txt ? 'text.primary' : 'text.disabled',
+                          color: isSelected ? (txt ? 'text.primary' : 'text.disabled') : 'transparent',
                           maxWidth: 300,
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
-                          '&:hover': { bgcolor: '#e3f2fd' },
+                          '&:hover': { color: txt ? 'text.primary' : 'text.disabled', bgcolor: '#e3f2fd' },
                         }}
                         title={txt || 'Нет формулы — нажмите для настройки'}
                       >
