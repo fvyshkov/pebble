@@ -621,6 +621,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
                 if (a === colAId) parts.push(leaf.record.id)
                 else if (effectivePinned[a]) parts.push(effectivePinned[a])
                 else if (recIds[a]) parts.push(recIds[a])
+                else if (rootMap[a]) parts.push(rootMap[a])
               }
               if (parts.length >= 2) {
                 const lookup = lookupCell(parts)
