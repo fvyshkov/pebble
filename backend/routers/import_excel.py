@@ -477,6 +477,72 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
     return month_record_ids
 
 
+# ── Post-process: fix missing parent-child grouping ─────────────────────────
+
+import re as _re
+
+_GROUP_PATTERN = _re.compile(
+    r'(?:в\s+т\.?\s*ч\.?\s*:?|в\s+том\s+числе\s*:?|включая\s*:?)\s*$',
+    _re.IGNORECASE,
+)
+_GROUP_PREFIX = _re.compile(
+    r'^(?:итого|всего|общее\s|общий\s|общая\s|суммарн|сумма\s)',
+    _re.IGNORECASE,
+)
+
+
+def _fix_indicator_hierarchy(indicators: list[dict]) -> list[dict]:
+    """Post-process indicator list: ensure rows matching grouping name patterns
+    (e.g. "в т.ч.:", "Итого") have subsequent rows nested as children.
+    This is a safety net after Claude/heuristic analysis — it only promotes
+    flat siblings into children when the grouping wasn't already detected."""
+    result: list[dict] = []
+    i = 0
+    while i < len(indicators):
+        item = indicators[i]
+        name = (item.get("name") or "").strip()
+        already_group = item.get("is_group", False) and len(item.get("children", [])) > 0
+
+        # Recursively fix children of already-detected groups
+        if item.get("children"):
+            item["children"] = _fix_indicator_hierarchy(item["children"])
+
+        # If already a group with children, keep it
+        if already_group:
+            result.append(item)
+            i += 1
+            continue
+
+        # Check if this row matches a grouping pattern ("в т.ч.:", "Итого", etc.)
+        is_group_by_name = bool(_GROUP_PATTERN.search(name)) or bool(_GROUP_PREFIX.match(name))
+
+        if is_group_by_name and not already_group:
+            # Collect subsequent flat siblings as children
+            item["is_group"] = True
+            if item.get("rule") in (None, "manual", ""):
+                item["rule"] = "sum_children"
+            existing_children = item.get("children", [])
+            j = i + 1
+            while j < len(indicators):
+                next_item = indicators[j]
+                next_name = (next_item.get("name") or "").strip()
+                # Stop collecting if we hit another group header or empty
+                if (bool(_GROUP_PATTERN.search(next_name)) or
+                    bool(_GROUP_PREFIX.match(next_name)) or
+                    (next_item.get("is_group", False) and len(next_item.get("children", [])) > 0)):
+                    break
+                existing_children.append(next_item)
+                j += 1
+            item["children"] = existing_children
+            result.append(item)
+            i = j
+        else:
+            result.append(item)
+            i += 1
+
+    return result
+
+
 # ── Indicator records creation (recursive) ─────────────────────────────────
 
 async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]) -> tuple[dict, dict]:
@@ -640,6 +706,9 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 (fid, indicator_analytic_id, fname, fcode, ftype, sort_i),
             )
 
+        # Fix grouping hierarchy (safety net after Claude/heuristic analysis)
+        indicators = _fix_indicator_hierarchy(indicators)
+
         # Create hierarchical indicator records
         row_to_rid, rid_to_formula = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
@@ -654,9 +723,10 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         # Bind analytics: periods first (columns), then indicators (rows)
         for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
             sa_id = str(uuid.uuid4())
+            is_main = 1 if aid == indicator_analytic_id else 0
             await db.execute(
-                "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order) VALUES (?,?,?,?)",
-                (sa_id, pebble_sheet_id, aid, bind_idx),
+                "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_main) VALUES (?,?,?,?,?)",
+                (sa_id, pebble_sheet_id, aid, bind_idx, is_main),
             )
 
         # Grant permissions to all users
@@ -950,6 +1020,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     (str(uuid.uuid4()), indicator_analytic_id, fname, fcode, ftype, sort_i),
                 )
 
+            # Fix grouping hierarchy (safety net after Claude/heuristic analysis)
+            indicators = _fix_indicator_hierarchy(indicators)
+
             row_to_rid, rid_to_formula = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
@@ -958,9 +1031,10 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             sheet_sort += 1
 
             for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
+                is_main = 1 if aid == indicator_analytic_id else 0
                 await db.execute(
-                    "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order) VALUES (?,?,?,?)",
-                    (str(uuid.uuid4()), pebble_sheet_id, aid, bind_idx),
+                    "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_main) VALUES (?,?,?,?,?)",
+                    (str(uuid.uuid4()), pebble_sheet_id, aid, bind_idx, is_main),
                 )
 
             users = await db.execute_fetchall("SELECT id FROM users")
@@ -1181,8 +1255,13 @@ def _fallback_heuristic_analysis(wb) -> dict:
             # Check if bold
             is_bold = ws.cell(r, label_col).font and ws.cell(r, label_col).font.bold
 
-            # Group detection: bold or no data in period columns
-            is_group_header = (is_bold and not has_data) or (
+            # Check indentation
+            cell_label = ws.cell(r, label_col)
+            indent = cell_label.alignment.indent if cell_label.alignment and cell_label.alignment.indent else 0
+
+            # Group detection: name pattern, bold, or no data in period columns
+            is_group_by_name = bool(_GROUP_PATTERN.search(name)) or bool(_GROUP_PREFIX.match(name))
+            is_group_header = is_group_by_name or (is_bold and not has_data) or (
                 not has_data and unit in ("ЕИ", "")
                 and ws.cell(r, unit_col + 1).value in ("Отв.исп.", None, "")
             )

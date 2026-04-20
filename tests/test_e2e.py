@@ -84,14 +84,14 @@ def test_model_tree_visible(logged_in_page: Page):
     """Model tree shows in left panel."""
     page = logged_in_page
     # VERIFIED model should be visible
-    expect(page.locator("text=VERIFIED")).to_be_visible(timeout=5000)
+    expect(page.locator("text=VERIFIED").first).to_be_visible(timeout=5000)
 
 
 def test_click_sheet_opens_grid(logged_in_page: Page):
     """Clicking a sheet opens the pivot grid."""
     page = logged_in_page
     # Expand VERIFIED model
-    page.locator("text=VERIFIED").click()
+    page.locator("text=VERIFIED").first.click()
     page.wait_for_timeout(500)
     # Click first sheet
     sheets = page.locator(".tree-item-label >> text=параметры модели")
@@ -106,7 +106,7 @@ def test_excel_code_chips_visible(logged_in_page: Page):
     """Excel code chips (PL, BS, etc.) shown next to sheet names."""
     page = logged_in_page
     # Look for any chip-like element with known codes
-    page.locator("text=VERIFIED").click()
+    page.locator("text=VERIFIED").first.click()
     page.wait_for_timeout(500)
     # Check for BaaS.1 chip
     chips = page.locator("span:has-text('BaaS.1')")
@@ -120,7 +120,7 @@ def test_grid_has_frozen_column(logged_in_page: Page):
     """First column is sticky (frozen)."""
     page = logged_in_page
     # Navigate to a sheet with data
-    page.locator("text=VERIFIED").click()
+    page.locator("text=VERIFIED").first.click()
     page.wait_for_timeout(300)
     baas1 = page.locator(".tree-item-label:has-text('кредитование')")
     if baas1.count() > 0:
@@ -182,7 +182,7 @@ def test_cell_click_selects(logged_in_page: Page):
     """Clicking a cell selects it (blue border)."""
     page = logged_in_page
     # Navigate to a data sheet
-    page.locator("text=VERIFIED").click()
+    page.locator("text=VERIFIED").first.click()
     page.wait_for_timeout(300)
     sheet = page.locator(".tree-item-label:has-text('параметры модели')")
     if sheet.count() > 0:
@@ -224,7 +224,7 @@ def test_users_dialog_opens(logged_in_page: Page):
 def test_formula_column_visible_in_records(logged_in_page: Page):
     """Records grid shows a 'Формула' column for the main analytic."""
     page = logged_in_page
-    page.locator("text=VERIFIED").click()
+    page.locator("text=VERIFIED").first.click()
     page.wait_for_timeout(500)
     # Expand Аналитики section in the tree
     analytic_node = page.locator("text=Показатели").first
@@ -283,3 +283,95 @@ def test_formula_panel_editable(logged_in_page: Page):
     if close_btn.count() > 0:
         close_btn.first.click()
         page.wait_for_timeout(300)
+
+
+# ── Import: is_main flag ──
+
+def test_import_sets_is_main_on_indicators(logged_in_page: Page):
+    """After import, indicator analytics have is_main=1 on their sheet bindings."""
+    page = logged_in_page
+    # Use the API to verify is_main is set correctly
+    resp = page.request.get("http://localhost:8000/api/models")
+    models = resp.json()
+    verified = next((m for m in models if m["name"] == "VERIFIED"), None)
+    if not verified:
+        pytest.skip("VERIFIED model not found")
+    # Get tree to find sheets
+    tree_resp = page.request.get(f"http://localhost:8000/api/models/{verified['id']}/tree")
+    tree = tree_resp.json()
+    sheets = tree.get("sheets", [])
+    assert len(sheets) > 0, "VERIFIED model should have sheets"
+    # Check first sheet has is_main=1 on indicator analytic
+    sa_resp = page.request.get(f"http://localhost:8000/api/sheets/{sheets[0]['id']}/analytics")
+    bindings = sa_resp.json()
+    main_bindings = [b for b in bindings if b.get("is_main") == 1]
+    assert len(main_bindings) >= 1, "At least one analytic should have is_main=1"
+    # The main one should NOT be periods
+    for mb in main_bindings:
+        assert "Период" not in mb.get("analytic_name", ""), "Periods analytic should not be is_main"
+
+
+# ── Import: hierarchy / grouping ──
+
+def test_import_hierarchy_v_t_ch_grouping(logged_in_page: Page):
+    """Indicators with 'в т.ч.:' in the name are imported as parent groups with children."""
+    page = logged_in_page
+    resp = page.request.get("http://localhost:8000/api/models")
+    models = resp.json()
+    verified = next((m for m in models if m["name"] == "VERIFIED"), None)
+    if not verified:
+        pytest.skip("VERIFIED model not found")
+    # Find the параметры sheet and its indicator analytic
+    tree_resp = page.request.get(f"http://localhost:8000/api/models/{verified['id']}/tree")
+    sheets = tree_resp.json().get("sheets", [])
+    param_sheet = next((s for s in sheets if "параметр" in s["name"].lower()), None)
+    if not param_sheet:
+        pytest.skip("параметры sheet not found")
+    sa_resp = page.request.get(f"http://localhost:8000/api/sheets/{param_sheet['id']}/analytics")
+    bindings = sa_resp.json()
+    indicator_binding = next((b for b in bindings if b.get("is_main") == 1), None)
+    if not indicator_binding:
+        pytest.skip("No is_main analytic on параметры sheet")
+    # Get records
+    rec_resp = page.request.get(f"http://localhost:8000/api/analytics/{indicator_binding['analytic_id']}/records")
+    records = rec_resp.json()
+    import json as _json
+    # Find "в т.ч." record
+    vtch_record = None
+    for r in records:
+        data = _json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
+        if "в т.ч" in data.get("name", ""):
+            vtch_record = r
+            break
+    assert vtch_record is not None, "Should find an indicator with 'в т.ч.' in name"
+    # It should have children (records with parent_id == vtch_record.id)
+    children = [r for r in records if r.get("parent_id") == vtch_record["id"]]
+    assert len(children) >= 3, f"'в т.ч.' group should have ≥3 children, got {len(children)}"
+
+
+def test_hierarchy_records_have_parent_ids(logged_in_page: Page):
+    """Imported indicator records preserve parent-child hierarchy in the database."""
+    page = logged_in_page
+    # Use API to verify hierarchy structure is correct
+    resp = page.request.get("http://localhost:8000/api/models")
+    models = resp.json()
+    verified = next((m for m in models if m["name"] == "VERIFIED"), None)
+    if not verified:
+        pytest.skip("VERIFIED model not found")
+    tree_resp = page.request.get(f"http://localhost:8000/api/models/{verified['id']}/tree")
+    sheets = tree_resp.json().get("sheets", [])
+    # Find any sheet and its indicator analytic
+    for sheet in sheets:
+        sa_resp = page.request.get(f"http://localhost:8000/api/sheets/{sheet['id']}/analytics")
+        bindings = sa_resp.json()
+        indicator_binding = next((b for b in bindings if b.get("is_main") == 1), None)
+        if not indicator_binding:
+            continue
+        rec_resp = page.request.get(f"http://localhost:8000/api/analytics/{indicator_binding['analytic_id']}/records")
+        records = rec_resp.json()
+        # Check that at least some records have parent_id set (hierarchy exists)
+        children = [r for r in records if r.get("parent_id") is not None]
+        if len(children) >= 2:
+            # Found a sheet with hierarchy — test passes
+            return
+    pytest.fail("No sheet has indicator records with parent-child hierarchy")
