@@ -392,6 +392,7 @@ async def fill_sheet_direct(sheet_id: str, req: FillSheetRequest):
 # ── LLM helper: auto-detect consolidation formulas on add-analytic ────────
 # Implementation lives in backend.formula_suggester (shared with import_excel).
 from backend.formula_suggester import suggest_consolidations_for_sheet as _suggest_consolidations_for_sheet
+from backend.formula_suggester import propagate_consolidations_across_sheets as _propagate_consolidations
 
 
 # ── Server-side tool execution ─────────────────────────────────────────────
@@ -547,6 +548,12 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
                     )
                 except Exception as e:
                     print(f"[add_analytic_to_all_sheets] suggest failed on {sid}: {e}")
+            # Propagate: if same-named indicator got formula on one sheet but not
+            # another, copy it so all sheets are consistent.
+            try:
+                formulas_written += await _propagate_consolidations(db, model_id)
+            except Exception as e:
+                print(f"[add_analytic_to_all_sheets] propagate failed: {e}")
             client_actions.append({"type": "reload_model", "model_id": model_id})
             return json.dumps(
                 {"added": added, "skipped": skipped, "formulas_suggested": formulas_written},

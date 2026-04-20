@@ -1501,6 +1501,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     return 0
             suggest_results = await asyncio.gather(*[_suggest_one(cs) for cs in created_sheets])
             total_rules = sum(suggest_results)
+            # Propagate formulas across sheets for same-named indicators
+            if len(created_sheets) > 1:
+                from backend.formula_suggester import propagate_consolidations_across_sheets
+                try:
+                    total_rules += await propagate_consolidations_across_sheets(db, model_id)
+                except Exception as e:
+                    print(f"[import] propagate_consolidations failed: {e}")
             if total_rules:
                 yield event(f"   ✓ Claude подобрал {total_rules} формул консолидации по периодам")
 

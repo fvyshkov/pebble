@@ -421,3 +421,37 @@ def test_large_model_no_average_consolidation(large_model):
                 bad.append(f"{sheet_name}: {entry.get('name', ind_id)}")
     assert not bad, \
         f"Indicators with AVERAGE consolidation:\n" + "\n".join(bad[:20])
+
+
+def test_large_model_cross_sheet_consistency(large_model):
+    """Same-named indicator on different sheets must have same consolidation type.
+
+    If indicator X has a consolidation formula on sheet A, the same-named
+    indicator on sheet B must also have one (not be left as default SUM).
+    """
+    # Build name → list of (sheet, formula) pairs
+    name_rules: dict[str, list[tuple[str, str]]] = {}
+    for sheet_name, info in large_model["sheets"].items():
+        for ind_id, entry in info["rules"].items():
+            nm = entry.get("name", "")
+            if not nm:
+                continue
+            consol = entry.get("consolidation", "")
+            name_rules.setdefault(nm, []).append((sheet_name, consol))
+
+    # Check: if any sheet has a formula, all sheets should
+    inconsistent = []
+    for nm, entries in name_rules.items():
+        if len(entries) < 2:
+            continue
+        has_formula = any(f and f != "SUM" for _, f in entries)
+        has_empty = any(not f for _, f in entries)
+        if has_formula and has_empty:
+            sheets_with = [s for s, f in entries if f and f != "SUM"]
+            sheets_without = [s for s, f in entries if not f]
+            inconsistent.append(
+                f"{nm}: has formula on [{', '.join(sheets_with)}] "
+                f"but missing on [{', '.join(sheets_without)}]"
+            )
+    assert not inconsistent, \
+        f"Cross-sheet inconsistency:\n" + "\n".join(inconsistent[:10])

@@ -188,3 +188,93 @@ async def suggest_consolidations_for_sheet(
             continue
 
     return written
+
+
+async def propagate_consolidations_across_sheets(
+    db, model_id: str
+) -> int:
+    """Ensure same-named indicators have consistent consolidation formulas.
+
+    After LLM suggestions are applied per-sheet, an indicator named X on sheet A
+    might get a formula while the same-named indicator on sheet B doesn't.
+    This function copies formulas from sheets that have them to sheets that don't.
+    """
+    # Get all sheets in model
+    sheets = await db.execute_fetchall(
+        "SELECT id FROM sheets WHERE model_id = ?", (model_id,),
+    )
+    if len(sheets) < 2:
+        return 0
+
+    # Build name → {sheet_id: (indicator_id, formula)} map
+    name_formulas: dict[str, dict[str, tuple[str, str]]] = {}
+
+    for s in sheets:
+        sid = s["id"]
+        # Get main analytic for this sheet
+        rows = await db.execute_fetchall(
+            "SELECT sa.analytic_id FROM sheet_analytics sa "
+            "JOIN analytics a ON a.id = sa.analytic_id "
+            "WHERE sa.sheet_id = ? AND sa.is_main = 1 AND a.is_periods = 0 LIMIT 1",
+            (sid,),
+        )
+        if not rows:
+            continue
+        main_aid = rows[0]["analytic_id"]
+
+        # Get indicator records with names
+        recs = await db.execute_fetchall(
+            "SELECT id, data_json FROM analytic_records WHERE analytic_id = ?",
+            (main_aid,),
+        )
+        id_to_name: dict[str, str] = {}
+        for r in recs:
+            try:
+                d = json.loads(r["data_json"]) if isinstance(r["data_json"], str) else (r["data_json"] or {})
+            except Exception:
+                d = {}
+            nm = (d.get("name") or "").strip()
+            if nm:
+                id_to_name[r["id"]] = nm
+
+        # Get existing consolidation rules for this sheet
+        rules = await db.execute_fetchall(
+            "SELECT indicator_id, formula FROM indicator_formula_rules "
+            "WHERE sheet_id = ? AND kind = 'consolidation'",
+            (sid,),
+        )
+        rule_map = {r["indicator_id"]: r["formula"] for r in rules}
+
+        # Build per-name info
+        for iid, nm in id_to_name.items():
+            formula = rule_map.get(iid, "")
+            entry = name_formulas.setdefault(nm, {})
+            entry[sid] = (iid, formula)
+
+    # Propagate: if a name has a formula on some sheet but not others, copy it
+    written = 0
+    for nm, sheet_entries in name_formulas.items():
+        # Find the formula (non-empty) from any sheet
+        formula = ""
+        for sid, (iid, f) in sheet_entries.items():
+            if f:
+                formula = f
+                break
+        if not formula:
+            continue
+
+        # Apply to sheets missing it
+        for sid, (iid, f) in sheet_entries.items():
+            if f:
+                continue
+            await db.execute(
+                "INSERT INTO indicator_formula_rules "
+                "(id, sheet_id, indicator_id, kind, scope_json, priority, formula) "
+                "VALUES (?, ?, ?, 'consolidation', '{}', 0, ?)",
+                (str(uuid.uuid4()), sid, iid, formula),
+            )
+            written += 1
+
+    if written:
+        await db.commit()
+    return written
