@@ -974,6 +974,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       headerClass: 'ag-center-header',
       width: autoWidth,
       minWidth: 90,
+      ...(mode === 'formulas' ? { wrapText: true, autoHeight: true } : {}),
       // NB: do NOT set enableCellChangeFlash here — we only want to flash
       // DERIVED cells (sums/formulas that recomputed), not the manual cell
       // the user just typed into. Flash is triggered explicitly via
@@ -997,7 +998,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           if (rule === 'formula') {
             const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
             const f = coordKey ? formulaMapRef.current[coordKey] : ''
-            return f ? `[cell] ${f}` : 'ƒ формула'
+            return f || 'ƒ формула'
           }
           const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
           const resolved = coordKey ? resolvedFormulaMapRef.current[coordKey] : undefined
@@ -1108,7 +1109,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             className="cell-with-menu"
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', gap: 4 }}
           >
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <span style={{ flex: 1, wordBreak: 'break-word', whiteSpace: 'normal' }}>
               {formatted}
             </span>
             <button

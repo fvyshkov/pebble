@@ -116,10 +116,11 @@ async def put_rules(sheet_id: str, indicator_id: str, body: RulesIn):
 
 @router.get("/{sheet_id}/indicator-rules-all")
 async def get_all_rules(sheet_id: str):
-    """Return {indicator_id: {leaf, consolidation}} for every indicator
-    that has at least one rule on this sheet. Used by AnalyticRecordsGrid
-    to show formulas in one request instead of N per-record calls."""
+    """Return {record_id: {leaf, consolidation}} for every indicator record
+    on this sheet. First checks indicator_formula_rules, then falls back to
+    per-cell formulas from cell_data."""
     db = get_db()
+    # 1. Check indicator_formula_rules first
     rows = await db.execute_fetchall(
         """SELECT indicator_id, kind, formula
            FROM indicator_formula_rules
@@ -135,6 +136,42 @@ async def get_all_rules(sheet_id: str):
             entry["leaf"] = r["formula"] or ""
         elif r["kind"] == "consolidation" and not entry["consolidation"]:
             entry["consolidation"] = r["formula"] or ""
+
+    if result:
+        return result
+
+    # 2. Fallback: extract per-indicator formulas from cell_data.
+    # coord_key = "period_rec_id|indicator_rec_id" — take the indicator part.
+    # Pick any one non-empty formula per indicator record (they're typically the same).
+    cell_rows = await db.execute_fetchall(
+        """SELECT coord_key, formula, rule
+           FROM cell_data
+           WHERE sheet_id = ? AND formula IS NOT NULL AND formula != ''
+           ORDER BY coord_key""",
+        (sheet_id,),
+    )
+    # Determine indicator position in coord_key from sheet_analytics binding order.
+    bindings = await db.execute_fetchall(
+        "SELECT analytic_id, is_main FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order",
+        (sheet_id,),
+    )
+    main_idx = None
+    for i, b in enumerate(bindings):
+        if b["is_main"]:
+            main_idx = i
+            break
+    if main_idx is None:
+        return result
+
+    for cr in cell_rows:
+        parts = cr["coord_key"].split("|")
+        if len(parts) <= main_idx:
+            continue
+        rec_id = parts[main_idx]
+        if rec_id in result:
+            continue  # already have a formula for this record
+        result[rec_id] = {"leaf": cr["formula"] or "", "consolidation": ""}
+
     return result
 
 
