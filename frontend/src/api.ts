@@ -90,6 +90,8 @@ export const promoteCellToRule = (sheetId: string, indicatorId: string, coordKey
   fetch(`${BASE}/sheets/${sheetId}/indicators/${indicatorId}/rules/promote-cell`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ coord_key: coordKey, formula, priority }) }).then(r => json<any>(r))
 export const getResolvedFormulas = (sheetId: string, coordKeys: string[]) =>
   fetch(`${BASE}/sheets/${sheetId}/cells/resolved-formulas`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ coord_keys: coordKeys }) }).then(r => json<{ coord_key: string; formula: string; source: string; kind: string }[]>(r))
+export const getAllIndicatorRules = (sheetId: string) =>
+  fetch(`${BASE}/sheets/${sheetId}/indicator-rules-all`).then(r => json<Record<string, { leaf: string; consolidation: string }>>(r))
 
 // View settings
 export const getViewSettings = (sheetId: string) =>

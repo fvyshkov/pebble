@@ -372,6 +372,56 @@ def test_promote_cell_creates_scoped_rule(model):
     assert (cell.get("formula") or "") == ""
     assert float(cell["value"]) == 777.0  # rule-driven value
 
+
+def test_unquoted_params_parse_correctly():
+    """#39: parse_ref supports unquoted param values like
+    [Выручка](периоды=Январь, подразделения=Москва)."""
+    from backend.formula_engine import parse_ref
+
+    # Unquoted single param
+    r = parse_ref("[ind](периоды=Январь)")
+    assert r["name"] == "ind"
+    assert r["params"] == {"периоды": "Январь"}
+
+    # Unquoted multi-param
+    r = parse_ref("[ind](периоды=Январь, подразделения=Москва)")
+    assert r["params"] == {"периоды": "Январь", "подразделения": "Москва"}
+
+    # Legacy quoted still works
+    r = parse_ref('[ind](периоды="предыдущий")')
+    assert r["params"] == {"периоды": "предыдущий"}
+
+    # Period back-reference
+    r = parse_ref("[ind](периоды=период.назад(2))")
+    assert r["params"] == {"периоды": "назад(2)"}
+
+    # Period identity (no-op → empty params)
+    r = parse_ref("[ind](период=период)")
+    assert r["params"] == {}
+
+    # Mixed: back + unquoted axis
+    r = parse_ref("[ind](периоды=период.назад(1), подразделения=Москва)")
+    assert r["params"] == {"периоды": "назад(1)", "подразделения": "Москва"}
+
+    # Cross-sheet
+    r = parse_ref("[Sheet1::Выручка]")
+    assert r["name"] == "Выручка"
+    assert r["sheet"] == "Sheet1"
+
+
+def test_indicator_rules_api_returns_formulas(model):
+    """Formula column in AnalyticRecordsGrid needs GET rules to return
+    leaf/consolidation/scoped formulas for display."""
+    sid = model["sheet_id"]
+    r = _req("get", f"/sheets/{sid}/indicators/{model['avg_id']}/rules")
+    assert r.status_code == 200
+    body = r.json()
+    # From previous tests, сред/партнёра has a consolidation rule.
+    assert "leaf" in body
+    assert "consolidation" in body
+    assert "scoped" in body
+    assert body["consolidation"] == "[выдачи] / [партнёры]"
+
     # Cleanup: clear scoped rules.
     _req("put", f"/sheets/{sid}/indicators/{model['avg_id']}/rules", json={
         "leaf": "",

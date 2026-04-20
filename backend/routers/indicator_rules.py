@@ -112,6 +112,32 @@ async def put_rules(sheet_id: str, indicator_id: str, body: RulesIn):
     return {"ok": True}
 
 
+# ── Batch: all indicator rules for a sheet ────────────────────────────────
+
+@router.get("/{sheet_id}/indicator-rules-all")
+async def get_all_rules(sheet_id: str):
+    """Return {indicator_id: {leaf, consolidation}} for every indicator
+    that has at least one rule on this sheet. Used by AnalyticRecordsGrid
+    to show formulas in one request instead of N per-record calls."""
+    db = get_db()
+    rows = await db.execute_fetchall(
+        """SELECT indicator_id, kind, formula
+           FROM indicator_formula_rules
+           WHERE sheet_id = ?
+           ORDER BY indicator_id, priority DESC""",
+        (sheet_id,),
+    )
+    result: dict[str, dict[str, str]] = {}
+    for r in rows:
+        iid = r["indicator_id"]
+        entry = result.setdefault(iid, {"leaf": "", "consolidation": ""})
+        if r["kind"] == "leaf" and not entry["leaf"]:
+            entry["leaf"] = r["formula"] or ""
+        elif r["kind"] == "consolidation" and not entry["consolidation"]:
+            entry["consolidation"] = r["formula"] or ""
+    return result
+
+
 # ── Promote a per-cell formula into a scoped rule ─────────────────────────
 
 @router.post("/{sheet_id}/indicators/{indicator_id}/rules/promote-cell")

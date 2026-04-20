@@ -61,6 +61,8 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null)
   // Resizable right-pane width.
   const [panelWidth, setPanelWidth] = useState<number>(420)
+  // Formulas map: recordId → { leaf, consolidation } for display in the grid.
+  const [formulas, setFormulas] = useState<Record<string, { leaf: string; consolidation: string }>>({})
 
   const load = useCallback(async () => {
     const [fs, rs] = await Promise.all([api.listFields(analyticId), api.listRecords(analyticId)])
@@ -92,6 +94,19 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
     })()
     return () => { cancelled = true }
   }, [analyticId])
+
+  // Load formulas for all records in one batch request.
+  useEffect(() => {
+    if (!activeSheetId || records.length === 0) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const all = await api.getAllIndicatorRules(activeSheetId)
+        if (!cancelled) setFormulas(all)
+      } catch { /* no rules */ }
+    })()
+    return () => { cancelled = true }
+  }, [activeSheetId, records])
 
   const buildTree = (): TreeNode[] => {
     const byParent: Record<string, AnalyticRecord[]> = { root: [] }
@@ -248,6 +263,9 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
           <TableHead>
             <TableRow>
               {fields.map(f => <TableCell key={f.id}>{f.name}</TableCell>)}
+              {mainSheets.length > 0 && (
+                <TableCell sx={{ minWidth: 200 }}>Формула</TableCell>
+              )}
             </TableRow>
           </TableHead>
           <TableBody>
@@ -315,6 +333,30 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                       )}
                     </TableCell>
                   ))}
+                  {mainSheets.length > 0 && (() => {
+                    const f = formulas[node.record.id]
+                    const txt = f?.leaf || f?.consolidation || ''
+                    return (
+                      <TableCell
+                        data-testid={`formula-cell-${node.record.id}`}
+                        onClick={e => { e.stopPropagation(); setSelectedRecordId(node.record.id) }}
+                        sx={{
+                          cursor: 'pointer',
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          color: txt ? 'text.primary' : 'text.disabled',
+                          maxWidth: 300,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          '&:hover': { bgcolor: '#e3f2fd' },
+                        }}
+                        title={txt || 'Нет формулы — нажмите для настройки'}
+                      >
+                        {txt || '—'}
+                      </TableCell>
+                    )
+                  })()}
                 </TableRow>
               )
             })}

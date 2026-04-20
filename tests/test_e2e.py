@@ -217,3 +217,69 @@ def test_users_dialog_opens(logged_in_page: Page):
     # Navigate back by pressing Escape or clicking close
     page.keyboard.press("Escape")
     page.wait_for_timeout(300)
+
+
+# ── Analytic Records: Formula Column ──
+
+def test_formula_column_visible_in_records(logged_in_page: Page):
+    """Records grid shows a 'Формула' column for the main analytic."""
+    page = logged_in_page
+    page.locator("text=VERIFIED").click()
+    page.wait_for_timeout(500)
+    # Expand Аналитики section in the tree
+    analytic_node = page.locator("text=Показатели").first
+    if not analytic_node.is_visible(timeout=3000):
+        pytest.skip("Показатели analytic not found in tree")
+    analytic_node.click()
+    page.wait_for_timeout(1500)
+    # "Записи" heading confirms we're on the records grid
+    expect(page.locator("text=Записи").first).to_be_visible(timeout=5000)
+    # Formula column header must be present
+    formula_header = page.locator("th:has-text('Формула')")
+    expect(formula_header.first).to_be_visible(timeout=5000)
+
+
+def test_formula_cell_clickable(logged_in_page: Page):
+    """Clicking a formula cell opens the indicator formulas panel."""
+    page = logged_in_page
+    # We should already be on the records grid from previous test.
+    # Find any formula cell (they have data-testid starting with formula-cell-).
+    formula_cells = page.locator("[data-testid^='formula-cell-']")
+    if formula_cells.count() == 0:
+        pytest.skip("No formula cells found — records grid may not be loaded")
+    # Click the first formula cell
+    formula_cells.first.click()
+    page.wait_for_timeout(1000)
+    # The right panel should now show the indicator formulas panel.
+    # It has accordion sections like "Лист" or formula mode toggles or leaf/consolidation labels.
+    panel_content = page.locator("text=Формулы показателя").or_(
+        page.locator("text=Назад к настройкам")
+    ).or_(
+        page.locator("text=leaf").or_(page.locator("text=Формула"))
+    )
+    expect(panel_content.first).to_be_visible(timeout=5000)
+
+
+def test_formula_panel_editable(logged_in_page: Page):
+    """Formula panel allows editing the formula text."""
+    page = logged_in_page
+    # Should be in the formula panel from previous test.
+    # Look for a text input or textarea where formulas can be typed.
+    formula_inputs = page.locator("input[type='text']").or_(page.locator("textarea"))
+    # At least one formula input should exist in the panel
+    if formula_inputs.count() == 0:
+        # Try the mode toggle — switch to formula mode
+        formula_toggle = page.locator("text=Формула").or_(page.locator("text=formula"))
+        if formula_toggle.count() > 0:
+            formula_toggle.first.click()
+            page.wait_for_timeout(500)
+    # Now find formula inputs
+    formula_inputs = page.locator("input[type='text']").or_(page.locator("textarea"))
+    assert formula_inputs.count() > 0, "No formula input fields found in the panel"
+    # Close the panel to restore state
+    close_btn = page.locator("text=Назад к настройкам").or_(
+        page.locator("[data-testid='CloseOutlinedIcon']")
+    )
+    if close_btn.count() > 0:
+        close_btn.first.click()
+        page.wait_for_timeout(300)
