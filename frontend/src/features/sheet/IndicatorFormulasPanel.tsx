@@ -239,9 +239,8 @@ export default function IndicatorFormulasPanel({
               leaf: pending.leaf ?? apiRules.leaf,
               scoped: pending.scoped ?? apiRules.scoped }
           : apiRules
-        // Consolidation: empty = SUM (default formula). Always formula mode.
-        setConsolFormula(rules.consolidation || 'SUM')
-        setConsolMode('formula')
+        setConsolFormula(rules.consolidation || '')
+        setConsolMode(rules.consolidation ? 'formula' : 'manual')
         setLeafFormula(rules.leaf || '')
         setLeafMode(rules.leaf ? 'formula' : 'manual')
         // Top = highest priority

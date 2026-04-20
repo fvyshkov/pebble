@@ -394,8 +394,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   {mainSheets.length > 0 && (() => {
                     const f = formulas[node.record.id]
                     const leaf = f?.leaf || ''
-                    // Consolidation: empty = SUM (default formula), always a formula
-                    const consol = f?.consolidation || 'SUM'
+                    const consol = f?.consolidation || ''
                     const formulaCellSx = (txt: string) => ({
                       cursor: 'pointer',
                       fontFamily: txt ? 'monospace' : undefined,
