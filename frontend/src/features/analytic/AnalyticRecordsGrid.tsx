@@ -71,23 +71,32 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
 
   useEffect(() => { load() }, [load])
 
-  // Figure out which sheets have this analytic as main.
+  // Find sheets where this analytic is bound (prefer main, fall back to any binding).
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
         const a = await api.getAnalytic(analyticId)
+        if ((a as any).is_periods) return // periods analytics don't have indicator formulas
         const mid = (a as any).model_id
         if (!mid) return
         const sheets = await api.listSheets(mid)
-        const out: { id: string; name: string }[] = []
+        const mainHits: { id: string; name: string }[] = []
+        const anyHits: { id: string; name: string }[] = []
         for (const s of sheets) {
-          const m = await api.getMainAnalytic(s.id)
-          if (m.analytic_id === analyticId) out.push({ id: s.id, name: s.name })
+          const bindings = await api.listSheetAnalytics(s.id)
+          const bound = bindings.some(b => b.analytic_id === analyticId)
+          if (!bound) continue
+          anyHits.push({ id: s.id, name: s.name })
+          try {
+            const m = await api.getMainAnalytic(s.id)
+            if (m.analytic_id === analyticId) mainHits.push({ id: s.id, name: s.name })
+          } catch { /* no main set */ }
         }
         if (!cancelled) {
-          setMainSheets(out)
-          if (out.length > 0 && !activeSheetId) setActiveSheetId(out[0].id)
+          const result = mainHits.length > 0 ? mainHits : anyHits
+          setMainSheets(result)
+          if (result.length > 0 && !activeSheetId) setActiveSheetId(result[0].id)
         }
       } catch { /* ignore */ }
     })()
@@ -332,12 +341,12 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                           cursor: 'pointer',
                           fontFamily: 'monospace',
                           fontSize: 12,
-                          color: isSelected ? (txt ? 'text.primary' : 'text.disabled') : 'transparent',
+                          color: txt ? 'text.secondary' : 'text.disabled',
                           maxWidth: 300,
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
-                          '&:hover': { color: txt ? 'text.primary' : 'text.disabled', bgcolor: '#e3f2fd' },
+                          '&:hover': { bgcolor: '#e3f2fd' },
                         }}
                         title={txt || 'Нет формулы — нажмите для настройки'}
                       >
