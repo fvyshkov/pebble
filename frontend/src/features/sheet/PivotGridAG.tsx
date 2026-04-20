@@ -615,10 +615,12 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
                 row[`p_${leaf.record.id}`] = lookup.value
                 row[`__coord_${leaf.record.id}`] = parts.join('|')
                 row[`__parts_${leaf.record.id}`] = parts
-                // Legacy resolveRule: group rows default to sum_children,
-                // terminal rows to manual, unless backend stored explicit rule.
-                const storedRule = cellRuleRef.current[parts.join('|')]
-                row[`__rule_${leaf.record.id}`] = storedRule
+                // 1. Full-key rule from backend (exact match)
+                // 2. Truncated-key rule from lookupCell (when cell found via fallback)
+                // 3. Default: sum_children for groups, manual for terminals
+                const fullRule = cellRuleRef.current[parts.join('|')]
+                row[`__rule_${leaf.record.id}`] = fullRule
+                  ?? (lookup.key !== parts.join('|') && lookup.value !== '' ? lookup.rule : undefined)
                   ?? (isGroup ? 'sum_children' : 'manual')
               }
             }

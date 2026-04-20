@@ -102,7 +102,7 @@ async def get_rules(sheet_id: str, indicator_id: str):
                     """SELECT formula FROM cell_data
                        WHERE sheet_id = ? AND coord_key LIKE ?
                        AND formula IS NOT NULL AND formula != ''
-                       LIMIT 1""",
+                       ORDER BY coord_key LIMIT 1""",
                     (sheet_id, pat),
                 )
                 if cell_row:
