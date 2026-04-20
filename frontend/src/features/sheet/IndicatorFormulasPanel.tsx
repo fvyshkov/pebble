@@ -201,7 +201,7 @@ export default function IndicatorFormulasPanel({
   useEffect(() => {
     if (!editedRef.current) return
     const leafVal = leafMode === 'formula' ? leafFormula : ''
-    const consolVal = consolMode === 'formula' ? consolFormula : ''
+    const consolVal = consolFormula === 'SUM' ? '' : consolFormula
     addOp({
       key: `indicatorRules:${sheetId}:${indicatorId}`,
       type: 'putIndicatorRules',
@@ -239,8 +239,8 @@ export default function IndicatorFormulasPanel({
               leaf: pending.leaf ?? apiRules.leaf,
               scoped: pending.scoped ?? apiRules.scoped }
           : apiRules
-        setConsolFormula(rules.consolidation || '')
-        setConsolMode(rules.consolidation ? 'formula' : 'manual')
+        setConsolFormula(rules.consolidation || 'SUM')
+        setConsolMode('formula')
         setLeafFormula(rules.leaf || '')
         setLeafMode(rules.leaf ? 'formula' : 'manual')
         // Top = highest priority
@@ -421,14 +421,23 @@ export default function IndicatorFormulasPanel({
           <Chip size="small" color="primary" variant="outlined" label="консолидация" />
         </AccordionSummary>
         <AccordionDetails sx={{ pt: 0 }}>
-          <SlotBody
-            mode={consolMode}
-            onModeChange={m => { setConsolMode(m); markDirty() }}
-            formula={consolFormula}
-            onFormulaChange={v => { setConsolFormula(v); markDirty() }}
-            onEdit={() => setEditorSlot({ kind: 'consol' })}
-            placeholder="например: [выдачи] / [партнёры]"
-          />
+          <Box>
+            <Chip size="small" label="Формула" color="primary" sx={{ mb: 1 }} />
+            <Stack direction="row" spacing={1} alignItems="flex-start">
+              <TextField
+                multiline minRows={1} maxRows={4} fullWidth size="small"
+                value={consolFormula}
+                onChange={e => { setConsolFormula(e.target.value); markDirty() }}
+                placeholder="SUM по умолчанию, или: [выдачи] / [партнёры]"
+                InputProps={{ sx: { fontFamily: 'monospace', fontSize: 13 } }}
+              />
+              <Tooltip title="Открыть редактор формул">
+                <IconButton size="small" onClick={() => setEditorSlot({ kind: 'consol' })}>
+                  <EditOutlined fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+          </Box>
         </AccordionDetails>
       </Accordion>
 

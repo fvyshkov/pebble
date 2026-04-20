@@ -135,7 +135,14 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
         console.log('[formulas] fetching for sheet', activeSheetId, 'records:', recordCount)
         const all = await api.getAllIndicatorRules(activeSheetId)
         console.log('[formulas] got', Object.keys(all).length, 'entries, cancelled:', cancelled)
-        if (!cancelled) setFormulas(all)
+        if (!cancelled) {
+          // Default empty consolidation to "SUM" — consolidation is always a formula
+          const normalized: typeof all = {}
+          for (const [k, v] of Object.entries(all)) {
+            normalized[k] = { leaf: v.leaf, consolidation: v.consolidation || 'SUM' }
+          }
+          setFormulas(normalized)
+        }
       } catch (e) { console.warn('getAllIndicatorRules failed', e) }
     })()
     return () => { cancelled = true }
@@ -394,7 +401,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   {mainSheets.length > 0 && (() => {
                     const f = formulas[node.record.id]
                     const leaf = f?.leaf || ''
-                    const consol = f?.consolidation || ''
+                    const consol = f?.consolidation || 'SUM'
                     const formulaCellSx = (txt: string) => ({
                       cursor: 'pointer',
                       fontFamily: txt ? 'monospace' : undefined,
@@ -476,7 +483,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   if (selectedRecordId) {
                     setFormulas(prev => ({
                       ...prev,
-                      [selectedRecordId]: { leaf, consolidation },
+                      [selectedRecordId]: { leaf, consolidation: consolidation || 'SUM' },
                     }))
                   }
                 }}

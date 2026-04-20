@@ -1047,7 +1047,7 @@ async def resolve_formula_for_display(db, sheet_id: str, coord_key: str) -> dict
 
     # 4. No rule → default sum for consolidating, else manual.
     if is_consol:
-        return {"formula": "Σ сумма нижестоящих", "source": "default-sum", "kind": None}
+        return {"formula": "SUM", "source": "default-sum", "kind": "consolidation"}
     return {"formula": "", "source": "manual", "kind": None}
 
 

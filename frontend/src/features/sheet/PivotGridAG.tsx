@@ -1048,18 +1048,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       valueFormatter: (p: any) => {
         const rule: CellRule = p.data?.[`__rule_${periodRecId}`] || 'manual'
         if (mode === 'formulas') {
-          // Formula mode: show formula text for `formula` cells, otherwise
-          // indicator-rule formula (with source badge) or a short rule label.
-          if (rule === 'formula') {
-            const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
-            const f = coordKey ? formulaMapRef.current[coordKey] : ''
-            return f || 'ƒ формула'
-          }
+          // Formula mode: show resolved indicator-rule formula (single source of truth).
           const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
           const resolved = coordKey ? resolvedFormulaMapRef.current[coordKey] : undefined
           if (resolved?.formula) {
             return resolved.formula
           }
+          if (rule === 'formula') return 'ƒ формула'
           if (rule === 'sum_children') return 'ƒ SUM'
           if (rule === 'empty') return '∅'
           if (!p.data?.isLeaf) return 'ƒ SUM'
@@ -1147,10 +1142,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         if (!coordKey) return null
         const rule: CellRule = p.data?.[`__rule_${periodRecId}`] || 'manual'
         const isLeaf = !!p.data?.isLeaf
-        // Per-cell formula
-        const f = formulaMapRef.current[coordKey]
-        if (f) return `ƒ ${f}`
-        // Resolved indicator rule formula
+        // Resolved indicator rule formula (single source of truth)
         const resolved = resolvedFormulaMapRef.current[coordKey]
         if (resolved?.formula) return `ƒ ${resolved.formula}`
         // Consolidating cells (group indicator or period parent)
@@ -1251,18 +1243,38 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         return has ? s : ''
       },
       valueFormatter: (p: any) => {
-        if (mode === 'formulas') return 'Σ уровень'
+        if (mode === 'formulas') {
+          // Show the consolidation formula for this indicator
+          if (!groupRecordId || !p.data?.recordIds) return 'ƒ SUM'
+          const dbOrd = dbOrdRef.current
+          const colAId = colAIdRef.current
+          const parts: string[] = []
+          for (const a of dbOrd) {
+            if (a === colAId) parts.push(groupRecordId)
+            else {
+              const rid = p.data.recordIds[a]
+              if (rid) parts.push(rid)
+            }
+          }
+          if (parts.length >= 2) {
+            const key = parts.join('|')
+            const resolved = resolvedFormulaMapRef.current[key]
+            if (resolved?.formula) return resolved.formula
+          }
+          return 'ƒ SUM'
+        }
         const v = p.value
         if (v === '' || v == null) return ''
         const num = Number(v)
         if (Number.isNaN(num)) return String(v)
         return num.toLocaleString('ru-RU', { maximumFractionDigits: 2 })
       },
-      cellStyle: () => ({
-        textAlign: 'right',
+      cellStyle: (): any => ({
+        textAlign: mode === 'formulas' ? 'left' : 'right',
         background: '#eef6ff',
         color: '#0d47a1',
-        fontWeight: 600,
+        fontWeight: mode === 'formulas' ? 400 : 600,
+        ...(mode === 'formulas' ? { fontSize: 11, fontFamily: 'monospace', whiteSpace: 'normal', lineHeight: '1.4', overflow: 'visible' } : {}),
       }),
       tooltipValueGetter: (p: any) => {
         if (!groupRecordId || !p.data?.recordIds) return null
@@ -1278,8 +1290,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         }
         if (parts.length < 2) return null
         const key = parts.join('|')
-        const f = formulaMapRef.current[key]
-        if (f) return `ƒ ${f}`
+        // Σ columns are consolidation cells — show consolidation formula from
+        // indicator rules (single source of truth), not per-cell formula.
         const resolved = resolvedFormulaMapRef.current[key]
         if (resolved?.formula) return `ƒ ${resolved.formula}`
         return 'ƒ SUM'
