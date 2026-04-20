@@ -292,13 +292,16 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
       </Box>
 
       {fields.length > 0 && (
-        <Table size="small" sx={{ tableLayout: 'fixed', '& td, & th': { py: 0.5, px: 1, wordBreak: 'break-word', whiteSpace: 'normal', overflow: 'hidden', borderRight: '1px solid', borderColor: 'divider' }, '& th': { borderBottom: '2px solid', borderBottomColor: 'divider' } }}>
+        <Table size="small" sx={{ tableLayout: 'fixed', '& td, & th': { py: 0.5, px: 1, wordBreak: 'break-word', whiteSpace: 'normal', borderRight: '1px solid', borderColor: 'divider', verticalAlign: 'top' }, '& th': { borderBottom: '2px solid', borderBottomColor: 'divider' } }}>
           <TableHead>
             <TableRow>
-              {fields.map(f => (
+              {fields.map((f, fi) => {
+                const isUnit = /единиц/i.test(f.name)
+                const defaultW = fi === 0 ? 'auto' : isUnit ? 80 : 'auto'
+                return (
                 <TableCell
                   key={f.id}
-                  sx={{ position: 'relative', width: colWidths[f.id] || 'auto', userSelect: 'none' }}
+                  sx={{ position: 'relative', width: colWidths[f.id] || defaultW, userSelect: 'none' }}
                 >
                   {f.name}
                   <Box
@@ -309,7 +312,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                     }}
                   />
                 </TableCell>
-              ))}
+              )})}
               {mainSheets.length > 0 && (
                 <TableCell sx={{ position: 'relative', width: colWidths['formula'] || 200, userSelect: 'none' }}>
                   Формула
@@ -382,23 +385,28 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                     const f = formulas[node.record.id]
                     const leaf = f?.leaf || ''
                     const consol = f?.consolidation || ''
-                    const txt = leaf || consol || ''
+                    const hasFormula = !!(leaf || consol)
                     return (
                       <TableCell
                         data-testid={`formula-cell-${node.record.id}`}
                         onClick={e => { e.stopPropagation(); setSelectedRecordId(node.record.id) }}
                         sx={{
                           cursor: 'pointer',
-                          fontFamily: 'monospace',
+                          fontFamily: hasFormula ? 'monospace' : undefined,
                           fontSize: 12,
-                          color: txt ? 'text.secondary' : 'text.disabled',
+                          color: hasFormula ? 'text.secondary' : 'text.disabled',
+                          fontStyle: hasFormula ? undefined : 'italic',
                           wordBreak: 'break-word',
                           '&:hover': { bgcolor: '#e3f2fd' },
                         }}
-                        title={txt || 'Нет формулы — нажмите для настройки'}
+                        title={hasFormula ? (leaf || consol) : 'Ручной ввод — нажмите для настройки'}
                       >
-                        {leaf || '—'}
-                        {consol && <span style={{ color: '#999', fontSize: 10, marginLeft: leaf ? 4 : 0 }}>{leaf ? ` [${consol}]` : consol}</span>}
+                        {hasFormula ? (
+                          <>
+                            {leaf}
+                            {consol && <span style={{ color: '#999', fontSize: 10, marginLeft: leaf ? 4 : 0 }}>{leaf ? ` [${consol}]` : consol}</span>}
+                          </>
+                        ) : 'ручной ввод'}
                       </TableCell>
                     )
                   })()}

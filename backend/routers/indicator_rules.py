@@ -68,8 +68,8 @@ async def get_rules(sheet_id: str, indicator_id: str):
                 "priority": r["priority"] or 0,
                 "formula": r["formula"] or "",
             })
-    # Fallback: if no rules found, look for per-cell formulas in cell_data
-    if not leaf and not consolidation and not scoped:
+    # Fallback: if no leaf formula from rules, look for per-cell formulas in cell_data
+    if not leaf:
         bindings = await db.execute_fetchall(
             "SELECT analytic_id, is_main FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order",
             (sheet_id,),

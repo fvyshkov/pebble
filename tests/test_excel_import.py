@@ -8,6 +8,8 @@ Verifies:
   4. Values match the Excel source
   5. Consolidation formulas extracted from year totals (non-SUM)
   6. Recalc produces correct consolidation values
+  7. Formula rules sync: getAllIndicatorRules and getIndicatorRules return same formulas
+  8. Adding a new analytic (подразделения) with hierarchy D1→D11,D12
 """
 from __future__ import annotations
 
@@ -177,3 +179,114 @@ def test_consolidation_after_recalc(imported):
     for exp, got in zip(sorted(expected_approx), vals_list):
         assert abs(exp - got) < 0.1, \
             f"Year consolidation mismatch: expected ~{exp}, got {got}. All: {vals_list}"
+
+
+def test_formula_rules_sync(imported):
+    """Formula rules from batch (grid) and individual (panel) endpoints must match.
+
+    The grid uses GET /sheets/{sid}/indicator-rules-all (batch).
+    The right panel uses GET /sheets/{sid}/indicators/{iid}/rules (individual).
+    Both must return the same leaf formula for each indicator.
+    """
+    sid = imported["sheet_id"]
+    # Batch endpoint (used by grid)
+    all_rules = _ok(_req("get", f"/sheets/{sid}/indicator-rules-all"), "batch rules").json()
+    assert len(all_rules) > 0, "Should have formula rules for some indicators"
+
+    # For each indicator that has a leaf formula in the batch, check individual endpoint
+    for ind_id, batch_entry in all_rules.items():
+        batch_leaf = batch_entry.get("leaf", "")
+        if not batch_leaf:
+            continue
+        # Individual endpoint (used by right panel)
+        ind_rules = _ok(
+            _req("get", f"/sheets/{sid}/indicators/{ind_id}/rules"),
+            f"individual rules for {ind_id}",
+        ).json()
+        panel_leaf = ind_rules.get("leaf", "")
+        assert panel_leaf == batch_leaf, \
+            f"Formula mismatch for indicator {ind_id}: grid={batch_leaf!r}, panel={panel_leaf!r}"
+
+
+def test_manual_indicators_have_no_formula_rules(imported):
+    """Indicators with only manual cells should NOT have formula rules."""
+    sid = imported["sheet_id"]
+    all_rules = _ok(_req("get", f"/sheets/{sid}/indicator-rules-all"), "batch rules").json()
+    cells = imported["cells"]
+
+    # Find indicators that are fully manual (all cells are manual)
+    indicator_rules: dict[str, set] = {}
+    for c in cells:
+        parts = c["coord_key"].split("|")
+        iid = parts[1] if len(parts) > 1 else parts[0]
+        indicator_rules.setdefault(iid, set()).add(c["rule"])
+
+    for iid, rules_set in indicator_rules.items():
+        if rules_set == {"manual"}:
+            # Fully manual indicator — should not have a leaf formula
+            entry = all_rules.get(iid, {})
+            assert not entry.get("leaf"), \
+                f"Manual indicator {iid} should not have leaf formula, got: {entry.get('leaf')}"
+
+
+def test_add_analytic_with_hierarchy(imported):
+    """Add a new analytic 'подразделения' with D1 → D11, D12 and verify structure."""
+    model_id = imported["model_id"]
+    sid = imported["sheet_id"]
+
+    # Create analytic
+    analytic = _ok(_req("post", "/analytics", json={
+        "model_id": model_id,
+        "name": "Подразделения",
+        "code": "divisions",
+    }), "create analytic").json()
+    aid = analytic["id"]
+
+    # Add fields: name
+    _ok(_req("post", f"/analytics/{aid}/fields", json={
+        "name": "Наименование", "code": "name", "field_type": "string",
+    }), "add name field")
+
+    # Create root record D1
+    d1 = _ok(_req("post", f"/analytics/{aid}/records", json={
+        "data_json": {"name": "D1"},
+    }), "create D1").json()
+
+    # Create child records D11, D12 under D1
+    d11 = _ok(_req("post", f"/analytics/{aid}/records", json={
+        "parent_id": d1["id"],
+        "data_json": {"name": "D11"},
+    }), "create D11").json()
+    d12 = _ok(_req("post", f"/analytics/{aid}/records", json={
+        "parent_id": d1["id"],
+        "data_json": {"name": "D12"},
+    }), "create D12").json()
+
+    # Verify hierarchy
+    records = _ok(_req("get", f"/analytics/{aid}/records"), "list records").json()
+    assert len(records) == 3, f"Expected 3 records, got {len(records)}"
+
+    children = [r for r in records if r.get("parent_id") == d1["id"]]
+    assert len(children) == 2, f"D1 should have 2 children, got {len(children)}"
+
+    child_names = sorted(
+        json.loads(r["data_json"]).get("name", "") if isinstance(r["data_json"], str)
+        else r["data_json"].get("name", "")
+        for r in children
+    )
+    assert child_names == ["D11", "D12"], f"Expected D11, D12; got {child_names}"
+
+    # Bind analytic to the sheet
+    _ok(_req("post", f"/sheets/{sid}/analytics", json={
+        "analytic_id": aid,
+    }), "bind analytic to sheet")
+
+    # Verify tree now shows the new analytic
+    tree = _ok(_req("get", f"/models/{model_id}/tree"), "get tree after analytic").json()
+    analytic_ids = [a["id"] for a in tree.get("analytics", [])]
+    assert aid in analytic_ids, "New analytic should appear in model tree"
+
+    # Recalc still works with the new analytic
+    _ok(_req("post", f"/cells/calculate/{sid}"), "recalc after adding analytic")
+    cells = _ok(_req("get", f"/cells/by-sheet/{sid}")).json()
+    assert len(cells) >= 15, f"Should still have at least 15 cells, got {len(cells)}"
