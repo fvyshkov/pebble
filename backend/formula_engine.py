@@ -834,9 +834,10 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                             oi += 1
                     ck = "|".join(parts)
                     gk = (sid, ck)
-                    if gk in computed_set:
-                        continue
-                    get_cell(sid, ck)
+                    if gk not in computed_set:
+                        get_cell(sid, ck)
+                    # Always mark as consol_computed so it gets saved
+                    # (may have been computed recursively by a parent's get_cell)
                     if gk in computed_set:
                         consol_computed.add(gk)
 
@@ -914,9 +915,8 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                                     oi += 1
                             ck = "|".join(parts)
                             gk = (sid, ck)
-                            if gk in computed_set:
-                                continue
-                            get_cell(sid, ck)
+                            if gk not in computed_set:
+                                get_cell(sid, ck)
                             if gk in computed_set:
                                 consol_computed.add(gk)
 

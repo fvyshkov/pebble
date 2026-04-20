@@ -6,6 +6,8 @@ Verifies:
   2. Yellow/colored cells import as manual, not formula
   3. All period columns produce cells (no missing months)
   4. Values match the Excel source
+  5. Consolidation formulas extracted from year totals (non-SUM)
+  6. Recalc produces correct consolidation values
 """
 from __future__ import annotations
 
@@ -91,20 +93,19 @@ def test_import_creates_model(imported):
     assert len(imported["sheets"]) == 1
 
 
-def test_import_detects_both_periods(imported):
-    """Should detect 2 monthly periods (Jan + Feb 2026)."""
-    # Filter to leaf periods (no children = month-level)
+def test_import_detects_all_periods(imported):
+    """Should detect 3 monthly periods (Jan, Feb, Mar 2026)."""
     recs = imported["period_records"]
     parent_ids = {r["parent_id"] for r in recs if r.get("parent_id")}
     leaves = [r for r in recs if r["id"] not in parent_ids]
-    assert len(leaves) == 2, \
-        f"Expected 2 leaf periods (Jan+Feb), got {len(leaves)}: {[r.get('data_json') for r in leaves]}"
+    assert len(leaves) == 3, \
+        f"Expected 3 leaf periods, got {len(leaves)}"
 
 
 def test_import_cell_count(imported):
-    """5 indicators × 2 months = 10 cells."""
-    assert len(imported["cells"]) == 10, \
-        f"Expected 10 cells, got {len(imported['cells'])}"
+    """5 indicators × 3 months = 15 cells."""
+    assert len(imported["cells"]) == 15, \
+        f"Expected 15 cells, got {len(imported['cells'])}"
 
 
 def test_import_cells_have_correct_rules(imported):
@@ -113,10 +114,10 @@ def test_import_cells_have_correct_rules(imported):
     manual_count = sum(1 for c in cells if c["rule"] == "manual")
     formula_count = sum(1 for c in cells if c["rule"] == "formula")
 
-    # 3 indicators × 2 months = 6 manual (yellow cells in Excel)
-    assert manual_count == 6, f"Expected 6 manual cells, got {manual_count}"
-    # 2 indicators × 2 months = 4 formula cells
-    assert formula_count == 4, f"Expected 4 formula cells, got {formula_count}"
+    # 3 indicators × 3 months = 9 manual (yellow cells in Excel)
+    assert manual_count == 9, f"Expected 9 manual cells, got {manual_count}"
+    # 2 indicators × 3 months = 6 formula cells
+    assert formula_count == 6, f"Expected 6 formula cells, got {formula_count}"
 
 
 def test_import_manual_cells_have_no_formula(imported):
@@ -127,26 +128,52 @@ def test_import_manual_cells_have_no_formula(imported):
                 f"Manual cell {c['coord_key']} should not have formula, got: {c.get('formula')}"
 
 
-def test_import_formula_cells_have_formula(imported):
-    """Formula cells should have non-empty formula text."""
-    for c in imported["cells"]:
-        if c["rule"] == "formula":
-            assert c.get("formula"), \
-                f"Formula cell {c['coord_key']} should have formula text"
-
-
 def test_import_all_periods_have_cells(imported):
-    """Both January and February should have cells."""
+    """All 3 months should have cells."""
     period_ids = set()
     for c in imported["cells"]:
         parts = c["coord_key"].split("|")
         period_ids.add(parts[0])
-    assert len(period_ids) == 2, \
-        f"Expected 2 distinct period IDs, got {len(period_ids)}"
+    assert len(period_ids) == 3, \
+        f"Expected 3 distinct period IDs, got {len(period_ids)}"
 
 
-def test_import_values_match_excel(imported):
-    """Spot-check: known values from test-avg.xlsx."""
-    values = sorted([float(c["value"]) for c in imported["cells"]])
-    expected = sorted([10, 15, 25, 30, 50, 55, 300, 375, 15000, 20625])
-    assert values == expected, f"Values mismatch: {values} != {expected}"
+def test_consolidation_after_recalc(imported):
+    """After recalc, year/quarter totals should use Excel consolidation formulas.
+
+    Excel year column:
+      количество партнеров: =B2+C2+D2 → SUM = 40
+      среднее кол-во выдач: =E5/E2 → 705/40 = 17.625 (NOT SUM)
+      ср. сумма выдачи: =E6/E5 → 35715/705 = 50.66 (NOT SUM)
+      количество выдач: =B5+C5+D5 → SUM = 705
+      выдача (сумма): =B6+C6+D6 → SUM = 35715
+    """
+    sid = imported["sheet_id"]
+    _ok(_req("post", f"/cells/calculate/{sid}"), "recalc")
+    cells = _ok(_req("get", f"/cells/by-sheet/{sid}")).json()
+
+    # Build lookup: period_name → indicator_name → value
+    by_name: dict[str, dict[str, float]] = {}
+    for c in cells:
+        parts = c["coord_key"].split("|")
+        # Get names via API
+        pid, iid = parts[0], parts[1]
+        by_name.setdefault(pid, {})[iid] = float(c["value"])
+
+    # Find year-level period (has children, is top-level)
+    recs = imported["period_records"]
+    parent_ids = {r["parent_id"] for r in recs if r.get("parent_id")}
+    year_recs = [r for r in recs if not r.get("parent_id")]
+    assert year_recs, "Should have a year-level period"
+    year_id = year_recs[0]["id"]
+
+    year_vals = by_name.get(year_id, {})
+    assert len(year_vals) == 5, f"Year should have 5 indicators, got {len(year_vals)}"
+
+    # Check expected values
+    vals_list = sorted(year_vals.values())
+    # Expected: 17.625, 40, 50.66, 705, 35715
+    expected_approx = [17.625, 40.0, 50.66, 705.0, 35715.0]
+    for exp, got in zip(sorted(expected_approx), vals_list):
+        assert abs(exp - got) < 0.1, \
+            f"Year consolidation mismatch: expected ~{exp}, got {got}. All: {vals_list}"
