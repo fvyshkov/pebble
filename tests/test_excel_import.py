@@ -338,6 +338,38 @@ def test_add_analytic_with_hierarchy(imported):
     assert len(cells) >= 15, f"Should still have at least 15 cells, got {len(cells)}"
 
 
+def test_panel_sync_with_3_analytics(imported):
+    """After adding a 3rd analytic, individual getIndicatorRules must still
+    return the same leaf formula as batch getAllIndicatorRules.
+
+    Regression: LIKE pattern '%|{id}' didn't match 3-part coord_keys
+    like 'period|indicator|division', so the panel showed 'ручной ввод'
+    while the grid showed the correct formula.
+    """
+    sid = imported["sheet_id"]
+    # Batch endpoint (grid)
+    all_rules = _ok(_req("get", f"/sheets/{sid}/indicator-rules-all"), "batch rules").json()
+
+    # For each indicator with a leaf formula, check individual endpoint matches
+    mismatches = []
+    for ind_id, batch_entry in all_rules.items():
+        batch_leaf = batch_entry.get("leaf", "")
+        if not batch_leaf:
+            continue
+        # Individual endpoint (panel)
+        ind_rules = _ok(
+            _req("get", f"/sheets/{sid}/indicators/{ind_id}/rules"),
+            f"individual rules for {ind_id}",
+        ).json()
+        panel_leaf = ind_rules.get("leaf", "")
+        if panel_leaf != batch_leaf:
+            mismatches.append(
+                f"{ind_id}: grid={batch_leaf!r}, panel={panel_leaf!r}"
+            )
+    assert not mismatches, \
+        f"Panel/grid leaf formula mismatch after adding 3rd analytic:\n" + "\n".join(mismatches)
+
+
 # ---------------------------------------------------------------------------
 # Large model tests (models.xlsx — multi-sheet financial model)
 # ---------------------------------------------------------------------------

@@ -91,9 +91,10 @@ async def get_rules(sheet_id: str, indicator_id: str):
             like_patterns = []
             if main_idx == 0:
                 like_patterns.append(f"{indicator_id}|%")
-            elif main_idx == 1:
-                like_patterns.append(f"%|{indicator_id}")
             else:
+                # Match indicator_id at any non-first position:
+                # could be "x|IND" (2 dims) or "x|IND|y" (3+ dims)
+                like_patterns.append(f"%|{indicator_id}")
                 like_patterns.append(f"%|{indicator_id}|%")
 
             for pat in like_patterns:
