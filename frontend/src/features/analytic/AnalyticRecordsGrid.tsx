@@ -292,7 +292,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
       </Box>
 
       {fields.length > 0 && (
-        <Table size="small" sx={{ tableLayout: 'fixed', '& td, & th': { py: 0.5, px: 1, wordBreak: 'break-word', whiteSpace: 'normal', overflow: 'hidden' } }}>
+        <Table size="small" sx={{ tableLayout: 'fixed', '& td, & th': { py: 0.5, px: 1, wordBreak: 'break-word', whiteSpace: 'normal', overflow: 'hidden', borderRight: '1px solid', borderColor: 'divider' }, '& th': { borderBottom: '2px solid', borderBottomColor: 'divider' } }}>
           <TableHead>
             <TableRow>
               {fields.map(f => (
@@ -343,7 +343,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   }}
                 >
                   {fields.map((f, fi) => (
-                    <TableCell key={f.id} sx={fi === 0 ? { pl: node.level * 3 + 1 } : undefined}>
+                    <TableCell key={f.id} sx={fi === 0 ? { pl: node.level * 6 + 1 } : undefined}>
                       {fi === 0 ? (
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0 }}>
                           <Box className="row-actions" sx={{ display: 'flex', gap: 0, transition: 'opacity 0.15s', flexShrink: 0 }}>
