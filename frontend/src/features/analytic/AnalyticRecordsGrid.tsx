@@ -394,7 +394,8 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   {mainSheets.length > 0 && (() => {
                     const f = formulas[node.record.id]
                     const leaf = f?.leaf || ''
-                    const consol = f?.consolidation || ''
+                    // Consolidation: empty = SUM (default formula), always a formula
+                    const consol = f?.consolidation || 'SUM'
                     const formulaCellSx = (txt: string) => ({
                       cursor: 'pointer',
                       fontFamily: txt ? 'monospace' : undefined,
@@ -417,9 +418,9 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                         data-testid={`consol-cell-${node.record.id}`}
                         onClick={e => { e.stopPropagation(); setSelectedRecordId(node.record.id) }}
                         sx={formulaCellSx(consol)}
-                        title={consol || 'SUM (по умолчанию)'}
+                        title={consol}
                       >
-                        {consol || 'SUM'}
+                        {consol}
                       </TableCell>
                     </>)
                   })()}

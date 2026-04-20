@@ -1261,6 +1261,27 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         color: '#0d47a1',
         fontWeight: 600,
       }),
+      tooltipValueGetter: (p: any) => {
+        if (!groupRecordId || !p.data?.recordIds) return null
+        const dbOrd = dbOrdRef.current
+        const colAId = colAIdRef.current
+        const parts: string[] = []
+        for (const a of dbOrd) {
+          if (a === colAId) parts.push(groupRecordId)
+          else {
+            const rid = p.data.recordIds[a]
+            if (rid) parts.push(rid)
+          }
+        }
+        if (parts.length < 2) return null
+        const key = parts.join('|')
+        const f = formulaMapRef.current[key]
+        if (f) return `ƒ ${f}`
+        const resolved = resolvedFormulaMapRef.current[key]
+        if (resolved?.formula) return `ƒ ${resolved.formula}`
+        return 'Σ сумма нижестоящих'
+      },
+      tooltipComponent: FormulaTooltip,
     }
   }
 
