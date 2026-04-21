@@ -1192,12 +1192,91 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyKey, setHistoryKey] = useState('')
   const [historyData, setHistoryData] = useState<any[]>([])
+  const [chartOverlay, setChartOverlay] = useState<{ type: string; labels: string[]; datasets: any[] } | null>(null)
+  const chartCanvasRef = useRef<HTMLCanvasElement>(null)
+  const chartInstanceRef = useRef<any>(null)
 
-  const handleContextMenu = (e: React.MouseEvent, coordKey: string, rule: CellRule) => {
-    if (rule !== 'manual') return
+  const handleContextMenu = (e: React.MouseEvent, coordKey: string, _rule: CellRule) => {
     e.preventDefault()
     setCtxMenu({ x: e.clientX, y: e.clientY, coordKey })
   }
+
+  const buildChartFromSelection = useCallback((chartType: string) => {
+    setCtxMenu(null)
+    const { r1, c1, r2, c2 } = selRange
+    // Column labels (from displayCols)
+    const colLabels: string[] = []
+    for (let ci = c1; ci <= c2; ci++) {
+      const col = displayCols[ci]
+      if (col) colLabels.push(col.node.data?.name || `Col ${ci}`)
+    }
+    // Row data — each row becomes a dataset (series)
+    const COLORS = ['#1976d2','#e53935','#43a047','#fb8c00','#8e24aa','#00acc1','#6d4c41','#d81b60']
+    const datasets: any[] = []
+    for (let ri = r1; ri <= r2; ri++) {
+      const row = visibleRows[ri]
+      if (!row) continue
+      const rowLabel = row.label || Object.values(row.recordIds).join(' / ')
+      const values: number[] = []
+      for (let ci = c1; ci <= c2; ci++) {
+        const col = displayCols[ci]
+        if (!col) { values.push(0); continue }
+        if (col.isSum) {
+          const rowCombos = getAllLeafRecordCombinations(row)
+          let sum = 0
+          for (const combo of rowCombos)
+            for (const leafId of col.leafIds) {
+              const k = makeLeafCoordKey(combo, leafId)
+              const v = cells[k]; if (v !== undefined && v !== '') { const n = parseFloat(v); if (!isNaN(n)) sum += n }
+            }
+          values.push(sum)
+        } else {
+          const coordKey = makeCoordKey(row.recordIds, col.node.record.id)
+          const rule = resolveRule(coordKey, row.isGroup)
+          if (rule === 'sum_children' && isNumeric) {
+            values.push(computeSum(row, col.node.record.id) ?? 0)
+          } else {
+            const v = cells[coordKey]
+            values.push(v ? parseFloat(v) || 0 : 0)
+          }
+        }
+      }
+      const color = COLORS[datasets.length % COLORS.length]
+      datasets.push({
+        label: rowLabel,
+        data: values,
+        backgroundColor: chartType === 'pie' ? COLORS.slice(0, colLabels.length) : color,
+        borderColor: chartType === 'pie' ? '#fff' : color,
+        borderWidth: chartType === 'pie' ? 2 : 2,
+        fill: false,
+      })
+    }
+    setChartOverlay({ type: chartType, labels: colLabels, datasets })
+  }, [selRange, visibleRows, displayCols, cells, recordsByAnalytic, makeCoordKey, makeLeafCoordKey, getAllLeafRecordCombinations, resolveRule, isNumeric, computeSum])
+
+  // Render chart when overlay data changes
+  useEffect(() => {
+    if (!chartOverlay || !chartCanvasRef.current) return
+    // Dynamically load Chart.js
+    const render = () => {
+      const Chart = (window as any).Chart
+      if (!Chart) return
+      if (chartInstanceRef.current) chartInstanceRef.current.destroy()
+      chartInstanceRef.current = new Chart(chartCanvasRef.current, {
+        type: chartOverlay.type === 'pie' ? 'pie' : chartOverlay.type === 'line' ? 'line' : 'bar',
+        data: { labels: chartOverlay.labels, datasets: chartOverlay.datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: chartOverlay.datasets.length > 1 || chartOverlay.type === 'pie' } },
+        },
+      })
+    }
+    if ((window as any).Chart) { render(); return }
+    const script = document.createElement('script')
+    script.src = 'https://cdn.jsdelivr.net/npm/chart.js'
+    script.onload = render
+    document.head.appendChild(script)
+  }, [chartOverlay])
 
   const showHistory = async (coordKey: string) => {
     setCtxMenu(null)
@@ -1779,17 +1858,52 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           sx={{
             position: 'fixed', left: ctxMenu.x, top: ctxMenu.y, zIndex: 1400,
             bgcolor: '#fff', border: '1px solid #e0e0e0', borderRadius: 1,
-            boxShadow: 2, py: 0.5, minWidth: 120,
+            boxShadow: 2, py: 0.5, minWidth: 160,
           }}
-          onClick={() => setCtxMenu(null)}
         >
           <Box sx={{ px: 2, py: 0.5, cursor: 'pointer', fontSize: 13, '&:hover': { bgcolor: '#f0f0f0' } }}
             onClick={() => showHistory(ctxMenu.coordKey)}>
-            История
+            История изменений
+          </Box>
+          <Box sx={{ borderTop: '1px solid #eee', my: 0.25 }} />
+          <Box sx={{ px: 2, py: 0.5, fontSize: 12, color: '#888', fontWeight: 500 }}>График</Box>
+          <Box sx={{ px: 2, py: 0.5, cursor: 'pointer', fontSize: 13, '&:hover': { bgcolor: '#f0f0f0' } }}
+            onClick={() => buildChartFromSelection('bar')}>
+            Столбчатая
+          </Box>
+          <Box sx={{ px: 2, py: 0.5, cursor: 'pointer', fontSize: 13, '&:hover': { bgcolor: '#f0f0f0' } }}
+            onClick={() => buildChartFromSelection('line')}>
+            Линейная
+          </Box>
+          <Box sx={{ px: 2, py: 0.5, cursor: 'pointer', fontSize: 13, '&:hover': { bgcolor: '#f0f0f0' } }}
+            onClick={() => buildChartFromSelection('pie')}>
+            Круговая
           </Box>
         </Box>
       )}
       {ctxMenu && <Box sx={{ position: 'fixed', inset: 0, zIndex: 1399 }} onClick={() => setCtxMenu(null)} />}
+
+      {/* Chart overlay */}
+      {chartOverlay && (
+        <Box sx={{
+          position: 'absolute', inset: 40, zIndex: 1300,
+          bgcolor: '#fff', border: '1px solid #e0e0e0', borderRadius: 2,
+          boxShadow: 4, display: 'flex', flexDirection: 'column',
+        }}>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', p: 0.5 }}>
+            <IconButton size="small" onClick={() => {
+              if (chartInstanceRef.current) chartInstanceRef.current.destroy()
+              chartInstanceRef.current = null
+              setChartOverlay(null)
+            }}>
+              <Icons.CloseOutlined fontSize="small" />
+            </IconButton>
+          </Box>
+          <Box sx={{ flex: 1, p: 2, minHeight: 0 }}>
+            <canvas ref={chartCanvasRef} />
+          </Box>
+        </Box>
+      )}
 
       {/* History dialog */}
       <Dialog open={historyOpen} onClose={() => setHistoryOpen(false)} maxWidth="sm" fullWidth>
