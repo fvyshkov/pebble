@@ -238,10 +238,10 @@ export default function ChatPanel({
       const err = ev?.error || 'unknown'
       console.warn('[voice] SpeechRecognition error:', err)
       if (err === 'not-allowed' || err === 'service-not-allowed') {
-        // Microphone permission denied
-        setVoiceUnsupported(true)
+        // Permission denied — stop listening but don't permanently disable
         recognitionRef.current = null
         setListening(false)
+        stopMicMeter()
       }
       // 'no-speech' and 'aborted' are transient — onend will restart
     }
@@ -253,11 +253,12 @@ export default function ChatPanel({
     }
     recognitionRef.current = rec
     setListening(true)
-    startMicMeter()
-    try { rec.start() } catch (e) {
+    try {
+      rec.start()
+      startMicMeter() // only start mic meter after recognition starts
+    } catch (e) {
       console.error('[voice] start failed:', e)
       setListening(false)
-      stopMicMeter()
     }
   }, [listening, startMicMeter, stopMicMeter])
 
