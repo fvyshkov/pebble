@@ -55,9 +55,13 @@ export default function ChatPanel({
   // Voice input state
   const [listening, setListening] = useState(false)
   const [voiceUnsupported, setVoiceUnsupported] = useState(false)
+  const [micLevel, setMicLevel] = useState(0) // 0..1 audio level
   const recognitionRef = useRef<any>(null)
   const sendRef = useRef<(text: string) => void>(() => {})
   const pauseTimerRef = useRef<number | null>(null)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const micStreamRef = useRef<MediaStream | null>(null)
+  const animFrameRef = useRef<number>(0)
   // TTS bookkeeping: index of the last assistant message we've already spoken.
   const lastSpokenRef = useRef<number>(-1)
 
@@ -144,6 +148,39 @@ export default function ChatPanel({
   // always hit the latest closure without reattaching handlers on every render.
   useEffect(() => { sendRef.current = send }, [send])
 
+  // Mic level meter via Web Audio API
+  const startMicMeter = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      micStreamRef.current = stream
+      const ctx = new AudioContext()
+      audioCtxRef.current = ctx
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 256
+      source.connect(analyser)
+      const buf = new Uint8Array(analyser.frequencyBinCount)
+      const tick = () => {
+        analyser.getByteFrequencyData(buf)
+        let sum = 0
+        for (let i = 0; i < buf.length; i++) sum += buf[i]
+        setMicLevel(Math.min(1, (sum / buf.length) / 128))
+        animFrameRef.current = requestAnimationFrame(tick)
+      }
+      tick()
+    } catch { /* mic access denied — speech recognition handles this */ }
+  }, [])
+
+  const stopMicMeter = useCallback(() => {
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current)
+    animFrameRef.current = 0
+    audioCtxRef.current?.close()
+    audioCtxRef.current = null
+    micStreamRef.current?.getTracks().forEach(t => t.stop())
+    micStreamRef.current = null
+    setMicLevel(0)
+  }, [])
+
   // Voice input: Web Speech API. Recognition runs continuously; after a
   // ~1.2 s silence we auto-submit the accumulated transcript and keep the
   // mic open for the next utterance (so user can dictate multiple commands).
@@ -155,6 +192,7 @@ export default function ChatPanel({
       recognitionRef.current?.stop?.()
       recognitionRef.current = null
       setListening(false)
+      stopMicMeter()
       if (pauseTimerRef.current) {
         window.clearTimeout(pauseTimerRef.current)
         pauseTimerRef.current = null
@@ -215,17 +253,20 @@ export default function ChatPanel({
     }
     recognitionRef.current = rec
     setListening(true)
+    startMicMeter()
     try { rec.start() } catch (e) {
       console.error('[voice] start failed:', e)
       setListening(false)
+      stopMicMeter()
     }
-  }, [listening])
+  }, [listening, startMicMeter, stopMicMeter])
 
   // Cleanup on unmount
   useEffect(() => () => {
     recognitionRef.current?.stop?.()
     if (pauseTimerRef.current) window.clearTimeout(pauseTimerRef.current)
-  }, [])
+    stopMicMeter()
+  }, [stopMicMeter])
 
   // Global shortcut: App.tsx dispatches 'pebble:toggleVoice' on double-space.
   useEffect(() => {
@@ -369,6 +410,19 @@ export default function ChatPanel({
               : listening ? 'слушаю… (пауза → отправка)'
               : 'голос выключен'}
           </span>
+          {listening && (
+            <Box sx={{
+              flex: 1, height: 6, borderRadius: 3, background: '#e0e0e0',
+              overflow: 'hidden', ml: 0.5,
+            }}>
+              <Box sx={{
+                height: '100%', borderRadius: 3,
+                width: `${Math.round(micLevel * 100)}%`,
+                background: micLevel > 0.5 ? '#4caf50' : micLevel > 0.15 ? '#ff9800' : '#bdbdbd',
+                transition: 'width 60ms linear, background 120ms',
+              }} />
+            </Box>
+          )}
         </Box>
       </Box>
     </Box>
