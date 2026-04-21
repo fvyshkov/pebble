@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Box, IconButton, TextField, CircularProgress, Typography, Tooltip } from '@mui/material'
 import SendOutlined from '@mui/icons-material/SendOutlined'
+import StopOutlined from '@mui/icons-material/StopOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import ClearAllOutlined from '@mui/icons-material/ClearAllOutlined'
 import ContentCopyOutlined from '@mui/icons-material/ContentCopyOutlined'
@@ -60,6 +61,7 @@ export default function ChatPanel({
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatInputRef = useRef<HTMLInputElement>(null)
   const typingRef = useRef<number>(0) // animation frame id
+  const abortRef = useRef<AbortController | null>(null)
   // Prompt history index for ArrowUp/Down navigation
   const historyPosRef = useRef(-1) // -1 = current input, 0..N = index into user messages (reversed)
   const savedInputRef = useRef('')
@@ -164,6 +166,8 @@ export default function ChatPanel({
     setInput('')
     setLoading(true)
     setThinkingSteps([])
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
       const payload = nextMsgs.map(m => ({ role: m.role, content: m.raw.content }))
       await api.chatMessageStream(payload, context, (event) => {
@@ -184,8 +188,14 @@ export default function ChatPanel({
             raw: { role: 'assistant', content: `Ошибка: ${event.text}` },
           }])
         }
-      })
+      }, controller.signal)
     } catch (e: any) {
+      if (e.name === 'AbortError' || controller.signal.aborted) {
+        // User clicked stop — just clear loading state
+        setLoading(false)
+        setThinkingSteps([])
+        return
+      }
       setMessages(prev => [...prev, {
         role: 'assistant',
         text: `⚠️ Ошибка: ${e.message || e}`,
@@ -542,14 +552,24 @@ export default function ChatPanel({
             }}
             inputProps={{ 'data-testid': 'chat-input' }}
           />
-          <IconButton
-            onClick={() => { const v = input.trim(); if (v) send(v) }}
-            disabled={loading || !input.trim()}
-            data-testid="chat-send"
-            color="primary"
-          >
-            <SendOutlined />
-          </IconButton>
+          {loading ? (
+            <IconButton
+              onClick={() => abortRef.current?.abort()}
+              data-testid="chat-stop"
+              color="error"
+            >
+              <StopOutlined />
+            </IconButton>
+          ) : (
+            <IconButton
+              onClick={() => { const v = input.trim(); if (v) send(v) }}
+              disabled={!input.trim()}
+              data-testid="chat-send"
+              color="primary"
+            >
+              <SendOutlined />
+            </IconButton>
+          )}
         </Box>
         {/* Mode bar: voice toggle */}
         <Box sx={{

@@ -270,11 +270,13 @@ export const chatMessageStream = async (
   messages: { role: string; content: any }[],
   context: { current_model_id?: string | null; current_sheet_id?: string | null; user_id?: string | null },
   onEvent: (event: { type: string; text: string; actions?: ChatAction[] }) => void,
+  signal?: AbortSignal,
 ) => {
   const resp = await fetch(`${BASE}/chat/message-stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ messages, context }),
+    signal,
   })
   if (!resp.ok) {
     let detail = resp.statusText
