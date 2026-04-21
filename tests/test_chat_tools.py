@@ -183,8 +183,8 @@ def test_build_presentation_via_chat(logged_in_page: Page):
     """Asking for a presentation produces an iframe with HTML report."""
     page = logged_in_page
 
-    # Close chart if open
-    close_btn = page.locator('button:has([data-testid="CloseOutlinedIcon"])')
+    # Close chart if open (use first() to avoid strict mode violation with multiple close btns)
+    close_btn = page.locator('button:has([data-testid="CloseOutlinedIcon"])').first
     if close_btn.is_visible(timeout=1000):
         close_btn.click()
         page.wait_for_timeout(500)
