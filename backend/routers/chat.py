@@ -787,10 +787,10 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
 
         if name == "read_sheet_data":
             rows = await db.execute_fetchall(
-                "SELECT coord_key, value, rule FROM cell_data WHERE sheet_id = ?",
+                "SELECT coord_key, value FROM cell_data WHERE sheet_id = ? AND value IS NOT NULL AND value != '' AND value != '0' LIMIT 500",
                 (inp["sheet_id"],),
             )
-            return json.dumps([dict(r) for r in rows], ensure_ascii=False)
+            return json.dumps([{"k": r["coord_key"], "v": r["value"]} for r in rows], ensure_ascii=False)
 
         if name == "set_cell":
             # Upsert manual cell value
@@ -1277,8 +1277,13 @@ async def chat_message(req: ChatRequest):
     if ctx_lines:
         system += "\n\nКонтекст:\n" + "\n".join(ctx_lines)
 
-    # Convert messages to Anthropic format (pass through; frontend sends correct shape)
+    # Convert messages to Anthropic format; keep only last 20 to avoid context overflow
     messages = [m.model_dump() for m in req.messages]
+    if len(messages) > 20:
+        messages = messages[-20:]
+        # Ensure first message is from user (Anthropic requirement)
+        while messages and messages[0].get("role") != "user":
+            messages.pop(0)
     client_actions: list[dict] = []
 
     # Tool-use loop (cap at 8 iterations to prevent runaway)
