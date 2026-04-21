@@ -428,9 +428,11 @@ export default function ChatPanel({
                 className="copy-btn"
                 size="small"
                 sx={{
-                  position: 'absolute', top: 2, right: -28,
+                  position: 'absolute', top: 2,
+                  ...(m.role === 'user' ? { left: -28 } : { right: -28 }),
                   opacity: 0, transition: 'opacity 0.15s',
-                  color: '#999', '&:hover': { color: '#555' },
+                  color: m.role === 'user' ? 'rgba(255,255,255,0.6)' : '#999',
+                  '&:hover': { color: m.role === 'user' ? '#fff' : '#555' },
                 }}
                 onClick={() => {
                   navigator.clipboard.writeText(m.text)
