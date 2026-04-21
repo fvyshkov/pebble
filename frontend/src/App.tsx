@@ -25,7 +25,7 @@ import LeftPanel from './panels/LeftPanel'
 import CenterPanel from './panels/CenterPanel'
 import Splitter from './components/Splitter'
 import UsersDialog from './components/UsersDialog'
-import PivotGrid from './features/sheet/PivotGrid'
+// PivotGrid removed — AG Grid is the only grid
 import PivotGridAG from './features/sheet/PivotGridAG'
 import ChatPanel from './features/chat/ChatPanel'
 import ChartPanel, { type ChartConfig } from './features/chart/ChartPanel'
@@ -246,10 +246,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   })
   useEffect(() => { localStorage.setItem('pebble_chatWidth', String(chatWidth)) }, [chatWidth])
   const [chatImportFile, setChatImportFile] = useState<File | null>(null)
-  // AG Grid is now the only supported mode. The toggle is hidden, but the
-  // state + legacy PivotGrid code path are kept for emergency fallback.
-  // Intentionally no localStorage persistence: page reload always = AG Grid.
-  const [useAgGrid, setUseAgGrid] = useState<boolean>(true)
+  // AG Grid is the only grid mode now.
   const [chartConfig, setChartConfig] = useState<ChartConfig | null>(null)
   const [presentation, setPresentation] = useState<{ html: string; title: string } | null>(null)
   const calcedModelsRef = useRef<Set<string>>(new Set())
@@ -514,20 +511,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             </Tooltip>
           )}
 
-          {/* AG Grid toggle hidden — AG is the only active mode. Keep the
-              legacy PivotGrid path compiled in case we need to fall back. */}
-          {false && (
-            <Tooltip title={useAgGrid ? 'Переключиться на старый grid' : 'Переключиться на AG Grid (бета)'}>
-              <IconButton
-                size="small"
-                onClick={() => setUseAgGrid(v => !v)}
-                data-testid="aggrid-toggle"
-                sx={{ color: useAgGrid ? '#1976d2' : undefined, fontSize: 12 }}
-              >
-                <span style={{ fontWeight: 700, fontSize: 11 }}>{useAgGrid ? 'AG' : 'old'}</span>
-              </IconButton>
-            </Tooltip>
-          )}
 
           <Tooltip title={chatOpen ? 'Скрыть AI-чат (⌘J)' : 'AI-помощник (⌘J)'}>
             <IconButton
@@ -574,23 +557,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             ) : mode === 'settings' ? (
               <CenterPanel selection={selection} onRefresh={onRefresh} />
             ) : isSheetSelected ? (
-              useAgGrid ? (
-                <PivotGridAG
-                  key={`ag-${selection.id}-${refreshKey}-${mode}`}
-                  sheetId={selection.id} modelId={selection.modelId}
-                  currentUserId={currentUserId}
-                  calcProgress={calcProgress}
-                  mode={mode === 'formulas' ? 'formulas' : 'data'}
-                />
-              ) : (
-                <PivotGrid
-                  key={`${selection.id}-${refreshKey}`}
-                  sheetId={selection.id} modelId={selection.modelId}
-                  currentUserId={currentUserId}
-                  mode={mode === 'formulas' ? 'settings' : 'data'}
-                  calcMode={calcMode}
-                />
-              )
+              <PivotGridAG
+                key={`ag-${selection.id}-${refreshKey}-${mode}`}
+                sheetId={selection.id} modelId={selection.modelId}
+                currentUserId={currentUserId}
+                calcProgress={calcProgress}
+                mode={mode === 'formulas' ? 'formulas' : 'data'}
+              />
             ) : (
               <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
                 Выберите лист для просмотра данных

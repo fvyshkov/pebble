@@ -8,7 +8,8 @@
  * and `treeData={true}`.
  */
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
-import { Box, Chip, CircularProgress, LinearProgress, Snackbar, Tooltip, Typography, Button as MUIButton } from '@mui/material'
+import { Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, LinearProgress, Snackbar, Tooltip, Typography, Button as MUIButton, IconButton } from '@mui/material'
+import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import { AgGridReact } from 'ag-grid-react'
 import {
   ModuleRegistry,
@@ -315,6 +316,14 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   // indicator_id from a coord_key by splitting on '|' and picking that slot).
   const mainAnalyticIdRef = useRef<string | null>(null)
   const mainAnalyticIdxRef = useRef<number>(-1)
+
+  // Chart overlay + history dialog
+  const [chartOverlay, setChartOverlay] = useState<{ type: string; labels: string[]; datasets: any[] } | null>(null)
+  const chartCanvasRef = useRef<HTMLCanvasElement>(null)
+  const chartInstanceRef = useRef<any>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyData, setHistoryData] = useState<any[]>([])
+  const [historyKey, setHistoryKey] = useState('')
 
   // Cmd/Ctrl+R — Excel fill-right over the selected range. Handled at the
   // window level (capture phase) so we beat the browser's reload shortcut
@@ -1720,6 +1729,92 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     })
   }, [sheetId, currentUserId, recomputeParentsForField, refreshAndFlashParents])
 
+  // ── Context menu: chart + history ───────────────────────────────────
+  const buildChartFromSelection = useCallback((chartType: string) => {
+    const grid = gridApiRef.current
+    if (!grid) return
+    const ranges = grid.getCellRanges() || []
+    if (ranges.length === 0) return
+    const r = ranges[0]
+    const cols = r.columns || []
+    const si = Math.min(r.startRow?.rowIndex ?? 0, r.endRow?.rowIndex ?? 0)
+    const ei = Math.max(r.startRow?.rowIndex ?? 0, r.endRow?.rowIndex ?? 0)
+    const colLabels = cols.map(c => {
+      const hdr = c.getColDef()?.headerName || c.getColId()
+      return hdr
+    })
+    const COLORS = ['#1976d2','#e53935','#43a047','#fb8c00','#8e24aa','#00acc1','#6d4c41','#d81b60']
+    const datasets: any[] = []
+    for (let ri = si; ri <= ei; ri++) {
+      const node = grid.getDisplayedRowAtIndex(ri)
+      if (!node?.data) continue
+      const rowLabel = node.data.label || `Row ${ri}`
+      const values = cols.map(c => {
+        const v = node.data[c.getColId()]
+        return v != null ? (typeof v === 'number' ? v : parseFloat(String(v)) || 0) : 0
+      })
+      const color = COLORS[datasets.length % COLORS.length]
+      datasets.push({
+        label: rowLabel, data: values,
+        backgroundColor: chartType === 'pie' ? COLORS.slice(0, colLabels.length) : color,
+        borderColor: chartType === 'pie' ? '#fff' : color,
+        borderWidth: 2, fill: false,
+      })
+    }
+    setChartOverlay({ type: chartType, labels: colLabels, datasets })
+  }, [])
+
+  useEffect(() => {
+    if (!chartOverlay || !chartCanvasRef.current) return
+    const render = () => {
+      const Chart = (window as any).Chart
+      if (!Chart) return
+      if (chartInstanceRef.current) chartInstanceRef.current.destroy()
+      chartInstanceRef.current = new Chart(chartCanvasRef.current, {
+        type: chartOverlay.type === 'pie' ? 'pie' : chartOverlay.type === 'line' ? 'line' : 'bar',
+        data: { labels: chartOverlay.labels, datasets: chartOverlay.datasets },
+        options: { responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: chartOverlay.datasets.length > 1 || chartOverlay.type === 'pie' } } },
+      })
+    }
+    if ((window as any).Chart) { render(); return }
+    const script = document.createElement('script')
+    script.src = 'https://cdn.jsdelivr.net/npm/chart.js'
+    script.onload = render
+    document.head.appendChild(script)
+  }, [chartOverlay])
+
+  const showHistory = useCallback(async (coordKey: string) => {
+    setHistoryKey(coordKey)
+    const data = await api.getCellHistory(sheetId, coordKey)
+    setHistoryData(data)
+    setHistoryOpen(true)
+  }, [sheetId])
+
+  const getContextMenuItems = useCallback((params: any): any[] => {
+    const node = params.node
+    const colId = params.column?.getColId?.() || ''
+    const coordKey = node?.data?.[`__coord_${colId.replace('p_', '')}`] || ''
+    return [
+      'copy', 'copyWithHeaders', 'paste', 'separator', 'export',
+      'separator',
+      {
+        name: 'История изменений',
+        disabled: !coordKey,
+        action: () => { if (coordKey) showHistory(coordKey) },
+      },
+      'separator',
+      {
+        name: 'График',
+        subMenu: [
+          { name: 'Столбчатая', action: () => buildChartFromSelection('bar') },
+          { name: 'Линейная', action: () => buildChartFromSelection('line') },
+          { name: 'Круговая', action: () => buildChartFromSelection('pie') },
+        ],
+      },
+    ]
+  }, [showHistory, buildChartFromSelection])
+
   // ── Render ─────────────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -1822,6 +1917,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           suppressRowHoverHighlight
           rowSelection={undefined}
           onCellSelectionChanged={updateSelectionStats}
+          getContextMenuItems={getContextMenuItems}
           statusBar={{
             statusPanels: [
               { statusPanel: 'recalcStatusPanel', align: 'left' },
@@ -1905,6 +2001,59 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           }
         }}
       />
+
+      {/* Chart overlay */}
+      {chartOverlay && (
+        <Box sx={{
+          position: 'absolute', inset: 40, zIndex: 1300,
+          bgcolor: '#fff', border: '1px solid #e0e0e0', borderRadius: 2,
+          boxShadow: 4, display: 'flex', flexDirection: 'column',
+        }}>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', p: 0.5 }}>
+            <IconButton size="small" onClick={() => {
+              if (chartInstanceRef.current) chartInstanceRef.current.destroy()
+              chartInstanceRef.current = null
+              setChartOverlay(null)
+            }}>
+              <CloseOutlined fontSize="small" />
+            </IconButton>
+          </Box>
+          <Box sx={{ flex: 1, p: 2, minHeight: 0 }}>
+            <canvas ref={chartCanvasRef} />
+          </Box>
+        </Box>
+      )}
+
+      {/* History dialog */}
+      <Dialog open={historyOpen} onClose={() => setHistoryOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ py: 1 }}>История изменений</DialogTitle>
+        <DialogContent>
+          {historyData.length === 0 ? (
+            <Typography variant="body2" color="textSecondary">Нет изменений</Typography>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>Дата/время</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>Пользователь</th>
+                  <th style={{ textAlign: 'right', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>Было</th>
+                  <th style={{ textAlign: 'right', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>Стало</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historyData.map((h: any, i: number) => (
+                  <tr key={i}>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0' }}>{h.created_at?.replace('T', ' ').slice(0, 19)}</td>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0' }}>{h.username || '—'}</td>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0', textAlign: 'right', color: '#999' }}>{h.old_value ?? '—'}</td>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>{h.new_value ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Snackbar
         open={!!promoteSnack}

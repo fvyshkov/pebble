@@ -253,44 +253,32 @@ def test_chat_attach_button(logged_in_page: Page):
 
 
 def test_grid_context_menu_chart_options(logged_in_page: Page):
-    """Right-clicking a grid cell shows chart options in context menu."""
+    """Right-clicking an AG Grid cell shows chart + history options."""
     page = logged_in_page
     # Navigate to a sheet with data — click first sheet in tree
     sheet_item = page.locator('.MuiTreeItem-root .MuiTreeItem-root').first
     if sheet_item.is_visible(timeout=3000):
         sheet_item.click()
-        page.wait_for_timeout(1500)
-    # Find a data cell (td in the pivot grid)
-    cell = page.locator('table tbody td').nth(1)
-    if cell.is_visible(timeout=3000):
+        page.wait_for_timeout(2000)
+    # Find an AG Grid data cell
+    cell = page.locator('.ag-cell-value').first
+    if cell.is_visible(timeout=5000):
         cell.click(button='right')
+        page.wait_for_timeout(500)
+        # AG Grid context menu should show our custom items
+        history_option = page.locator('.ag-menu-option:has-text("История изменений")')
+        chart_option = page.locator('.ag-menu-option:has-text("График")')
+        expect(history_option).to_be_visible(timeout=3000)
+        expect(chart_option).to_be_visible(timeout=3000)
+        # Hover over "График" to see sub-menu
+        chart_option.hover()
         page.wait_for_timeout(300)
-        # Context menu should show chart options AND history
-        bar_option = page.locator('text=Столбчатая')
-        line_option = page.locator('text=Линейная')
-        pie_option = page.locator('text=Круговая')
-        history_option = page.locator('text=История изменений')
+        bar_option = page.locator('.ag-menu-option:has-text("Столбчатая")')
+        line_option = page.locator('.ag-menu-option:has-text("Линейная")')
+        pie_option = page.locator('.ag-menu-option:has-text("Круговая")')
         expect(bar_option).to_be_visible(timeout=2000)
         expect(line_option).to_be_visible(timeout=2000)
         expect(pie_option).to_be_visible(timeout=2000)
-        expect(history_option).to_be_visible(timeout=2000)
-        # Click away to close
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(300)
-
-
-def test_grid_context_menu_on_formula_cell(logged_in_page: Page):
-    """Right-clicking a formula/sum cell also shows the context menu."""
-    page = logged_in_page
-    # Try to find any cell (formula, sum, or data) in the grid
-    cells = page.locator('table tbody td')
-    count = cells.count()
-    if count > 2:
-        # Right-click the 3rd cell (more likely to be a non-manual cell)
-        cells.nth(2).click(button='right')
-        page.wait_for_timeout(300)
-        # Context menu should appear with chart options
-        bar_option = page.locator('text=Столбчатая')
-        expect(bar_option).to_be_visible(timeout=2000)
+        # Close menu
         page.keyboard.press("Escape")
         page.wait_for_timeout(300)
