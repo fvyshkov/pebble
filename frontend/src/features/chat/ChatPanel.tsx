@@ -60,9 +60,8 @@ export default function ChatPanel({
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatInputRef = useRef<HTMLInputElement>(null)
   const typingRef = useRef<number>(0) // animation frame id
-  // Prompt history (ArrowUp/Down in empty input)
-  const historyRef = useRef<string[]>([])
-  const historyPosRef = useRef(-1)
+  // Prompt history index for ArrowUp/Down navigation
+  const historyPosRef = useRef(-1) // -1 = current input, 0..N = index into user messages (reversed)
   const savedInputRef = useRef('')
   // Voice input state
   const [listening, setListening] = useState(false)
@@ -156,8 +155,6 @@ export default function ChatPanel({
       localStorage.removeItem(STORAGE_KEY)
       return
     }
-    // Push to prompt history
-    historyRef.current.push(text)
     historyPosRef.current = -1
     savedInputRef.current = ''
 
@@ -510,11 +507,11 @@ export default function ChatPanel({
                 const v = input.trim()
                 if (v) send(v)
               } else if (e.key === 'ArrowUp' && !e.shiftKey) {
+                // Derive history from all user messages (oldest first)
+                const hist = messages.filter(m => m.role === 'user').map(m => m.text)
+                if (hist.length === 0) return
                 const el = e.target as HTMLTextAreaElement
-                // Only navigate history if cursor is at the very start (no multiline above)
                 if (el.selectionStart === 0 && el.selectionEnd === 0) {
-                  const hist = historyRef.current
-                  if (hist.length === 0) return
                   e.preventDefault()
                   if (historyPosRef.current < 0) {
                     savedInputRef.current = input
@@ -525,11 +522,12 @@ export default function ChatPanel({
                   setInput(hist[historyPosRef.current])
                 }
               } else if (e.key === 'ArrowDown' && !e.shiftKey) {
+                if (historyPosRef.current < 0) return
+                const hist = messages.filter(m => m.role === 'user').map(m => m.text)
                 const el = e.target as HTMLTextAreaElement
                 const atEnd = el.selectionStart === el.value.length
-                if (atEnd && historyPosRef.current >= 0) {
+                if (atEnd) {
                   e.preventDefault()
-                  const hist = historyRef.current
                   if (historyPosRef.current < hist.length - 1) {
                     historyPosRef.current++
                     setInput(hist[historyPosRef.current])
