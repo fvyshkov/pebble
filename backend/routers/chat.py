@@ -38,14 +38,25 @@ SYSTEM_PROMPT = """Ты помощник в приложении Pebble — фи
 - Отвечать на общие вопросы о Pebble и финансовом моделировании.
 - Выполнять действия с моделями: перечислять, создавать, открывать, импортировать Excel.
 - Работать с листами: перечислять, открывать, фиксировать/снимать аналитики, вводить значения.
+- Заполнять лист случайными или фиксированными значениями (fill_sheet).
 - Добавлять/убирать аналитики сразу со всех листов модели.
 - Запускать пересчёт формул.
-- Управлять правами пользователей на записи аналитики: `list_users`, `list_analytic_records` (найти id записи по имени), `set_record_permission(user_id, analytic_id, record_id, can_view, can_edit)`. Когда хотя бы одно разрешение для пары (user, analytic) задано — пользователь видит только разрешённые записи этой аналитики.
+- Строить графики по данным модели (build_chart).
+- Управлять правами пользователей на записи аналитики.
+- Переключать режимы интерфейса (switch_mode) и навигировать (open_sheet).
 
-Важно: когда пользователь просит "добавь/убери аналитику X со всех листов" — НЕ отсылай его в UI; найди analytic_id через list_model_analytics и вызови add_analytic_to_all_sheets / remove_analytic_from_all_sheets сам.
+КРИТИЧЕСКОЕ ПРАВИЛО: НИКОГДА не давай текстовые инструкции вроде "перейди в настройки", "нажми кнопку" и т.п.
+Вместо этого ВСЕГДА используй соответствующие инструменты:
+- Надо переключить режим → вызови switch_mode
+- Надо открыть лист → вызови open_sheet
+- Надо заполнить данные → вызови fill_sheet или set_cell
+- Надо добавить аналитику → вызови add_analytic_to_all_sheets
+- Надо пересчитать → вызови recalc
+- Надо построить график → вызови build_chart
+Ты — агент, который ВЫПОЛНЯЕТ действия, а не инструктор, который рассказывает, что делать.
 
 Контекст пользователя передаётся в каждом запросе (текущая модель, текущий лист, id пользователя).
-Когда пользователь просит сделать что-то в приложении, используй инструменты. Если нужен идентификатор (model_id, sheet_id), сначала вызови list_models или list_sheets чтобы его узнать.
+Если нужен идентификатор (model_id, sheet_id), сначала вызови list_models или list_sheets.
 
 Отвечай коротко и по-русски. После выполнения действий — одно-два предложения подтверждения."""
 
@@ -293,6 +304,50 @@ TOOLS: list[dict] = [
             "required": ["user_id", "analytic_id", "record_id"],
         },
     },
+    {
+        "name": "build_chart",
+        "description": (
+            "Построить график по данным модели. Ты должен сначала прочитать нужные данные "
+            "(через list_analytics, list_analytic_records, read_cell или fill_sheet), "
+            "затем вызвать build_chart с готовыми данными и конфигурацией. "
+            "Поддерживаемые типы: line, bar, pie, area. "
+            "Данные передаются в поле data как массив объектов [{category: '...', value: N, ...}]. "
+            "Для нескольких серий — каждый объект содержит category + несколько числовых полей. "
+            "Поле series — массив [{field: 'fieldName', name: 'Название серии'}]."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Заголовок графика"},
+                "chart_type": {
+                    "type": "string",
+                    "enum": ["line", "bar", "pie", "area"],
+                    "description": "Тип графика",
+                },
+                "data": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Массив данных [{category: '...', value: N, ...}]",
+                },
+                "series": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string"},
+                            "name": {"type": "string"},
+                        },
+                    },
+                    "description": "Описание серий [{field, name}]",
+                },
+                "category_field": {
+                    "type": "string",
+                    "description": "Имя поля для оси категорий (по умолчанию 'category')",
+                },
+            },
+            "required": ["title", "chart_type", "data", "series"],
+        },
+    },
 ]
 
 
@@ -395,6 +450,81 @@ from backend.formula_suggester import suggest_consolidations_for_sheet as _sugge
 from backend.formula_suggester import propagate_consolidations_across_sheets as _propagate_consolidations
 
 
+class BulkAnalyticRequest(BaseModel):
+    model_id: str
+    analytic_id: str
+
+
+@router.post("/bulk_add_analytic")
+async def bulk_add_analytic(req: BulkAnalyticRequest):
+    """Add analytic to all sheets + suggest consolidation formulas."""
+    db = get_db()
+    a_rows = await db.execute_fetchall(
+        "SELECT name FROM analytics WHERE id = ?", (req.analytic_id,),
+    )
+    analytic_name = a_rows[0]["name"] if a_rows else "аналитика"
+    sheets = await db.execute_fetchall(
+        "SELECT id FROM sheets WHERE model_id = ?", (req.model_id,),
+    )
+    added = 0
+    newly_added_sheet_ids: list[str] = []
+    for s in sheets:
+        sid = s["id"]
+        existing = await db.execute_fetchall(
+            "SELECT id FROM sheet_analytics WHERE sheet_id = ? AND analytic_id = ?",
+            (sid, req.analytic_id),
+        )
+        if existing:
+            continue
+        cnt_rows = await db.execute_fetchall(
+            "SELECT COUNT(*) AS n FROM sheet_analytics WHERE sheet_id = ?", (sid,),
+        )
+        sort_order = cnt_rows[0]["n"] if cnt_rows else 0
+        await db.execute(
+            "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_fixed, fixed_record_id) VALUES (?, ?, ?, ?, 0, NULL)",
+            (str(uuid.uuid4()), sid, req.analytic_id, sort_order),
+        )
+        added += 1
+        newly_added_sheet_ids.append(sid)
+    await db.commit()
+    formulas_written = 0
+    for sid in newly_added_sheet_ids:
+        try:
+            formulas_written += await _suggest_consolidations_for_sheet(
+                db, sid, analytic_name,
+            )
+        except Exception as e:
+            print(f"[bulk_add_analytic] suggest failed on {sid}: {e}")
+    try:
+        formulas_written += await _propagate_consolidations(db, req.model_id)
+    except Exception as e:
+        print(f"[bulk_add_analytic] propagate failed: {e}")
+    return {"added": added, "total_sheets": len(sheets), "formulas_suggested": formulas_written}
+
+
+@router.post("/bulk_remove_analytic")
+async def bulk_remove_analytic(req: BulkAnalyticRequest):
+    """Remove analytic from all sheets."""
+    db = get_db()
+    sheets = await db.execute_fetchall(
+        "SELECT id FROM sheets WHERE model_id = ?", (req.model_id,),
+    )
+    removed = 0
+    for s in sheets:
+        existing = await db.execute_fetchall(
+            "SELECT id FROM sheet_analytics WHERE sheet_id = ? AND analytic_id = ?",
+            (s["id"], req.analytic_id),
+        )
+        if existing:
+            await db.execute(
+                "DELETE FROM sheet_analytics WHERE sheet_id = ? AND analytic_id = ?",
+                (s["id"], req.analytic_id),
+            )
+            removed += 1
+    await db.commit()
+    return {"removed": removed, "total_sheets": len(sheets)}
+
+
 # ── Server-side tool execution ─────────────────────────────────────────────
 
 async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: list[dict]) -> str:
@@ -438,28 +568,28 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
 
         if name == "read_cell":
             rows = await db.execute_fetchall(
-                "SELECT value FROM cells WHERE sheet_id = ? AND coord_key = ?",
+                "SELECT value FROM cell_data WHERE sheet_id = ? AND coord_key = ?",
                 (inp["sheet_id"], inp["coord_key"]),
             )
             return json.dumps({"value": rows[0]["value"] if rows else None}, ensure_ascii=False)
 
         if name == "set_cell":
-            # Upsert manual cell value; use existing cells endpoint logic
+            # Upsert manual cell value
             existing = await db.execute_fetchall(
-                "SELECT id FROM cells WHERE sheet_id = ? AND coord_key = ?",
+                "SELECT id FROM cell_data WHERE sheet_id = ? AND coord_key = ?",
                 (inp["sheet_id"], inp["coord_key"]),
             )
             if existing:
                 await db.execute(
-                    "UPDATE cells SET value = ?, data_type = COALESCE(?, data_type), user_id = ? WHERE id = ?",
-                    (inp["value"], inp.get("data_type"), ctx.user_id, existing[0]["id"]),
+                    "UPDATE cell_data SET value = ?, data_type = COALESCE(?, data_type) WHERE id = ?",
+                    (inp["value"], inp.get("data_type"), existing[0]["id"]),
                 )
             else:
                 await db.execute(
-                    """INSERT INTO cells (id, sheet_id, coord_key, value, data_type, rule, user_id)
-                       VALUES (?, ?, ?, ?, ?, 'manual', ?)""",
+                    """INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula)
+                       VALUES (?, ?, ?, ?, ?, 'manual', '')""",
                     (str(uuid.uuid4()), inp["sheet_id"], inp["coord_key"],
-                     inp["value"], inp.get("data_type", "number"), ctx.user_id),
+                     inp["value"], inp.get("data_type", "number")),
                 )
             await db.commit()
             # Let the frontend know so it can reload
@@ -690,6 +820,17 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
                 return json.dumps({"error": f"import failed: {ex}"}, ensure_ascii=False)
             client_actions.append({"type": "reload_model", "model_id": result.get("model_id", "")})
             return json.dumps(result, ensure_ascii=False)
+
+        if name == "build_chart":
+            client_actions.append({
+                "type": "show_chart",
+                "title": inp.get("title", ""),
+                "chart_type": inp.get("chart_type", "bar"),
+                "data": inp.get("data", []),
+                "series": inp.get("series", []),
+                "category_field": inp.get("category_field", "category"),
+            })
+            return json.dumps({"ok": True, "message": "График отправлен в интерфейс"}, ensure_ascii=False)
 
         return json.dumps({"error": f"unknown tool {name}"}, ensure_ascii=False)
     except Exception as e:

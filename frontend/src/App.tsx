@@ -28,6 +28,7 @@ import UsersDialog from './components/UsersDialog'
 import PivotGrid from './features/sheet/PivotGrid'
 import PivotGridAG from './features/sheet/PivotGridAG'
 import ChatPanel from './features/chat/ChatPanel'
+import ChartPanel, { type ChartConfig } from './features/chart/ChartPanel'
 import { PendingProvider, usePending } from './store/PendingContext'
 import * as api from './api'
 import './App.css'
@@ -240,6 +241,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   // state + legacy PivotGrid code path are kept for emergency fallback.
   // Intentionally no localStorage persistence: page reload always = AG Grid.
   const [useAgGrid, setUseAgGrid] = useState<boolean>(true)
+  const [chartConfig, setChartConfig] = useState<ChartConfig | null>(null)
   const calcedModelsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
@@ -553,9 +555,11 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             <Splitter onResize={d => setLeftWidth(w => Math.max(180, w + d))} />
           </>}
 
-          {/* Center area: settings or pivot grid */}
+          {/* Center area: chart, settings, or pivot grid */}
           <div style={{ flex: 1, display: 'flex', minWidth: 0 }}>
-            {mode === 'settings' ? (
+            {chartConfig ? (
+              <ChartPanel config={chartConfig} onClose={() => setChartConfig(null)} />
+            ) : mode === 'settings' ? (
               <CenterPanel selection={selection} onRefresh={onRefresh} />
             ) : isSheetSelected ? (
               useAgGrid ? (
@@ -602,6 +606,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             onSwitchMode={m => setMode(m)}
             onImportExcel={file => setChatImportFile(file)}
             onRefreshData={onRefresh}
+            onShowChart={(cfg: any) => setChartConfig({
+              title: cfg.title || '',
+              chart_type: cfg.chart_type || 'bar',
+              data: cfg.data || [],
+              series: cfg.series || [],
+              category_field: cfg.category_field || 'category',
+            })}
           />
         </div>
 

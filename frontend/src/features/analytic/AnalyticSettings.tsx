@@ -235,31 +235,23 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
           disabled={!!bulkBusy}
           onClick={async () => {
             setBulkBusy('add')
-            setBulkProgress({ done: 0, total: 0 })
             try {
-              const sheets = await api.listSheets(modelId)
-              setBulkProgress({ done: 0, total: sheets.length })
-              let added = 0
-              for (let i = 0; i < sheets.length; i++) {
-                const sheet = sheets[i]
-                const existing = await api.listSheetAnalytics(sheet.id)
-                if (!existing.some((sa: any) => sa.analytic_id === analyticId)) {
-                  await api.addSheetAnalytic(sheet.id, { analytic_id: analyticId, sort_order: existing.length })
-                  added++
-                }
-                setBulkProgress({ done: i + 1, total: sheets.length })
-              }
-              setSheetStatus(added > 0 ? `Добавлено в ${added} лист(ов)` : 'Уже во всех листах')
+              const result = await api.bulkAddAnalytic(modelId, analyticId)
+              const msg = result.added > 0
+                ? `Добавлено в ${result.added} лист(ов)` + (result.formulas_suggested > 0 ? `, формул: ${result.formulas_suggested}` : '')
+                : 'Уже во всех листах'
+              setSheetStatus(msg)
+            } catch (e: any) {
+              setSheetStatus(`Ошибка: ${e.message || e}`)
             } finally {
               setBulkBusy(null)
-              setBulkProgress({ done: 0, total: 0 })
-              setTimeout(() => setSheetStatus(''), 3000)
+              setTimeout(() => setSheetStatus(''), 4000)
             }
           }}
           sx={{ textTransform: 'none', fontSize: 12 }}
         >
           {bulkBusy === 'add'
-            ? `Добавляется… ${bulkProgress.done}/${bulkProgress.total}`
+            ? 'Добавляется…'
             : 'Добавить во все листы'}
         </Button>
         <Button
@@ -270,36 +262,20 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
           disabled={!!bulkBusy}
           onClick={async () => {
             setBulkBusy('remove')
-            setBulkProgress({ done: 0, total: 0 })
             try {
-              const sheets = await api.listSheets(modelId)
-              setBulkProgress({ done: 0, total: sheets.length })
-              let removed = 0
-              for (let i = 0; i < sheets.length; i++) {
-                const sheet = sheets[i]
-                try {
-                  const existing = await api.listSheetAnalytics(sheet.id)
-                  const sa = existing.find((s: any) => s.analytic_id === analyticId)
-                  if (sa) {
-                    await api.removeSheetAnalytic(sheet.id, sa.id)
-                    removed++
-                  }
-                } catch (e) {
-                  console.error(`Failed to remove analytic from sheet ${sheet.name}:`, e)
-                }
-                setBulkProgress({ done: i + 1, total: sheets.length })
-              }
-              setSheetStatus(removed > 0 ? `Удалено из ${removed} лист(ов)` : 'Нет ни в одном листе')
+              const result = await api.bulkRemoveAnalytic(modelId, analyticId)
+              setSheetStatus(result.removed > 0 ? `Удалено из ${result.removed} лист(ов)` : 'Нет ни в одном листе')
+            } catch (e: any) {
+              setSheetStatus(`Ошибка: ${e.message || e}`)
             } finally {
               setBulkBusy(null)
-              setBulkProgress({ done: 0, total: 0 })
-              setTimeout(() => setSheetStatus(''), 3000)
+              setTimeout(() => setSheetStatus(''), 4000)
             }
           }}
           sx={{ textTransform: 'none', fontSize: 12 }}
         >
           {bulkBusy === 'remove'
-            ? `Удаляется… ${bulkProgress.done}/${bulkProgress.total}`
+            ? 'Удаляется…'
             : 'Удалить со всех листов'}
         </Button>
       </Box>

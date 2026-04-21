@@ -24,6 +24,7 @@ export interface ChatPanelProps {
   onSwitchMode?: (mode: 'settings' | 'data' | 'formulas') => void
   onImportExcel?: (file: File) => void            // user dropped an Excel file in the chat
   onRefreshData?: () => void                       // backend tool changed DB — reload
+  onShowChart?: (config: any) => void              // agent built a chart — show it
 }
 
 interface UIMessage {
@@ -38,7 +39,7 @@ const STORAGE_KEY = 'pebble_chat_history_v1'
 
 export default function ChatPanel({
   open, width, onClose, context,
-  onOpenSheet, onSwitchMode, onImportExcel, onRefreshData,
+  onOpenSheet, onSwitchMode, onImportExcel, onRefreshData, onShowChart,
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<UIMessage[]>(() => {
     try {
@@ -73,12 +74,11 @@ export default function ChatPanel({
     for (const a of actions) {
       if (a.type === 'open_sheet' && onOpenSheet) onOpenSheet(a.model_id, a.sheet_id)
       else if (a.type === 'switch_mode' && onSwitchMode) onSwitchMode(a.mode)
+      else if (a.type === 'show_chart' && onShowChart) onShowChart(a)
       else if (a.type === 'reload_sheet' || a.type === 'reload_model') needReload = true
-      // pin/unpin_analytic — not wired yet; tool still records the action.
-      // TODO: propagate to PivotGrid via a ViewSettings update
     }
     if (needReload && onRefreshData) onRefreshData()
-  }, [onOpenSheet, onSwitchMode, onRefreshData])
+  }, [onOpenSheet, onSwitchMode, onRefreshData, onShowChart])
 
   const send = useCallback(async (text: string) => {
     const userMsg: UIMessage = { role: 'user', text, raw: { role: 'user', content: text } }

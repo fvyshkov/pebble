@@ -93,6 +93,12 @@ export const getResolvedFormulas = (sheetId: string, coordKeys: string[]) =>
 export const getAllIndicatorRules = (sheetId: string) =>
   fetch(`${BASE}/sheets/${sheetId}/indicator-rules-all`).then(r => json<Record<string, { leaf: string; consolidation: string }>>(r))
 
+// Bulk analytic operations
+export const bulkAddAnalytic = (modelId: string, analyticId: string) =>
+  fetch(`${BASE}/chat/bulk_add_analytic`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model_id: modelId, analytic_id: analyticId }) }).then(r => json<{ added: number; total_sheets: number; formulas_suggested: number }>(r))
+export const bulkRemoveAnalytic = (modelId: string, analyticId: string) =>
+  fetch(`${BASE}/chat/bulk_remove_analytic`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model_id: modelId, analytic_id: analyticId }) }).then(r => json<{ removed: number; total_sheets: number }>(r))
+
 // View settings
 export const getViewSettings = (sheetId: string, userId?: string) =>
   fetch(`${BASE}/sheets/${sheetId}/view-settings${userId ? `?user_id=${userId}` : ''}`).then(r => json<any>(r))
