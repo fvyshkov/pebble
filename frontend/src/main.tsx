@@ -1,3 +1,7 @@
+declare const __APP_VERSION__: string
+declare const __BUILD_TIME__: string
+console.log(`%cPebble v${__APP_VERSION__} (${__BUILD_TIME__})`, 'color: #1976d2; font-weight: bold')
+
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material'
