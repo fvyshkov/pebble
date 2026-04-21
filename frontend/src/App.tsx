@@ -56,11 +56,19 @@ function SaveButton() {
   )
 }
 
-function ImportDialog({ open, onClose, onImported }: {
-  open: boolean; onClose: () => void; onImported: (modelId: string) => void
+function ImportDialog({ open, onClose, onImported, initialFile }: {
+  open: boolean; onClose: () => void; onImported: (modelId: string) => void; initialFile?: File | null
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [modelName, setModelName] = useState('')
+
+  // When initialFile is provided, pre-fill file and model name
+  useEffect(() => {
+    if (initialFile && open) {
+      setFile(initialFile)
+      setModelName(initialFile.name.replace(/\.xlsx?$/i, ''))
+    }
+  }, [initialFile, open])
   const [loading, setLoading] = useState(false)
   const [log, setLog] = useState<string[]>([])
   const [done, setDone] = useState(false)
@@ -617,7 +625,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               series: cfg.series || [],
               category_field: cfg.category_field || 'category',
             })}
-            onShowPresentation={(p: any) => setPresentation({ html: p.html, title: p.title || 'Презентация' })}
+            onShowPresentation={(p: any) => { console.log('[PEBBLE] onShowPresentation called', p?.type, 'html length:', p?.html?.length); setPresentation({ html: p.html, title: p.title || 'Презентация' }) }}
           />
         </div>
 
@@ -629,6 +637,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             open={true}
             onClose={() => setChatImportFile(null)}
             onImported={(mid) => { handleImported(mid); setChatImportFile(null) }}
+            initialFile={chatImportFile}
           />
         )}
       </div>
