@@ -57,6 +57,7 @@ SYSTEM_PROMPT = """Ты помощник в приложении Pebble — фи
 - Надо удалить модель → спроси подтверждение, затем вызови delete_model
 - Надо пересчитать → вызови recalc
 - Надо построить график → вызови build_chart с названиями показателей и группировки (данные бэкенд достанет сам)
+- Надо сделать презентацию / отчёт → вызови build_presentation (бэкенд сам соберёт данные и сгенерирует HTML)
 Ты — агент, который ВЫПОЛНЯЕТ действия, а не инструктор, который рассказывает, что делать.
 
 Контекст пользователя передаётся в каждом запросе (текущая модель, текущий лист, id пользователя).
@@ -535,6 +536,24 @@ TOOLS: list[dict] = [
             "required": ["sheet_id", "model_id"],
         },
     },
+    {
+        "name": "build_presentation",
+        "description": (
+            "Создать аналитическую презентацию по данным модели. "
+            "Бэкенд сам соберёт все данные, отправит на анализ и сгенерирует красивый HTML "
+            "с графиками (Chart.js), трендами, выводами и ключевыми показателями. "
+            "Результат отобразится в центральной панели с возможностью скачать как PDF."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sheet_id": {"type": "string", "description": "ID листа для анализа"},
+                "title": {"type": "string", "description": "Заголовок презентации"},
+                "focus": {"type": "string", "description": "На чём сфокусировать анализ (опционально)"},
+            },
+            "required": ["sheet_id"],
+        },
+    },
 ]
 
 
@@ -710,6 +729,121 @@ async def bulk_remove_analytic(req: BulkAnalyticRequest):
             removed += 1
     await db.commit()
     return {"removed": removed, "total_sheets": len(sheets)}
+
+
+# ── Presentation builder ───────────────────────────────────────────────────
+
+async def _build_presentation(db, sheet_id: str, title: str | None, focus: str | None) -> str:
+    """Gather sheet data, send to Claude for HTML presentation with analysis."""
+    # 1. Get sheet info
+    sheet_rows = await db.execute_fetchall("SELECT name, model_id FROM sheets WHERE id = ?", (sheet_id,))
+    if not sheet_rows:
+        return "<h1>Лист не найден</h1>"
+    sheet_name = sheet_rows[0]["name"]
+    model_id = sheet_rows[0]["model_id"]
+    model_rows = await db.execute_fetchall("SELECT name FROM models WHERE id = ?", (model_id,))
+    model_name = model_rows[0]["name"] if model_rows else ""
+
+    # 2. Get analytics and records
+    sa_rows = await db.execute_fetchall(
+        """SELECT a.id, a.name, a.is_periods FROM sheet_analytics sa
+           JOIN analytics a ON a.id = sa.analytic_id
+           WHERE sa.sheet_id = ? ORDER BY sa.sort_order""",
+        (sheet_id,),
+    )
+    analytics_info = []
+    all_records: dict[str, list[dict]] = {}  # analytic_id -> [{id, name, parent_id}]
+    for a in sa_rows:
+        recs = await db.execute_fetchall(
+            "SELECT id, data_json, parent_id FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+            (a["id"],),
+        )
+        rec_list = []
+        for r in recs:
+            try:
+                d = json.loads(r["data_json"] or "{}")
+                rec_list.append({"id": r["id"], "name": d.get("name", ""), "parent_id": r["parent_id"]})
+            except Exception:
+                pass
+        all_records[a["id"]] = rec_list
+        analytics_info.append({
+            "name": a["name"],
+            "is_periods": bool(a["is_periods"]),
+            "records": [r["name"] for r in rec_list],
+        })
+
+    # 3. Get cell data — build a structured table
+    cells = await db.execute_fetchall(
+        "SELECT coord_key, value FROM cell_data WHERE sheet_id = ? AND value IS NOT NULL AND value != ''",
+        (sheet_id,),
+    )
+    # Build a lookup: record_id -> name
+    rid_to_name: dict[str, str] = {}
+    for recs in all_records.values():
+        for r in recs:
+            rid_to_name[r["id"]] = r["name"]
+
+    # Convert cells to readable rows
+    table_rows = []
+    for c in cells:
+        parts = (c["coord_key"] or "").split("|")
+        labels = [rid_to_name.get(p, p) for p in parts]
+        try:
+            val = float(c["value"])
+            val_str = f"{val:,.2f}" if val != int(val) else str(int(val))
+        except (ValueError, TypeError):
+            val_str = str(c["value"])
+        table_rows.append({"coords": " | ".join(labels), "value": val_str})
+
+    # 4. Build compact data summary for LLM (limit to ~2000 rows)
+    data_text = "\n".join(f"{r['coords']}: {r['value']}" for r in table_rows[:2000])
+
+    # 5. Send to Claude for HTML generation
+    pres_title = title or f"Анализ: {sheet_name}"
+    prompt = f"""Создай HTML-презентацию для аналитического отчёта.
+
+Модель: {model_name}
+Лист: {sheet_name}
+Заголовок: {pres_title}
+{f'Фокус анализа: {focus}' if focus else ''}
+
+Аналитики:
+{json.dumps(analytics_info, ensure_ascii=False, indent=2)}
+
+Данные (формат: координата | координата: значение):
+{data_text}
+
+ТРЕБОВАНИЯ к HTML:
+1. Полностью самодостаточный HTML (inline CSS, Chart.js через CDN)
+2. Используй <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+3. Создай 3-5 графиков (bar, line, pie по уместности) по ключевым показателям
+4. Добавь аналитические выводы: тренды, аномалии, ключевые цифры
+5. Структура: заголовок → ключевые метрики (KPI карточки) → графики с пояснениями → выводы и рекомендации
+6. Стиль: современный, чистый, с цветовой схемой синий/серый. Шрифт sans-serif.
+7. Адаптивный для печати (@media print)
+8. Язык: русский
+9. НЕ используй внешние ресурсы кроме Chart.js CDN
+10. Каждый график в отдельном <canvas> с уникальным id
+
+Верни ТОЛЬКО HTML код, без markdown обёртки, без ```html блоков."""
+
+    import anthropic as _anthropic
+    _client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    resp = _client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=8000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    html = "".join(b.text for b in resp.content if b.type == "text")
+    # Strip markdown code fences if present
+    if html.strip().startswith("```"):
+        lines = html.strip().split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        html = "\n".join(lines)
+    return html
 
 
 # ── Server-side data query (no LLM context needed) ────────────────────────
@@ -1278,6 +1412,15 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             client_actions.append({"type": "reload_model", "model_id": model_id})
             return json.dumps({"id": sid, "name": sname}, ensure_ascii=False)
 
+        if name == "build_presentation":
+            html = await _build_presentation(db, inp["sheet_id"], inp.get("title"), inp.get("focus"))
+            client_actions.append({
+                "type": "show_presentation",
+                "html": html,
+                "title": inp.get("title", "Презентация"),
+            })
+            return json.dumps({"ok": True, "message": "Презентация создана"}, ensure_ascii=False)
+
         if name == "rename_model":
             await db.execute("UPDATE models SET name = ? WHERE id = ?", (inp["name"], inp["model_id"]))
             await db.commit()
@@ -1353,6 +1496,8 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
 
         return json.dumps({"error": f"unknown tool {name}"}, ensure_ascii=False)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 

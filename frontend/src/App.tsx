@@ -29,6 +29,7 @@ import PivotGrid from './features/sheet/PivotGrid'
 import PivotGridAG from './features/sheet/PivotGridAG'
 import ChatPanel from './features/chat/ChatPanel'
 import ChartPanel, { type ChartConfig } from './features/chart/ChartPanel'
+import PresentationPanel from './features/presentation/PresentationPanel'
 import { PendingProvider, usePending } from './store/PendingContext'
 import * as api from './api'
 import './App.css'
@@ -242,6 +243,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   // Intentionally no localStorage persistence: page reload always = AG Grid.
   const [useAgGrid, setUseAgGrid] = useState<boolean>(true)
   const [chartConfig, setChartConfig] = useState<ChartConfig | null>(null)
+  const [presentation, setPresentation] = useState<{ html: string; title: string } | null>(null)
   const calcedModelsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
@@ -557,7 +559,9 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
 
           {/* Center area: chart, settings, or pivot grid */}
           <div style={{ flex: 1, display: 'flex', minWidth: 0 }}>
-            {chartConfig ? (
+            {presentation ? (
+              <PresentationPanel html={presentation.html} title={presentation.title} onClose={() => setPresentation(null)} />
+            ) : chartConfig ? (
               <ChartPanel config={chartConfig} onClose={() => setChartConfig(null)} />
             ) : mode === 'settings' ? (
               <CenterPanel selection={selection} onRefresh={onRefresh} />
@@ -613,6 +617,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               series: cfg.series || [],
               category_field: cfg.category_field || 'category',
             })}
+            onShowPresentation={(p: any) => setPresentation({ html: p.html, title: p.title || 'Презентация' })}
           />
         </div>
 

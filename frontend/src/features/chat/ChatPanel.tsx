@@ -25,6 +25,7 @@ export interface ChatPanelProps {
   onImportExcel?: (file: File) => void            // user dropped an Excel file in the chat
   onRefreshData?: () => void                       // backend tool changed DB — reload
   onShowChart?: (config: any) => void              // agent built a chart — show it
+  onShowPresentation?: (config: any) => void       // agent built a presentation — show it
 }
 
 interface UIMessage {
@@ -39,7 +40,7 @@ const STORAGE_KEY = 'pebble_chat_history_v1'
 
 export default function ChatPanel({
   open, width, onClose, context,
-  onOpenSheet, onSwitchMode, onImportExcel, onRefreshData, onShowChart,
+  onOpenSheet, onSwitchMode, onImportExcel, onRefreshData, onShowChart, onShowPresentation,
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<UIMessage[]>(() => {
     try {
@@ -79,10 +80,11 @@ export default function ChatPanel({
       if (a.type === 'open_sheet' && onOpenSheet) onOpenSheet(a.model_id, a.sheet_id)
       else if (a.type === 'switch_mode' && onSwitchMode) onSwitchMode(a.mode)
       else if (a.type === 'show_chart' && onShowChart) onShowChart(a)
+      else if (a.type === 'show_presentation' && onShowPresentation) onShowPresentation(a)
       else if (a.type === 'reload_sheet' || a.type === 'reload_model') needReload = true
     }
     if (needReload && onRefreshData) onRefreshData()
-  }, [onOpenSheet, onSwitchMode, onRefreshData, onShowChart])
+  }, [onOpenSheet, onSwitchMode, onRefreshData, onShowChart, onShowPresentation])
 
   const send = useCallback(async (text: string) => {
     // Local commands — no need to hit the server
