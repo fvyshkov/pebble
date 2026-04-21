@@ -55,6 +55,7 @@ export default function ChatPanel({
   const [typingText, setTypingText] = useState<string | null>(null) // typewriter buffer
   const [dragOver, setDragOver] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const chatInputRef = useRef<HTMLInputElement>(null)
   const typingRef = useRef<number>(0) // animation frame id
   // Voice input state
   const [listening, setListening] = useState(false)
@@ -76,6 +77,11 @@ export default function ChatPanel({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, loading])
+
+  // Auto-focus chat input when panel opens
+  useEffect(() => {
+    if (open) setTimeout(() => chatInputRef.current?.focus(), 50)
+  }, [open])
 
   const triggerFilePicker = useCallback(() => {
     const input = document.createElement('input')
@@ -465,6 +471,7 @@ export default function ChatPanel({
             size="small"
             fullWidth
             disabled={loading}
+            inputRef={chatInputRef}
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
