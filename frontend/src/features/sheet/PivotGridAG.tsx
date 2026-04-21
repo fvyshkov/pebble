@@ -10,6 +10,10 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, LinearProgress, Snackbar, Tooltip, Typography, Button as MUIButton, IconButton } from '@mui/material'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
+import * as am5 from '@amcharts/amcharts5'
+import * as am5xy from '@amcharts/amcharts5/xy'
+import * as am5percent from '@amcharts/amcharts5/percent'
+import am5themes_Animated from '@amcharts/amcharts5/themes/Animated'
 import { AgGridReact } from 'ag-grid-react'
 import {
   ModuleRegistry,
@@ -318,9 +322,9 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   const mainAnalyticIdxRef = useRef<number>(-1)
 
   // Chart overlay + history dialog
-  const [chartOverlay, setChartOverlay] = useState<{ type: string; labels: string[]; datasets: any[] } | null>(null)
-  const chartCanvasRef = useRef<HTMLCanvasElement>(null)
-  const chartInstanceRef = useRef<any>(null)
+  const [chartOverlay, setChartOverlay] = useState<{ type: string; labels: string[]; datasets: { label: string; data: number[] }[] } | null>(null)
+  const chartDivRef = useRef<HTMLDivElement>(null)
+  const amRootRef = useRef<am5.Root | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyData, setHistoryData] = useState<any[]>([])
   const [historyKey, setHistoryKey] = useState('')
@@ -1739,12 +1743,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     const cols = r.columns || []
     const si = Math.min(r.startRow?.rowIndex ?? 0, r.endRow?.rowIndex ?? 0)
     const ei = Math.max(r.startRow?.rowIndex ?? 0, r.endRow?.rowIndex ?? 0)
-    const colLabels = cols.map(c => {
-      const hdr = c.getColDef()?.headerName || c.getColId()
-      return hdr
-    })
-    const COLORS = ['#1976d2','#e53935','#43a047','#fb8c00','#8e24aa','#00acc1','#6d4c41','#d81b60']
-    const datasets: any[] = []
+    const colLabels = cols.map(c => c.getColDef()?.headerName || c.getColId())
+    const datasets: { label: string; data: number[] }[] = []
     for (let ri = si; ri <= ei; ri++) {
       const node = grid.getDisplayedRowAtIndex(ri)
       if (!node?.data) continue
@@ -1753,35 +1753,70 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         const v = node.data[c.getColId()]
         return v != null ? (typeof v === 'number' ? v : parseFloat(String(v)) || 0) : 0
       })
-      const color = COLORS[datasets.length % COLORS.length]
-      datasets.push({
-        label: rowLabel, data: values,
-        backgroundColor: chartType === 'pie' ? COLORS.slice(0, colLabels.length) : color,
-        borderColor: chartType === 'pie' ? '#fff' : color,
-        borderWidth: 2, fill: false,
-      })
+      datasets.push({ label: rowLabel, data: values })
     }
     setChartOverlay({ type: chartType, labels: colLabels, datasets })
   }, [])
 
+  // Render amCharts when overlay data changes
   useEffect(() => {
-    if (!chartOverlay || !chartCanvasRef.current) return
-    const render = () => {
-      const Chart = (window as any).Chart
-      if (!Chart) return
-      if (chartInstanceRef.current) chartInstanceRef.current.destroy()
-      chartInstanceRef.current = new Chart(chartCanvasRef.current, {
-        type: chartOverlay.type === 'pie' ? 'pie' : chartOverlay.type === 'line' ? 'line' : 'bar',
-        data: { labels: chartOverlay.labels, datasets: chartOverlay.datasets },
-        options: { responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: chartOverlay.datasets.length > 1 || chartOverlay.type === 'pie' } } },
+    if (!chartOverlay || !chartDivRef.current) return
+    if (amRootRef.current) { amRootRef.current.dispose(); amRootRef.current = null }
+
+    const root = am5.Root.new(chartDivRef.current)
+    amRootRef.current = root
+    root.setThemes([am5themes_Animated.new(root)])
+
+    const { type, labels, datasets } = chartOverlay
+
+    if (type === 'pie') {
+      // Pie: flatten first dataset into category/value pairs
+      const chart = root.container.children.push(
+        am5percent.PieChart.new(root, { layout: root.verticalLayout })
+      )
+      const series = chart.series.push(
+        am5percent.PieSeries.new(root, { valueField: 'value', categoryField: 'category' })
+      )
+      const d = datasets[0]?.data || []
+      series.data.setAll(labels.map((l, i) => ({ category: l, value: d[i] || 0 })))
+      series.appear(1000, 100)
+      chart.appear(1000, 100)
+    } else {
+      // XY chart (bar / line)
+      const chart = root.container.children.push(
+        am5xy.XYChart.new(root, { panX: true, panY: false, wheelX: 'panX', wheelY: 'zoomX', layout: root.verticalLayout })
+      )
+      const xAxis = chart.xAxes.push(
+        am5xy.CategoryAxis.new(root, { categoryField: 'category', renderer: am5xy.AxisRendererX.new(root, { minGridDistance: 30 }) })
+      )
+      // Build merged data: one row per category with fields per series
+      const data = labels.map((l, ci) => {
+        const row: Record<string, any> = { category: l }
+        for (const ds of datasets) row[ds.label] = ds.data[ci] || 0
+        return row
       })
+      xAxis.data.setAll(data)
+      chart.yAxes.push(
+        am5xy.ValueAxis.new(root, { renderer: am5xy.AxisRendererY.new(root, {}) })
+      )
+      for (const ds of datasets) {
+        const xA = chart.xAxes.getIndex(0)!
+        const yA = chart.yAxes.getIndex(0)!
+        const s = type === 'bar'
+          ? chart.series.push(am5xy.ColumnSeries.new(root, { name: ds.label, xAxis: xA, yAxis: yA, valueYField: ds.label, categoryXField: 'category', tooltip: am5.Tooltip.new(root, { labelText: '{name}: {valueY}' }) }))
+          : chart.series.push(am5xy.LineSeries.new(root, { name: ds.label, xAxis: xA, yAxis: yA, valueYField: ds.label, categoryXField: 'category', tooltip: am5.Tooltip.new(root, { labelText: '{name}: {valueY}' }) }))
+        s.data.setAll(data)
+        s.appear(1000)
+      }
+      if (datasets.length > 1) {
+        const legend = chart.children.push(am5.Legend.new(root, { centerX: am5.percent(50), x: am5.percent(50) }))
+        legend.data.setAll(chart.series.values)
+      }
+      chart.set('cursor', am5xy.XYCursor.new(root, {}))
+      chart.appear(1000, 100)
     }
-    if ((window as any).Chart) { render(); return }
-    const script = document.createElement('script')
-    script.src = 'https://cdn.jsdelivr.net/npm/chart.js'
-    script.onload = render
-    document.head.appendChild(script)
+
+    return () => { root.dispose(); amRootRef.current = null }
   }, [chartOverlay])
 
   const showHistory = useCallback(async (coordKey: string) => {
@@ -2011,16 +2046,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         }}>
           <Box sx={{ display: 'flex', justifyContent: 'flex-end', p: 0.5 }}>
             <IconButton size="small" onClick={() => {
-              if (chartInstanceRef.current) chartInstanceRef.current.destroy()
-              chartInstanceRef.current = null
+              if (amRootRef.current) { amRootRef.current.dispose(); amRootRef.current = null }
               setChartOverlay(null)
             }}>
               <CloseOutlined fontSize="small" />
             </IconButton>
           </Box>
-          <Box sx={{ flex: 1, p: 2, minHeight: 0 }}>
-            <canvas ref={chartCanvasRef} />
-          </Box>
+          <div ref={chartDivRef} style={{ flex: 1, minHeight: 0, width: '100%' }} />
         </Box>
       )}
 
