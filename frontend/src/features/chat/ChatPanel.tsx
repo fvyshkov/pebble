@@ -6,6 +6,7 @@ import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import ClearAllOutlined from '@mui/icons-material/ClearAllOutlined'
 import ContentCopyOutlined from '@mui/icons-material/ContentCopyOutlined'
 import CheckOutlined from '@mui/icons-material/CheckOutlined'
+import AddOutlined from '@mui/icons-material/AddOutlined'
 import AttachFileOutlined from '@mui/icons-material/AttachFileOutlined'
 import ImageOutlined from '@mui/icons-material/ImageOutlined'
 import MicOutlined from '@mui/icons-material/MicOutlined'
@@ -470,12 +471,10 @@ export default function ChatPanel({
         )}
         {messages.map((m, i) => (
           <Box key={i} sx={{
-            mb: 1, display: 'flex',
-            justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start',
-            '&:hover .copy-btn': { opacity: 1 },
+            mb: 1, display: 'flex', justifyContent: 'flex-start', alignItems: 'flex-start', gap: 0.5,
           }}>
             <Box sx={{
-              maxWidth: '90%', position: 'relative',
+              maxWidth: '90%',
               px: 1.25, py: 0.75, borderRadius: 1.5,
               fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
               background: m.role === 'user' ? '#1976d2' : '#fff',
@@ -483,27 +482,24 @@ export default function ChatPanel({
               border: m.role === 'user' ? 'none' : '1px solid #e0e0e0',
             }}>
               {m.text}
-              <IconButton
-                className="copy-btn"
-                size="small"
-                sx={{
-                  position: 'absolute', top: 2,
-                  ...(m.role === 'user' ? { left: -28 } : { right: -28 }),
-                  opacity: 0, transition: 'opacity 0.15s',
-                  color: m.role === 'user' ? 'rgba(255,255,255,0.6)' : '#999',
-                  '&:hover': { color: m.role === 'user' ? '#fff' : '#555' },
-                }}
-                onClick={() => {
-                  navigator.clipboard.writeText(m.text)
-                  setCopiedIdx(i)
-                  setTimeout(() => setCopiedIdx(null), 1500)
-                }}
-              >
-                {copiedIdx === i
-                  ? <CheckOutlined sx={{ fontSize: 14 }} />
-                  : <ContentCopyOutlined sx={{ fontSize: 14 }} />}
-              </IconButton>
             </Box>
+            <IconButton
+              size="small"
+              sx={{
+                mt: 0.25, flexShrink: 0,
+                color: '#999',
+                '&:hover': { color: '#555' },
+              }}
+              onClick={() => {
+                navigator.clipboard.writeText(m.text)
+                setCopiedIdx(i)
+                setTimeout(() => setCopiedIdx(null), 1500)
+              }}
+            >
+              {copiedIdx === i
+                ? <CheckOutlined sx={{ fontSize: 14 }} />
+                : <ContentCopyOutlined sx={{ fontSize: 14 }} />}
+            </IconButton>
           </Box>
         ))}
         {/* Typewriter: assistant message being revealed gradually */}
@@ -564,7 +560,24 @@ export default function ChatPanel({
             ))}
           </Box>
         )}
-        <Box sx={{ p: 1, display: 'flex', gap: 0.5 }}>
+        <Box sx={{ p: 1, display: 'flex', gap: 0.5, alignItems: 'flex-end' }}>
+          <Tooltip title="Прикрепить файл">
+            <IconButton
+              size="small"
+              sx={{ mb: 0.5, color: '#666' }}
+              onClick={() => {
+                const inp = document.createElement('input')
+                inp.type = 'file'
+                inp.multiple = true
+                inp.onchange = () => {
+                  if (inp.files?.length) addAttachments(inp.files)
+                }
+                inp.click()
+              }}
+            >
+              <AddOutlined />
+            </IconButton>
+          </Tooltip>
           <TextField
             value={input}
             onChange={e => setInput(e.target.value)}

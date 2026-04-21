@@ -1814,6 +1814,16 @@ async def chat_message_stream(req: ChatRequest):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            yield f"data: {json.dumps({'type': 'error', 'text': str(e)}, ensure_ascii=False)}\n\n"
+            msg = str(e)
+            # Friendly messages for common Anthropic API errors
+            if "credit" in msg.lower() or "billing" in msg.lower() or "payment" in msg.lower():
+                msg = "Недостаточно кредитов Anthropic. Пополните баланс на console.anthropic.com → Settings → Billing."
+            elif "rate_limit" in msg.lower() or "rate limit" in msg.lower() or "429" in msg:
+                msg = "Превышен лимит запросов к Anthropic API. Подождите минуту и попробуйте снова."
+            elif "overloaded" in msg.lower():
+                msg = "Сервер Anthropic перегружен. Попробуйте через несколько минут."
+            elif "authentication" in msg.lower() or "401" in msg or "invalid.*api.*key" in msg.lower():
+                msg = "Ошибка аутентификации Anthropic API. Проверьте API-ключ."
+            yield f"data: {json.dumps({'type': 'error', 'text': msg}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")

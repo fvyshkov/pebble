@@ -1685,7 +1685,9 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                       }
                     }
                     return (
-                      <td key={`${col.node.record.id}-s`} onClick={cellClick} style={{
+                      <td key={`${col.node.record.id}-s`} onClick={cellClick}
+                        onContextMenu={e => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, coordKey: `sum_${col.node.record.id}` }) }}
+                        style={{
                         border: focusBorder, padding: '4px 6px',
                         textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
                         fontWeight: 600,
@@ -1757,7 +1759,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                   // Empty cell — nothing computed, nothing shown, no manual input
                   if (rule === 'empty') {
                     return (
-                      <td key={colRecId} onClick={cellClick} style={{
+                      <td key={colRecId} onClick={cellClick} onContextMenu={e => handleContextMenu(e, coordKey, rule)} style={{
                         border: focusBorder, padding: '4px 6px',
                         background: selBg || '#f5f5f5', color: '#bbb', fontSize: 13,
                       }} />
@@ -1771,7 +1773,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     const result = num !== null && !isNaN(num) ? num : null
                     return (
                       <Tooltip key={colRecId} title={fText ? `ƒ ${fText}` : ''} enterDelay={200} arrow placement="top">
-                        <td onClick={cellClick} style={{
+                        <td onClick={cellClick} onContextMenu={e => handleContextMenu(e, coordKey, rule)} style={{
                           border: focusBorder, padding: '4px 6px',
                           textAlign: 'right', color: '#555', background: selBg || '#fff', fontSize: 13,
                         }}>
@@ -1786,7 +1788,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
                     const agg = computeSum(row, colRecId)
                     return (
                       <Tooltip key={colRecId} title="Σ сумма дочерних" enterDelay={200} arrow placement="top">
-                        <td onClick={cellClick} style={{
+                        <td onClick={cellClick} onContextMenu={e => handleContextMenu(e, coordKey, rule)} style={{
                           border: focusBorder, padding: '4px 6px',
                           textAlign: 'right', color: '#666', background: selBg || '#fff', fontSize: 13,
                         }}>
@@ -1798,7 +1800,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
 
                   if (rule === 'sum_children') {
                     return (
-                      <td key={colRecId} onClick={cellClick} style={{
+                      <td key={colRecId} onClick={cellClick} onContextMenu={e => handleContextMenu(e, coordKey, rule)} style={{
                         border: focusBorder, padding: '4px 6px',
                         background: selBg || '#fff', color: '#666', fontSize: 13,
                       }}>{cells[coordKey] ?? ''}</td>
