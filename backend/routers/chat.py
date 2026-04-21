@@ -56,7 +56,7 @@ SYSTEM_PROMPT = """Ты помощник в приложении Pebble — фи
 - Надо создать лист → вызови create_sheet
 - Надо удалить модель → спроси подтверждение, затем вызови delete_model
 - Надо пересчитать → вызови recalc
-- Надо построить график → вызови build_chart
+- Надо построить график → сначала read_sheet_data для получения всех данных, потом build_chart
 Ты — агент, который ВЫПОЛНЯЕТ действия, а не инструктор, который рассказывает, что делать.
 
 Контекст пользователя передаётся в каждом запросе (текущая модель, текущий лист, id пользователя).
@@ -136,6 +136,19 @@ TOOLS: list[dict] = [
                 "data_type": {"type": "string", "description": "number/string/currency/percent"},
             },
             "required": ["sheet_id", "coord_key", "value"],
+        },
+    },
+    {
+        "name": "read_sheet_data",
+        "description": (
+            "Прочитать ВСЕ данные листа целиком. Возвращает массив ячеек "
+            "[{coord_key, value, rule}]. Используй этот тул вместо множества read_cell "
+            "когда нужно получить данные для графика или анализа."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"sheet_id": {"type": "string"}},
+            "required": ["sheet_id"],
         },
     },
     {
@@ -688,6 +701,13 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             )
             return json.dumps({"value": rows[0]["value"] if rows else None}, ensure_ascii=False)
 
+        if name == "read_sheet_data":
+            rows = await db.execute_fetchall(
+                "SELECT coord_key, value, rule FROM cell_data WHERE sheet_id = ?",
+                (inp["sheet_id"],),
+            )
+            return json.dumps([dict(r) for r in rows], ensure_ascii=False)
+
         if name == "set_cell":
             # Upsert manual cell value
             existing = await db.execute_fetchall(
@@ -1083,7 +1103,7 @@ async def chat_message(req: ChatRequest):
     client_actions: list[dict] = []
 
     # Tool-use loop (cap at 8 iterations to prevent runaway)
-    for _ in range(8):
+    for _ in range(15):
         resp = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=2000,

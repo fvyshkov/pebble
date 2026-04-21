@@ -85,6 +85,14 @@ export default function ChatPanel({
   }, [onOpenSheet, onSwitchMode, onRefreshData, onShowChart])
 
   const send = useCallback(async (text: string) => {
+    // Local commands — no need to hit the server
+    const lower = text.trim().toLowerCase()
+    if (/очист|сброс|clear/.test(lower) && /истори|чат|chat|history/.test(lower)) {
+      setMessages([])
+      setInput('')
+      localStorage.removeItem(STORAGE_KEY)
+      return
+    }
     const userMsg: UIMessage = { role: 'user', text, raw: { role: 'user', content: text } }
     const nextMsgs = [...messages, userMsg]
     setMessages(nextMsgs)
