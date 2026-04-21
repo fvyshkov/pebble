@@ -6,8 +6,11 @@ import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import ClearAllOutlined from '@mui/icons-material/ClearAllOutlined'
 import ContentCopyOutlined from '@mui/icons-material/ContentCopyOutlined'
 import CheckOutlined from '@mui/icons-material/CheckOutlined'
+import AttachFileOutlined from '@mui/icons-material/AttachFileOutlined'
+import ImageOutlined from '@mui/icons-material/ImageOutlined'
 import MicOutlined from '@mui/icons-material/MicOutlined'
 import MicOffOutlined from '@mui/icons-material/MicOffOutlined'
+import { Chip } from '@mui/material'
 import * as api from '../../api'
 import type { ChatAction } from '../../api'
 
@@ -58,6 +61,7 @@ export default function ChatPanel({
   const [typingText, setTypingText] = useState<string | null>(null) // typewriter buffer
   const [dragOver, setDragOver] = useState(false)
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null) // flash check icon
+  const [attachments, setAttachments] = useState<File[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatInputRef = useRef<HTMLInputElement>(null)
   const typingRef = useRef<number>(0) // animation frame id
@@ -122,6 +126,32 @@ export default function ChatPanel({
     if (needReload && onRefreshData) onRefreshData()
   }, [onOpenSheet, onSwitchMode, onRefreshData, onShowChart, onShowPresentation, triggerFilePicker])
 
+  const fileToBase64 = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve((reader.result as string).split(',')[1])
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+
+  const addAttachments = useCallback((files: FileList | File[]) => {
+    const arr = Array.from(files)
+    for (const f of arr) {
+      if (/\.xlsx?$/i.test(f.name) && onImportExcel) {
+        // Excel files → import flow
+        setMessages(prev => [...prev, {
+          role: 'user',
+          text: `📎 ${f.name} (импорт)`,
+          raw: { role: 'user', content: `Импорт файла ${f.name}` },
+        }])
+        onImportExcel(f)
+        return
+      }
+    }
+    // Non-Excel files → attach as chips
+    setAttachments(prev => [...prev, ...arr])
+  }, [onImportExcel])
+
   // Typewriter: gradually reveal full text
   const typewrite = useCallback((fullText: string, rawContent: any) => {
     let pos = 0
@@ -160,10 +190,28 @@ export default function ChatPanel({
     historyPosRef.current = -1
     savedInputRef.current = ''
 
-    const userMsg: UIMessage = { role: 'user', text, raw: { role: 'user', content: text } }
+    // Build content: text + image attachments
+    const currentAttachments = [...attachments]
+    const imageFiles = currentAttachments.filter(f => f.type.startsWith('image/'))
+    let rawContent: any = text
+    if (imageFiles.length > 0) {
+      const contentParts: any[] = []
+      for (const img of imageFiles) {
+        const b64 = await fileToBase64(img)
+        const mediaType = img.type || 'image/png'
+        contentParts.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } })
+      }
+      contentParts.push({ type: 'text', text })
+      rawContent = contentParts
+    }
+    const chipNames = currentAttachments.map(f => `📎 ${f.name}`).join(', ')
+    const displayText = chipNames ? `${chipNames}\n${text}` : text
+
+    const userMsg: UIMessage = { role: 'user', text: displayText, raw: { role: 'user', content: rawContent } }
     const nextMsgs = [...messages, userMsg]
     setMessages(nextMsgs)
     setInput('')
+    setAttachments([])
     setLoading(true)
     setThinkingSteps([])
     const controller = new AbortController()
@@ -204,31 +252,32 @@ export default function ChatPanel({
       setLoading(false)
       setThinkingSteps([])
     }
-  }, [messages, context, applyActions, typewrite])
+  }, [messages, context, applyActions, typewrite, attachments])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setDragOver(false)
-    const file = e.dataTransfer.files?.[0]
-    if (!file) return
-    const isExcel = /\.xlsx?$/i.test(file.name)
-    if (!isExcel) {
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        text: `⚠️ Поддерживаются только файлы .xlsx / .xls`,
-        raw: { role: 'assistant', content: '' },
-      }])
-      return
+    const files = e.dataTransfer.files
+    if (!files?.length) return
+    addAttachments(files)
+  }, [addAttachments])
+
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    const files: File[] = []
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.kind === 'file') {
+        const f = item.getAsFile()
+        if (f) files.push(f)
+      }
     }
-    if (onImportExcel) {
-      setMessages(prev => [...prev, {
-        role: 'user',
-        text: `📎 ${file.name} (импорт)`,
-        raw: { role: 'user', content: `Импорт файла ${file.name}` },
-      }])
-      onImportExcel(file)
+    if (files.length > 0) {
+      e.preventDefault()
+      addAttachments(files)
     }
-  }, [onImportExcel])
+  }, [addAttachments])
 
   const clear = () => {
     setMessages([])
@@ -494,17 +543,32 @@ export default function ChatPanel({
             background: 'rgba(25,118,210,0.08)', border: '2px dashed #1976d2',
             color: '#1976d2', fontSize: 14, fontWeight: 600, pointerEvents: 'none',
           }}>
-            Отпустите Excel-файл для импорта
+            Отпустите файл для прикрепления
           </Box>
         )}
       </Box>
 
       {/* Input */}
       <Box sx={{ display: 'flex', flexDirection: 'column', borderTop: '1px solid #e0e0e0', background: '#fff' }}>
+        {attachments.length > 0 && (
+          <Box sx={{ px: 1, pt: 0.75, display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+            {attachments.map((f, i) => (
+              <Chip
+                key={i}
+                label={f.name}
+                size="small"
+                icon={f.type.startsWith('image/') ? <ImageOutlined sx={{ fontSize: 16 }} /> : <AttachFileOutlined sx={{ fontSize: 16 }} />}
+                onDelete={() => setAttachments(prev => prev.filter((_, j) => j !== i))}
+                sx={{ fontSize: 11, maxWidth: 180 }}
+              />
+            ))}
+          </Box>
+        )}
         <Box sx={{ p: 1, display: 'flex', gap: 0.5 }}>
           <TextField
             value={input}
             onChange={e => setInput(e.target.value)}
+            onPaste={handlePaste}
             placeholder="Задайте вопрос или команду…"
             multiline
             minRows={1}
