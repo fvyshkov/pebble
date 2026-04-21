@@ -564,6 +564,7 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
 
         if name == "delete_model":
             mid = inp["model_id"]
+            print(f"[delete_model] Deleting model {mid}")
             # Gather all sheets
             sheets = await db.execute_fetchall("SELECT id FROM sheets WHERE model_id = ?", (mid,))
             sheet_ids = [s["id"] for s in sheets]
@@ -583,6 +584,7 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             # Delete model
             await db.execute("DELETE FROM models WHERE id = ?", (mid,))
             await db.commit()
+            print(f"[delete_model] Done — deleted {len(sheet_ids)} sheets")
             client_actions.append({"type": "reload_model", "model_id": mid})
             return json.dumps({"ok": True, "deleted_sheets": len(sheet_ids)}, ensure_ascii=False)
 
@@ -906,10 +908,8 @@ async def chat_message(req: ChatRequest):
     client_actions: list[dict] = []
 
     # Tool-use loop (cap at 8 iterations to prevent runaway)
-    from backend.llm_cache import cached_messages_create
     for _ in range(8):
-        resp = cached_messages_create(
-            client,
+        resp = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=2000,
             system=system,
