@@ -327,7 +327,11 @@ def _parse_claude_json(response_text: str) -> dict:
     return json.loads(text)
 
 
-_LLM_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".llm_cache")
+# Use persistent disk (/data) on Render, local .llm_cache otherwise
+_LLM_CACHE_DIR = os.path.join(
+    os.environ.get("PEBBLE_DB", "").rsplit("/", 1)[0] or os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    ".llm_cache"
+)
 
 def _llm_cache_get(key: str):
     """Legacy per-sheet-text cache (pre-shared-cache). Keeps prior warmed
