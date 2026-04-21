@@ -558,16 +558,17 @@ TOOLS: list[dict] = [
             "Создать аналитическую презентацию по данным модели. "
             "Бэкенд сам соберёт все данные, отправит на анализ и сгенерирует красивый HTML "
             "с графиками (Chart.js), трендами, выводами и ключевыми показателями. "
-            "Результат отобразится в центральной панели с возможностью скачать как PDF."
+            "Результат отобразится в центральной панели с возможностью скачать как PDF. "
+            "Можно передать sheet_id (один лист) или model_id (все листы модели)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "sheet_id": {"type": "string", "description": "ID листа для анализа"},
+                "sheet_id": {"type": "string", "description": "ID конкретного листа (опционально)"},
+                "model_id": {"type": "string", "description": "ID модели — возьмёт данные со всех листов (опционально)"},
                 "title": {"type": "string", "description": "Заголовок презентации"},
                 "focus": {"type": "string", "description": "На чём сфокусировать анализ (опционально)"},
             },
-            "required": ["sheet_id"],
         },
     },
 ]
@@ -749,18 +750,16 @@ async def bulk_remove_analytic(req: BulkAnalyticRequest):
 
 # ── Presentation builder ───────────────────────────────────────────────────
 
-async def _build_presentation(db, sheet_id: str, title: str | None, focus: str | None) -> str:
-    """Gather sheet data, send to Claude for HTML presentation with analysis."""
-    # 1. Get sheet info
+async def _gather_sheet_data_text(db, sheet_id: str) -> str | None:
+    """Gather sheet data into a text summary for presentation generation."""
     sheet_rows = await db.execute_fetchall("SELECT name, model_id FROM sheets WHERE id = ?", (sheet_id,))
     if not sheet_rows:
-        return "<h1>Лист не найден</h1>"
+        return None
     sheet_name = sheet_rows[0]["name"]
     model_id = sheet_rows[0]["model_id"]
     model_rows = await db.execute_fetchall("SELECT name FROM models WHERE id = ?", (model_id,))
     model_name = model_rows[0]["name"] if model_rows else ""
 
-    # 2. Get analytics and records
     sa_rows = await db.execute_fetchall(
         """SELECT a.id, a.name, a.is_periods FROM sheet_analytics sa
            JOIN analytics a ON a.id = sa.analytic_id
@@ -768,7 +767,7 @@ async def _build_presentation(db, sheet_id: str, title: str | None, focus: str |
         (sheet_id,),
     )
     analytics_info = []
-    all_records: dict[str, list[dict]] = {}  # analytic_id -> [{id, name, parent_id}]
+    all_records: dict[str, list[dict]] = {}
     for a in sa_rows:
         recs = await db.execute_fetchall(
             "SELECT id, data_json, parent_id FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
@@ -788,18 +787,15 @@ async def _build_presentation(db, sheet_id: str, title: str | None, focus: str |
             "records": [r["name"] for r in rec_list],
         })
 
-    # 3. Get cell data — build a structured table
     cells = await db.execute_fetchall(
         "SELECT coord_key, value FROM cell_data WHERE sheet_id = ? AND value IS NOT NULL AND value != ''",
         (sheet_id,),
     )
-    # Build a lookup: record_id -> name
     rid_to_name: dict[str, str] = {}
     for recs in all_records.values():
         for r in recs:
             rid_to_name[r["id"]] = r["name"]
 
-    # Convert cells to readable rows
     table_rows = []
     for c in cells:
         parts = (c["coord_key"] or "").split("|")
@@ -811,22 +807,26 @@ async def _build_presentation(db, sheet_id: str, title: str | None, focus: str |
             val_str = str(c["value"])
         table_rows.append({"coords": " | ".join(labels), "value": val_str})
 
-    # 4. Build compact data summary for LLM (limit to ~2000 rows)
     data_text = "\n".join(f"{r['coords']}: {r['value']}" for r in table_rows[:2000])
 
-    # 5. Send to Claude for HTML generation
-    pres_title = title or f"Анализ: {sheet_name}"
-    prompt = f"""Создай HTML-презентацию для аналитического отчёта.
-
-Модель: {model_name}
+    return f"""Модель: {model_name}
 Лист: {sheet_name}
-Заголовок: {pres_title}
-{f'Фокус анализа: {focus}' if focus else ''}
 
 Аналитики:
 {json.dumps(analytics_info, ensure_ascii=False, indent=2)}
 
 Данные (формат: координата | координата: значение):
+{data_text}"""
+
+
+async def _build_presentation_from_data(data_text: str, title: str | None, focus: str | None) -> str:
+    """Send gathered data to Claude for HTML presentation generation."""
+    pres_title = title or "Аналитический отчёт"
+    prompt = f"""Создай HTML-презентацию для аналитического отчёта.
+
+Заголовок: {pres_title}
+{f'Фокус анализа: {focus}' if focus else ''}
+
 {data_text}
 
 ТРЕБОВАНИЯ к HTML:
@@ -840,6 +840,7 @@ async def _build_presentation(db, sheet_id: str, title: str | None, focus: str |
 8. Язык: русский
 9. НЕ используй внешние ресурсы кроме Chart.js CDN
 10. Каждый график в отдельном <canvas> с уникальным id
+11. Контент должен занимать всю ширину страницы (width: 100%, без max-width ограничений)
 
 Верни ТОЛЬКО HTML код, без markdown обёртки, без ```html блоков."""
 
@@ -851,7 +852,6 @@ async def _build_presentation(db, sheet_id: str, title: str | None, focus: str |
         messages=[{"role": "user", "content": prompt}],
     )
     html = "".join(b.text for b in resp.content if b.type == "text")
-    # Strip markdown code fences if present
     if html.strip().startswith("```"):
         lines = html.strip().split("\n")
         if lines[0].startswith("```"):
@@ -1433,9 +1433,33 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             return json.dumps({"id": sid, "name": sname}, ensure_ascii=False)
 
         if name == "build_presentation":
-            print(f"[PEBBLE] build_presentation called, sheet_id={inp.get('sheet_id')}")
+            # Resolve sheet_id(s) from either sheet_id or model_id
+            sheet_ids = []
+            if inp.get("sheet_id"):
+                sheet_ids = [inp["sheet_id"]]
+            elif inp.get("model_id"):
+                rows = await db.execute_fetchall(
+                    "SELECT id FROM sheets WHERE model_id = ? ORDER BY sort_order", (inp["model_id"],))
+                sheet_ids = [r["id"] for r in rows]
+            elif ctx.current_sheet_id:
+                sheet_ids = [ctx.current_sheet_id]
+            elif ctx.current_model_id:
+                rows = await db.execute_fetchall(
+                    "SELECT id FROM sheets WHERE model_id = ? ORDER BY sort_order", (ctx.current_model_id,))
+                sheet_ids = [r["id"] for r in rows]
+            if not sheet_ids:
+                return json.dumps({"error": "Не указан sheet_id или model_id, и нет текущего контекста"}, ensure_ascii=False)
+            print(f"[PEBBLE] build_presentation called, sheet_ids={sheet_ids}")
             try:
-                html = await _build_presentation(db, inp["sheet_id"], inp.get("title"), inp.get("focus"))
+                # Gather data from all sheets
+                all_data_parts = []
+                for sid in sheet_ids:
+                    part = await _gather_sheet_data_text(db, sid)
+                    if part:
+                        all_data_parts.append(part)
+                if not all_data_parts:
+                    return json.dumps({"error": "Нет данных для презентации"}, ensure_ascii=False)
+                html = await _build_presentation_from_data("\n\n".join(all_data_parts), inp.get("title"), inp.get("focus"))
                 print(f"[PEBBLE] build_presentation OK, html length={len(html)}")
             except Exception as pres_err:
                 print(f"[PEBBLE] build_presentation FAILED: {pres_err}")
