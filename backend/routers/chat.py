@@ -450,6 +450,90 @@ TOOLS: list[dict] = [
             "required": ["model_id", "name"],
         },
     },
+    {
+        "name": "rename_model",
+        "description": "Переименовать модель.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "model_id": {"type": "string"},
+                "name": {"type": "string", "description": "Новое название"},
+            },
+            "required": ["model_id", "name"],
+        },
+    },
+    {
+        "name": "rename_sheet",
+        "description": "Переименовать лист.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sheet_id": {"type": "string"},
+                "name": {"type": "string", "description": "Новое название"},
+            },
+            "required": ["sheet_id", "name"],
+        },
+    },
+    {
+        "name": "rename_analytic",
+        "description": "Переименовать аналитику.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "analytic_id": {"type": "string"},
+                "name": {"type": "string", "description": "Новое название"},
+            },
+            "required": ["analytic_id", "name"],
+        },
+    },
+    {
+        "name": "update_record",
+        "description": "Переименовать запись аналитики.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "record_id": {"type": "string"},
+                "name": {"type": "string", "description": "Новое название записи"},
+            },
+            "required": ["record_id", "name"],
+        },
+    },
+    {
+        "name": "delete_record",
+        "description": "Удалить запись из аналитики.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "record_id": {"type": "string"},
+                "analytic_id": {"type": "string"},
+            },
+            "required": ["record_id", "analytic_id"],
+        },
+    },
+    {
+        "name": "delete_analytic",
+        "description": "Удалить аналитику со всеми записями. Необратимо.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "analytic_id": {"type": "string"},
+                "model_id": {"type": "string", "description": "ID модели (для reload)"},
+            },
+            "required": ["analytic_id", "model_id"],
+        },
+    },
+    {
+        "name": "delete_sheet",
+        "description": "Удалить лист со всеми ячейками.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sheet_id": {"type": "string"},
+                "model_id": {"type": "string"},
+            },
+            "required": ["sheet_id", "model_id"],
+        },
+    },
 ]
 
 
@@ -1048,6 +1132,79 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             client_actions.append({"type": "reload_model", "model_id": model_id})
             return json.dumps({"id": sid, "name": sname}, ensure_ascii=False)
 
+        if name == "rename_model":
+            await db.execute("UPDATE models SET name = ? WHERE id = ?", (inp["name"], inp["model_id"]))
+            await db.commit()
+            client_actions.append({"type": "reload_model", "model_id": inp["model_id"]})
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
+        if name == "rename_sheet":
+            await db.execute("UPDATE sheets SET name = ? WHERE id = ?", (inp["name"], inp["sheet_id"]))
+            await db.commit()
+            # Find model_id for reload
+            rows = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (inp["sheet_id"],))
+            if rows:
+                client_actions.append({"type": "reload_model", "model_id": rows[0]["model_id"]})
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
+        if name == "rename_analytic":
+            from backend.transliterate import transliterate
+            new_name = inp["name"]
+            new_code = transliterate(new_name)
+            await db.execute(
+                "UPDATE analytics SET name = ?, code = ? WHERE id = ?",
+                (new_name, new_code, inp["analytic_id"]),
+            )
+            await db.commit()
+            rows = await db.execute_fetchall("SELECT model_id FROM analytics WHERE id = ?", (inp["analytic_id"],))
+            if rows:
+                client_actions.append({"type": "reload_model", "model_id": rows[0]["model_id"]})
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
+        if name == "update_record":
+            # Read current data_json, update name
+            rows = await db.execute_fetchall("SELECT data_json FROM analytic_records WHERE id = ?", (inp["record_id"],))
+            if not rows:
+                return json.dumps({"error": "record not found"}, ensure_ascii=False)
+            data = json.loads(rows[0]["data_json"] or "{}")
+            data["name"] = inp["name"]
+            await db.execute(
+                "UPDATE analytic_records SET data_json = ? WHERE id = ?",
+                (json.dumps(data, ensure_ascii=False), inp["record_id"]),
+            )
+            await db.commit()
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
+        if name == "delete_record":
+            # Delete record and its children
+            await db.execute("DELETE FROM analytic_records WHERE id = ? OR parent_id = ?", (inp["record_id"], inp["record_id"]))
+            await db.commit()
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
+        if name == "delete_analytic":
+            aid = inp["analytic_id"]
+            mid = inp["model_id"]
+            await db.execute("DELETE FROM analytic_records WHERE analytic_id = ?", (aid,))
+            await db.execute("DELETE FROM analytic_fields WHERE analytic_id = ?", (aid,))
+            await db.execute("DELETE FROM sheet_analytics WHERE analytic_id = ?", (aid,))
+            await db.execute("DELETE FROM indicator_formula_rules WHERE analytic_id = ?", (aid,))
+            await db.execute("DELETE FROM analytics WHERE id = ?", (aid,))
+            await db.commit()
+            client_actions.append({"type": "reload_model", "model_id": mid})
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
+        if name == "delete_sheet":
+            sid = inp["sheet_id"]
+            mid = inp["model_id"]
+            await db.execute("DELETE FROM cell_data WHERE sheet_id = ?", (sid,))
+            await db.execute("DELETE FROM indicator_formula_rules WHERE sheet_id = ?", (sid,))
+            await db.execute("DELETE FROM sheet_analytics WHERE sheet_id = ?", (sid,))
+            await db.execute("DELETE FROM sheet_view_settings WHERE sheet_id = ?", (sid,))
+            await db.execute("DELETE FROM sheets WHERE id = ?", (sid,))
+            await db.commit()
+            client_actions.append({"type": "reload_model", "model_id": mid})
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
         return json.dumps({"error": f"unknown tool {name}"}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -1096,20 +1253,22 @@ async def chat_message(req: ChatRequest):
                 part = f"  - {r['name']} (id={r['id']}, {label})"
                 # Add record names (up to 30) so agent knows the actual values
                 recs = await db.execute_fetchall(
-                    "SELECT data_json FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order LIMIT 30",
+                    "SELECT id, data_json FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order LIMIT 30",
                     (r['id'],),
                 )
                 if recs:
                     import json as _json
-                    names = []
+                    rec_items = []
                     for rec in recs:
                         try:
                             d = _json.loads(rec['data_json'] or '{}')
-                            names.append(d.get('name', ''))
+                            n = d.get('name', '')
+                            if n:
+                                rec_items.append(f"{n} (id={rec['id']})")
                         except Exception:
                             pass
-                    if names:
-                        part += f"\n    Записи: {', '.join(n for n in names if n)}"
+                    if rec_items:
+                        part += f"\n    Записи: {', '.join(rec_items)}"
                 parts.append(part)
             ctx_lines.append("Аналитики на листе:\n" + "\n".join(parts))
     if ctx.user_id:
