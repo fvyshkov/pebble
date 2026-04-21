@@ -19,7 +19,7 @@ export default function PresentationPanel({ html, title, onClose }: Props) {
   }
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, width: '100%', height: '100%' }}>
       <Box sx={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         px: 2, py: 1, borderBottom: '1px solid #e0e0e0', background: '#fafafa',
@@ -44,7 +44,7 @@ export default function PresentationPanel({ html, title, onClose }: Props) {
       <Box sx={{ flex: 1, overflow: 'hidden' }}>
         <iframe
           ref={iframeRef}
-          srcDoc={html}
+          srcDoc={`<style>html,body{margin:0;padding:0;width:100%}body>*{max-width:100%!important;width:100%!important;margin-left:0!important;margin-right:0!important;box-sizing:border-box}</style>${html}`}
           style={{ width: '100%', height: '100%', border: 'none' }}
           title={title}
         />
