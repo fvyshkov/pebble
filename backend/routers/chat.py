@@ -50,7 +50,10 @@ SYSTEM_PROMPT = """Ты помощник в приложении Pebble — фи
 - Надо переключить режим → вызови switch_mode
 - Надо открыть лист → вызови open_sheet
 - Надо заполнить данные → вызови fill_sheet или set_cell
-- Надо добавить аналитику → вызови add_analytic_to_all_sheets
+- Надо создать аналитику → вызови create_analytic, потом create_records для записей, потом add_analytic_to_all_sheets
+- Надо добавить записи в аналитику → вызови create_records
+- Надо добавить аналитику в листы → вызови add_analytic_to_all_sheets или add_analytic_to_sheet
+- Надо создать лист → вызови create_sheet
 - Надо удалить модель → спроси подтверждение, затем вызови delete_model
 - Надо пересчитать → вызови recalc
 - Надо построить график → вызови build_chart
@@ -358,6 +361,80 @@ TOOLS: list[dict] = [
                 },
             },
             "required": ["title", "chart_type", "data", "series"],
+        },
+    },
+    {
+        "name": "create_analytic",
+        "description": (
+            "Создать новую аналитику в модели. Возвращает {id, name, code}. "
+            "После создания можно добавить записи через create_records и привязать к листам через add_analytic_to_all_sheets."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "model_id": {"type": "string", "description": "ID модели"},
+                "name": {"type": "string", "description": "Название аналитики"},
+                "is_periods": {"type": "boolean", "description": "Это периоды? (год/квартал/месяц)", "default": False},
+                "period_types": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Типы периодов: ['year','quarter','month']",
+                    "default": [],
+                },
+                "period_start": {"type": "string", "description": "Начало периодов (YYYY-MM-DD)"},
+                "period_end": {"type": "string", "description": "Окончание периодов (YYYY-MM-DD)"},
+            },
+            "required": ["model_id", "name"],
+        },
+    },
+    {
+        "name": "create_records",
+        "description": (
+            "Создать одну или несколько записей в аналитике. "
+            "Каждая запись — это строка (например, подразделение, продукт, показатель). "
+            "Для иерархии укажи parent_id у дочерних записей."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "analytic_id": {"type": "string", "description": "ID аналитики"},
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Название записи"},
+                            "parent_id": {"type": "string", "description": "ID родительской записи (для иерархии)"},
+                        },
+                        "required": ["name"],
+                    },
+                    "description": "Массив записей [{name, parent_id?}]",
+                },
+            },
+            "required": ["analytic_id", "records"],
+        },
+    },
+    {
+        "name": "add_analytic_to_sheet",
+        "description": "Привязать аналитику к одному конкретному листу.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sheet_id": {"type": "string", "description": "ID листа"},
+                "analytic_id": {"type": "string", "description": "ID аналитики"},
+            },
+            "required": ["sheet_id", "analytic_id"],
+        },
+    },
+    {
+        "name": "create_sheet",
+        "description": "Создать новый лист в модели.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "model_id": {"type": "string", "description": "ID модели"},
+                "name": {"type": "string", "description": "Название листа"},
+            },
+            "required": ["model_id", "name"],
         },
     },
 ]
@@ -869,6 +946,87 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
                 "category_field": inp.get("category_field", "category"),
             })
             return json.dumps({"ok": True, "message": "График отправлен в интерфейс"}, ensure_ascii=False)
+
+        if name == "create_analytic":
+            from backend.transliterate import transliterate
+            model_id = inp["model_id"]
+            aname = inp["name"]
+            code = transliterate(aname)
+            is_periods = inp.get("is_periods", False)
+            period_types = inp.get("period_types", [])
+            aid = str(uuid.uuid4())
+            await db.execute(
+                """INSERT INTO analytics (id, model_id, name, code, icon, is_periods, data_type,
+                   period_types, period_start, period_end, sort_order)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (aid, model_id, aname, code, "", int(is_periods), "sum",
+                 json.dumps(period_types), inp.get("period_start", ""), inp.get("period_end", ""), 0),
+            )
+            if not is_periods:
+                fid = str(uuid.uuid4())
+                await db.execute(
+                    "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
+                    (fid, aid, "Наименование", "name", "string", 0),
+                )
+            else:
+                # Create period fields
+                from backend.routers.analytics import _ensure_period_fields
+                await _ensure_period_fields(db, aid)
+            await db.commit()
+            if is_periods and period_types:
+                from backend.routers.analytics import generate_periods as _gen_periods
+                await _gen_periods(aid)
+            client_actions.append({"type": "reload_model", "model_id": model_id})
+            return json.dumps({"id": aid, "name": aname, "code": code}, ensure_ascii=False)
+
+        if name == "create_records":
+            analytic_id = inp["analytic_id"]
+            records = inp.get("records", [])
+            created = []
+            for rec in records:
+                rid = str(uuid.uuid4())
+                data_json = {"name": rec["name"]}
+                await db.execute(
+                    "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
+                    (rid, analytic_id, rec.get("parent_id"), len(created), json.dumps(data_json, ensure_ascii=False)),
+                )
+                created.append({"id": rid, "name": rec["name"]})
+            await db.commit()
+            return json.dumps({"created": len(created), "records": created}, ensure_ascii=False)
+
+        if name == "add_analytic_to_sheet":
+            sheet_id = inp["sheet_id"]
+            analytic_id = inp["analytic_id"]
+            existing = await db.execute_fetchall(
+                "SELECT id FROM sheet_analytics WHERE sheet_id = ? AND analytic_id = ?",
+                (sheet_id, analytic_id),
+            )
+            if existing:
+                return json.dumps({"ok": True, "skipped": True}, ensure_ascii=False)
+            said = str(uuid.uuid4())
+            max_ord = await db.execute_fetchall(
+                "SELECT COALESCE(MAX(sort_order),0) as m FROM sheet_analytics WHERE sheet_id = ?",
+                (sheet_id,),
+            )
+            await db.execute(
+                "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order) VALUES (?,?,?,?)",
+                (said, sheet_id, analytic_id, (max_ord[0]["m"] if max_ord else 0) + 1),
+            )
+            await db.commit()
+            client_actions.append({"type": "reload_sheet", "sheet_id": sheet_id})
+            return json.dumps({"ok": True, "added": True}, ensure_ascii=False)
+
+        if name == "create_sheet":
+            model_id = inp["model_id"]
+            sname = inp["name"]
+            sid = str(uuid.uuid4())
+            await db.execute(
+                "INSERT INTO sheets (id, model_id, name) VALUES (?,?,?)",
+                (sid, model_id, sname),
+            )
+            await db.commit()
+            client_actions.append({"type": "reload_model", "model_id": model_id})
+            return json.dumps({"id": sid, "name": sname}, ensure_ascii=False)
 
         return json.dumps({"error": f"unknown tool {name}"}, ensure_ascii=False)
     except Exception as e:
