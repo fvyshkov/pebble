@@ -56,7 +56,7 @@ SYSTEM_PROMPT = """Ты помощник в приложении Pebble — фи
 - Надо создать лист → вызови create_sheet
 - Надо удалить модель → спроси подтверждение, затем вызови delete_model
 - Надо пересчитать → вызови recalc
-- Надо построить график → сначала read_sheet_data для получения всех данных, потом build_chart
+- Надо построить график → вызови build_chart с названиями показателей и группировки (данные бэкенд достанет сам)
 Ты — агент, который ВЫПОЛНЯЕТ действия, а не инструктор, который рассказывает, что делать.
 
 Контекст пользователя передаётся в каждом запросе (текущая модель, текущий лист, id пользователя).
@@ -139,16 +139,26 @@ TOOLS: list[dict] = [
         },
     },
     {
-        "name": "read_sheet_data",
+        "name": "query_data",
         "description": (
-            "Прочитать ВСЕ данные листа целиком. Возвращает массив ячеек "
-            "[{coord_key, value, rule}]. Используй этот тул вместо множества read_cell "
-            "когда нужно получить данные для графика или анализа."
+            "Запросить данные листа с серверной агрегацией. НЕ возвращает сырые ячейки — "
+            "делает SQL-агрегацию на бэкенде и возвращает компактный результат. "
+            "Указываешь показатель (indicator) и измерение для группировки (group_by). "
+            "Бэкенд найдёт нужные ячейки, сгруппирует и вернёт [{label, value}]. "
+            "Для графиков используй build_chart_from_data — он сам вызывает query_data."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"sheet_id": {"type": "string"}},
-            "required": ["sheet_id"],
+            "properties": {
+                "sheet_id": {"type": "string"},
+                "indicator": {"type": "string", "description": "Название показателя (запись из аналитики-справочника)"},
+                "group_by": {"type": "string", "description": "Название аналитики для группировки (например 'Периоды')"},
+                "filter_records": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Ограничить только этими записями группировки (опционально)",
+                },
+            },
+            "required": ["sheet_id", "indicator"],
         },
     },
     {
@@ -335,45 +345,36 @@ TOOLS: list[dict] = [
     {
         "name": "build_chart",
         "description": (
-            "Построить график по данным модели. Ты должен сначала прочитать нужные данные "
-            "(через list_analytics, list_analytic_records, read_cell или fill_sheet), "
-            "затем вызвать build_chart с готовыми данными и конфигурацией. "
-            "Поддерживаемые типы: line, bar, pie, area. "
-            "Данные передаются в поле data как массив объектов [{category: '...', value: N, ...}]. "
-            "Для нескольких серий — каждый объект содержит category + несколько числовых полей. "
-            "Поле series — массив [{field: 'fieldName', name: 'Название серии'}]."
+            "Построить график по данным листа. Указываешь показатель и группировку — "
+            "бэкенд сам достаёт данные из БД, агрегирует и отправляет график в интерфейс. "
+            "НЕ нужно предварительно читать данные — всё делается за один вызов. "
+            "Несколько показателей = несколько серий на одном графике."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "sheet_id": {"type": "string", "description": "ID листа"},
                 "title": {"type": "string", "description": "Заголовок графика"},
                 "chart_type": {
                     "type": "string",
                     "enum": ["line", "bar", "pie", "area"],
                     "description": "Тип графика",
                 },
-                "data": {
+                "indicators": {
                     "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Массив данных [{category: '...', value: N, ...}]",
+                    "items": {"type": "string"},
+                    "description": "Названия показателей (серии графика)",
                 },
-                "series": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "field": {"type": "string"},
-                            "name": {"type": "string"},
-                        },
-                    },
-                    "description": "Описание серий [{field, name}]",
-                },
-                "category_field": {
+                "group_by": {
                     "type": "string",
-                    "description": "Имя поля для оси категорий (по умолчанию 'category')",
+                    "description": "Название аналитики для оси X / категорий (например 'Периоды')",
+                },
+                "filter_records": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Показывать только эти записи группировки (опционально, например только месяцы без кварталов)",
                 },
             },
-            "required": ["title", "chart_type", "data", "series"],
+            "required": ["sheet_id", "title", "chart_type", "indicators", "group_by"],
         },
     },
     {
@@ -711,6 +712,124 @@ async def bulk_remove_analytic(req: BulkAnalyticRequest):
     return {"removed": removed, "total_sheets": len(sheets)}
 
 
+# ── Server-side data query (no LLM context needed) ────────────────────────
+
+async def _query_sheet_data(
+    db, sheet_id: str, indicator: str,
+    group_by: str | None = None, filter_records: list[str] | None = None,
+) -> dict:
+    """Query cell data for a specific indicator, grouped by an analytic dimension.
+
+    Returns {"data": [{"label": "...", "value": N}, ...]} — compact, never large.
+    All heavy lifting (joins, aggregation) happens in Python/SQL, not in LLM context.
+    """
+    # 1. Find all analytics on this sheet
+    sa_rows = await db.execute_fetchall(
+        """SELECT a.id, a.name, a.is_periods FROM sheet_analytics sa
+           JOIN analytics a ON a.id = sa.analytic_id
+           WHERE sa.sheet_id = ? ORDER BY sa.sort_order""",
+        (sheet_id,),
+    )
+    if not sa_rows:
+        return {"error": "На листе нет аналитик"}
+
+    # 2. Find the indicator record (search by name across all non-period analytics)
+    indicator_record_id = None
+    indicator_analytic_id = None
+    for a in sa_rows:
+        if a["is_periods"]:
+            continue
+        recs = await db.execute_fetchall(
+            "SELECT id, data_json FROM analytic_records WHERE analytic_id = ?", (a["id"],),
+        )
+        for r in recs:
+            try:
+                d = json.loads(r["data_json"] or "{}")
+                if d.get("name", "").lower().strip() == indicator.lower().strip():
+                    indicator_record_id = r["id"]
+                    indicator_analytic_id = a["id"]
+                    break
+            except Exception:
+                pass
+        if indicator_record_id:
+            break
+
+    if not indicator_record_id:
+        return {"error": f"Показатель '{indicator}' не найден"}
+
+    # 3. Find the grouping analytic
+    group_analytic = None
+    if group_by:
+        for a in sa_rows:
+            if a["name"].lower().strip() == group_by.lower().strip():
+                group_analytic = a
+                break
+        if not group_analytic:
+            # Try partial match
+            for a in sa_rows:
+                if group_by.lower() in a["name"].lower():
+                    group_analytic = a
+                    break
+    if not group_analytic:
+        # Default: use the first analytic that isn't the indicator's analytic
+        for a in sa_rows:
+            if a["id"] != indicator_analytic_id:
+                group_analytic = a
+                break
+
+    if not group_analytic:
+        return {"error": "Не найдена аналитика для группировки"}
+
+    # 4. Get grouping records (leaf only — no parents)
+    group_recs = await db.execute_fetchall(
+        "SELECT id, data_json, parent_id FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+        (group_analytic["id"],),
+    )
+    parent_ids = {r["parent_id"] for r in group_recs if r["parent_id"]}
+    leaf_recs = [r for r in group_recs if r["id"] not in parent_ids]
+
+    # 5. Filter if requested
+    if filter_records:
+        filter_lower = {f.lower().strip() for f in filter_records}
+        filtered = []
+        for r in leaf_recs:
+            try:
+                d = json.loads(r["data_json"] or "{}")
+                if d.get("name", "").lower().strip() in filter_lower:
+                    filtered.append(r)
+            except Exception:
+                pass
+        leaf_recs = filtered
+
+    # 6. Query cells
+    # coord_key format is pipe-separated record IDs: "rec_id1|rec_id2|rec_id3"
+    # We need cells containing both the indicator record ID and the group record ID
+    data = []
+    for rec in leaf_recs:
+        try:
+            rec_name = json.loads(rec["data_json"] or "{}").get("name", "")
+        except Exception:
+            rec_name = ""
+        cells = await db.execute_fetchall(
+            "SELECT value FROM cell_data WHERE sheet_id = ? AND coord_key LIKE ? AND coord_key LIKE ?",
+            (sheet_id, f"%{indicator_record_id}%", f"%{rec['id']}%"),
+        )
+        # Sum all matching cells (e.g. across periods)
+        total = 0.0
+        count = 0
+        for c in cells:
+            try:
+                v = float(c["value"]) if c["value"] else 0
+                total += v
+                count += 1
+            except (ValueError, TypeError):
+                pass
+        if count > 0:
+            data.append({"label": rec_name, "value": round(total, 2)})
+
+    return {"data": data, "indicator": indicator, "group_by": group_analytic["name"]}
+
+
 # ── Server-side tool execution ─────────────────────────────────────────────
 
 async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: list[dict]) -> str:
@@ -785,12 +904,12 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             )
             return json.dumps({"value": rows[0]["value"] if rows else None}, ensure_ascii=False)
 
-        if name == "read_sheet_data":
-            rows = await db.execute_fetchall(
-                "SELECT coord_key, value FROM cell_data WHERE sheet_id = ? AND value IS NOT NULL AND value != '' AND value != '0' LIMIT 500",
-                (inp["sheet_id"],),
+        if name == "query_data":
+            result = await _query_sheet_data(
+                db, inp["sheet_id"], inp["indicator"],
+                inp.get("group_by"), inp.get("filter_records"),
             )
-            return json.dumps([{"k": r["coord_key"], "v": r["value"]} for r in rows], ensure_ascii=False)
+            return json.dumps(result, ensure_ascii=False)
 
         if name == "set_cell":
             # Upsert manual cell value
@@ -1041,15 +1160,42 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             return json.dumps(result, ensure_ascii=False)
 
         if name == "build_chart":
+            sheet_id = inp["sheet_id"]
+            indicators = inp.get("indicators", [])
+            group_by = inp.get("group_by")
+            filter_recs = inp.get("filter_records")
+            chart_type = inp.get("chart_type", "bar")
+            title = inp.get("title", "")
+            # Query data for each indicator
+            all_labels: list[str] = []
+            series_data: dict[str, dict[str, float]] = {}
+            for ind_name in indicators:
+                result = await _query_sheet_data(db, sheet_id, ind_name, group_by, filter_recs)
+                if "error" in result:
+                    return json.dumps(result, ensure_ascii=False)
+                for item in result.get("data", []):
+                    label = item["label"]
+                    if label not in all_labels:
+                        all_labels.append(label)
+                    series_data.setdefault(ind_name, {})[label] = item["value"]
+            # Build chart data array
+            data = []
+            for label in all_labels:
+                row: dict = {"category": label}
+                for ind_name in indicators:
+                    field = ind_name.replace(" ", "_")
+                    row[field] = series_data.get(ind_name, {}).get(label, 0)
+                data.append(row)
+            series = [{"field": ind.replace(" ", "_"), "name": ind} for ind in indicators]
             client_actions.append({
                 "type": "show_chart",
-                "title": inp.get("title", ""),
-                "chart_type": inp.get("chart_type", "bar"),
-                "data": inp.get("data", []),
-                "series": inp.get("series", []),
-                "category_field": inp.get("category_field", "category"),
+                "title": title,
+                "chart_type": chart_type,
+                "data": data,
+                "series": series,
+                "category_field": "category",
             })
-            return json.dumps({"ok": True, "message": "График отправлен в интерфейс"}, ensure_ascii=False)
+            return json.dumps({"ok": True, "points": len(data), "series": len(series)}, ensure_ascii=False)
 
         if name == "create_analytic":
             from backend.transliterate import transliterate
