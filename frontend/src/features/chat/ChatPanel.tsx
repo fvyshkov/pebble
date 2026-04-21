@@ -3,6 +3,8 @@ import { Box, IconButton, TextField, CircularProgress, Typography, Tooltip } fro
 import SendOutlined from '@mui/icons-material/SendOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import ClearAllOutlined from '@mui/icons-material/ClearAllOutlined'
+import ContentCopyOutlined from '@mui/icons-material/ContentCopyOutlined'
+import CheckOutlined from '@mui/icons-material/CheckOutlined'
 import MicOutlined from '@mui/icons-material/MicOutlined'
 import MicOffOutlined from '@mui/icons-material/MicOffOutlined'
 import * as api from '../../api'
@@ -54,9 +56,14 @@ export default function ChatPanel({
   const [thinkingSteps, setThinkingSteps] = useState<string[]>([])
   const [typingText, setTypingText] = useState<string | null>(null) // typewriter buffer
   const [dragOver, setDragOver] = useState(false)
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null) // flash check icon
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatInputRef = useRef<HTMLInputElement>(null)
   const typingRef = useRef<number>(0) // animation frame id
+  // Prompt history (ArrowUp/Down in empty input)
+  const historyRef = useRef<string[]>([])
+  const historyPosRef = useRef(-1)
+  const savedInputRef = useRef('')
   // Voice input state
   const [listening, setListening] = useState(false)
   const [voiceUnsupported, setVoiceUnsupported] = useState(false)
@@ -149,6 +156,11 @@ export default function ChatPanel({
       localStorage.removeItem(STORAGE_KEY)
       return
     }
+    // Push to prompt history
+    historyRef.current.push(text)
+    historyPosRef.current = -1
+    savedInputRef.current = ''
+
     const userMsg: UIMessage = { role: 'user', text, raw: { role: 'user', content: text } }
     const nextMsgs = [...messages, userMsg]
     setMessages(nextMsgs)
@@ -404,15 +416,35 @@ export default function ChatPanel({
           <Box key={i} sx={{
             mb: 1, display: 'flex',
             justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start',
+            '&:hover .copy-btn': { opacity: 1 },
           }}>
             <Box sx={{
-              maxWidth: '90%', px: 1.25, py: 0.75, borderRadius: 1.5,
+              maxWidth: '90%', position: 'relative',
+              px: 1.25, py: 0.75, borderRadius: 1.5,
               fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
               background: m.role === 'user' ? '#1976d2' : '#fff',
               color: m.role === 'user' ? '#fff' : '#333',
               border: m.role === 'user' ? 'none' : '1px solid #e0e0e0',
             }}>
               {m.text}
+              <IconButton
+                className="copy-btn"
+                size="small"
+                sx={{
+                  position: 'absolute', top: 2, right: -28,
+                  opacity: 0, transition: 'opacity 0.15s',
+                  color: '#999', '&:hover': { color: '#555' },
+                }}
+                onClick={() => {
+                  navigator.clipboard.writeText(m.text)
+                  setCopiedIdx(i)
+                  setTimeout(() => setCopiedIdx(null), 1500)
+                }}
+              >
+                {copiedIdx === i
+                  ? <CheckOutlined sx={{ fontSize: 14 }} />
+                  : <ContentCopyOutlined sx={{ fontSize: 14 }} />}
+              </IconButton>
             </Box>
           </Box>
         ))}
@@ -477,6 +509,35 @@ export default function ChatPanel({
                 e.preventDefault()
                 const v = input.trim()
                 if (v) send(v)
+              } else if (e.key === 'ArrowUp' && !e.shiftKey) {
+                const el = e.target as HTMLTextAreaElement
+                // Only navigate history if cursor is at the very start (no multiline above)
+                if (el.selectionStart === 0 && el.selectionEnd === 0) {
+                  const hist = historyRef.current
+                  if (hist.length === 0) return
+                  e.preventDefault()
+                  if (historyPosRef.current < 0) {
+                    savedInputRef.current = input
+                    historyPosRef.current = hist.length - 1
+                  } else if (historyPosRef.current > 0) {
+                    historyPosRef.current--
+                  }
+                  setInput(hist[historyPosRef.current])
+                }
+              } else if (e.key === 'ArrowDown' && !e.shiftKey) {
+                const el = e.target as HTMLTextAreaElement
+                const atEnd = el.selectionStart === el.value.length
+                if (atEnd && historyPosRef.current >= 0) {
+                  e.preventDefault()
+                  const hist = historyRef.current
+                  if (historyPosRef.current < hist.length - 1) {
+                    historyPosRef.current++
+                    setInput(hist[historyPosRef.current])
+                  } else {
+                    historyPosRef.current = -1
+                    setInput(savedInputRef.current)
+                  }
+                }
               }
             }}
             inputProps={{ 'data-testid': 'chat-input' }}
