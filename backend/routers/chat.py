@@ -51,6 +51,7 @@ SYSTEM_PROMPT = """Ты помощник в приложении Pebble — фи
 - Надо открыть лист → вызови open_sheet
 - Надо заполнить данные → вызови fill_sheet или set_cell
 - Надо добавить аналитику → вызови add_analytic_to_all_sheets
+- Надо удалить модель → спроси подтверждение, затем вызови delete_model
 - Надо пересчитать → вызови recalc
 - Надо построить график → вызови build_chart
 Ты — агент, который ВЫПОЛНЯЕТ действия, а не инструктор, который рассказывает, что делать.
@@ -77,6 +78,17 @@ TOOLS: list[dict] = [
                 "description": {"type": "string", "description": "Описание (опционально)"},
             },
             "required": ["name"],
+        },
+    },
+    {
+        "name": "delete_model",
+        "description": "Удалить модель со всеми её листами, аналитиками, ячейками и правилами. Необратимо! Перед удалением спроси подтверждение у пользователя.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "model_id": {"type": "string", "description": "ID модели для удаления"},
+            },
+            "required": ["model_id"],
         },
     },
     {
@@ -549,6 +561,30 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             )
             await db.commit()
             return json.dumps({"id": mid, "name": inp.get("name")}, ensure_ascii=False)
+
+        if name == "delete_model":
+            mid = inp["model_id"]
+            # Gather all sheets
+            sheets = await db.execute_fetchall("SELECT id FROM sheets WHERE model_id = ?", (mid,))
+            sheet_ids = [s["id"] for s in sheets]
+            # Delete cells, formula rules, sheet_analytics, view settings for each sheet
+            for sid in sheet_ids:
+                await db.execute("DELETE FROM cell_data WHERE sheet_id = ?", (sid,))
+                await db.execute("DELETE FROM indicator_formula_rules WHERE sheet_id = ?", (sid,))
+                await db.execute("DELETE FROM sheet_analytics WHERE sheet_id = ?", (sid,))
+                await db.execute("DELETE FROM sheet_view_settings WHERE sheet_id = ?", (sid,))
+            # Delete sheets
+            await db.execute("DELETE FROM sheets WHERE model_id = ?", (mid,))
+            # Delete analytics and their records
+            analytics = await db.execute_fetchall("SELECT id FROM analytics WHERE model_id = ?", (mid,))
+            for a in analytics:
+                await db.execute("DELETE FROM analytic_records WHERE analytic_id = ?", (a["id"],))
+            await db.execute("DELETE FROM analytics WHERE model_id = ?", (mid,))
+            # Delete model
+            await db.execute("DELETE FROM models WHERE id = ?", (mid,))
+            await db.commit()
+            client_actions.append({"type": "reload_model", "model_id": mid})
+            return json.dumps({"ok": True, "deleted_sheets": len(sheet_ids)}, ensure_ascii=False)
 
         if name == "list_sheets":
             rows = await db.execute_fetchall(
