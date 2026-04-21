@@ -1505,6 +1505,17 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
 
 @router.post("/message")
 async def chat_message(req: ChatRequest):
+    try:
+        return await _chat_message_impl(req)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _chat_message_impl(req: ChatRequest):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set on server")

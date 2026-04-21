@@ -3,7 +3,14 @@ import type { Model, Analytic, AnalyticField, AnalyticRecord, Sheet, SheetAnalyt
 const BASE = '/api'
 
 async function json<T>(r: Response): Promise<T> {
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
+  if (!r.ok) {
+    let detail = r.statusText
+    try {
+      const body = await r.json()
+      detail = body.detail || body.message || detail
+    } catch { /* ignore */ }
+    throw new Error(`${r.status}: ${detail}`)
+  }
   return r.json()
 }
 
