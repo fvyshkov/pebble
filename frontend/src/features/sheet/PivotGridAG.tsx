@@ -1786,8 +1786,10 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       const chart = root.container.children.push(
         am5xy.XYChart.new(root, { panX: true, panY: false, wheelX: 'panX', wheelY: 'zoomX', layout: root.verticalLayout })
       )
+      const xRenderer = am5xy.AxisRendererX.new(root, { minGridDistance: 80 })
+      xRenderer.labels.template.setAll({ rotation: -45, centerY: am5.percent(50), centerX: am5.percent(100), paddingRight: 8, fontSize: 11, oversizedBehavior: 'truncate', maxWidth: 120 })
       const xAxis = chart.xAxes.push(
-        am5xy.CategoryAxis.new(root, { categoryField: 'category', renderer: am5xy.AxisRendererX.new(root, { minGridDistance: 30 }) })
+        am5xy.CategoryAxis.new(root, { categoryField: 'category', renderer: xRenderer, tooltip: am5.Tooltip.new(root, {}) })
       )
       // Build merged data: one row per category with fields per series
       const data = labels.map((l, ci) => {

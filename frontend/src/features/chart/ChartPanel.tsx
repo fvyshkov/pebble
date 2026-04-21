@@ -62,10 +62,13 @@ export default function ChartPanel({ config, onClose }: ChartPanelProps) {
         })
       )
 
+      const xRenderer = am5xy.AxisRendererX.new(root, { minGridDistance: 80 })
+      xRenderer.labels.template.setAll({ rotation: -45, centerY: am5.percent(50), centerX: am5.percent(100), paddingRight: 8, fontSize: 11, oversizedBehavior: 'truncate', maxWidth: 120 })
       const xAxis = chart.xAxes.push(
         am5xy.CategoryAxis.new(root, {
           categoryField,
-          renderer: am5xy.AxisRendererX.new(root, { minGridDistance: 30 }),
+          renderer: xRenderer,
+          tooltip: am5.Tooltip.new(root, {}),
         })
       )
       xAxis.data.setAll(config.data)
