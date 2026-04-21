@@ -1775,10 +1775,26 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         am5percent.PieChart.new(root, { layout: root.verticalLayout })
       )
       const series = chart.series.push(
-        am5percent.PieSeries.new(root, { valueField: 'value', categoryField: 'category' })
+        am5percent.PieSeries.new(root, { valueField: 'value', categoryField: 'category', legendLabelText: '{category}', legendValueText: '{value}' })
       )
-      const d = datasets[0]?.data || []
-      series.data.setAll(labels.map((l, i) => ({ category: l, value: d[i] || 0 })))
+      series.labels.template.setAll({ fontSize: 12, text: '{category}: {valuePercentTotal.formatNumber("0.0")}%' })
+      // For pie: if multiple rows selected, each row is a segment; if one row, each column is a segment
+      let pieData: { category: string; value: number }[]
+      if (datasets.length > 1) {
+        // Multiple rows → each row becomes a pie segment (sum of its values)
+        pieData = datasets.map(ds => ({ category: ds.label, value: ds.data.reduce((a, b) => a + b, 0) }))
+      } else {
+        // Single row → each column becomes a pie segment
+        const d = datasets[0]?.data || []
+        pieData = labels.map((l, i) => ({ category: l, value: d[i] || 0 }))
+      }
+      // Filter out zero/negative values for cleaner pie
+      pieData = pieData.filter(d => d.value > 0)
+      series.data.setAll(pieData)
+      if (pieData.length > 1) {
+        const legend = chart.children.push(am5.Legend.new(root, { centerX: am5.percent(50), x: am5.percent(50) }))
+        legend.data.setAll(series.dataItems)
+      }
       series.appear(1000, 100)
       chart.appear(1000, 100)
     } else {

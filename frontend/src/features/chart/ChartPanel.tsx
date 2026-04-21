@@ -45,9 +45,15 @@ export default function ChartPanel({ config, onClose }: ChartPanelProps) {
         am5percent.PieSeries.new(root, {
           valueField: config.series[0]?.field || 'value',
           categoryField,
+          legendLabelText: `{${categoryField}}`,
+          legendValueText: '{value}',
         })
       )
+      series.labels.template.setAll({ fontSize: 12, text: `{${categoryField}}: {valuePercentTotal.formatNumber("0.0")}%`, oversizedBehavior: 'truncate', maxWidth: 150 })
       series.data.setAll(config.data)
+      const legend = chart.children.push(am5.Legend.new(root, { centerX: am5.percent(50), x: am5.percent(50), layout: root.verticalLayout }))
+      legend.labels.template.setAll({ fontSize: 11, oversizedBehavior: 'truncate', maxWidth: 200 })
+      legend.data.setAll(series.dataItems)
       series.appear(1000, 100)
       chart.appear(1000, 100)
     } else {
