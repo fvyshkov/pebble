@@ -51,8 +51,11 @@ export default function ChatPanel({
   })
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [thinkingSteps, setThinkingSteps] = useState<string[]>([])
+  const [typingText, setTypingText] = useState<string | null>(null) // typewriter buffer
   const [dragOver, setDragOver] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const typingRef = useRef<number>(0) // animation frame id
   // Voice input state
   const [listening, setListening] = useState(false)
   const [voiceUnsupported, setVoiceUnsupported] = useState(false)
@@ -105,6 +108,32 @@ export default function ChatPanel({
     if (needReload && onRefreshData) onRefreshData()
   }, [onOpenSheet, onSwitchMode, onRefreshData, onShowChart, onShowPresentation, triggerFilePicker])
 
+  // Typewriter: gradually reveal full text
+  const typewrite = useCallback((fullText: string, rawContent: any) => {
+    let pos = 0
+    const CHARS_PER_TICK = 2
+    const TICK_MS = 20
+    const tick = () => {
+      pos = Math.min(pos + CHARS_PER_TICK, fullText.length)
+      setTypingText(fullText.slice(0, pos))
+      if (pos < fullText.length) {
+        typingRef.current = window.setTimeout(tick, TICK_MS)
+      } else {
+        // Done typing — commit as real message
+        setTypingText(null)
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          text: fullText,
+          raw: { role: 'assistant', content: rawContent },
+        }])
+      }
+    }
+    tick()
+  }, [])
+
+  // Cleanup typewriter on unmount
+  useEffect(() => () => { if (typingRef.current) clearTimeout(typingRef.current) }, [])
+
   const send = useCallback(async (text: string) => {
     // Local commands — no need to hit the server
     const lower = text.trim().toLowerCase()
@@ -119,27 +148,38 @@ export default function ChatPanel({
     setMessages(nextMsgs)
     setInput('')
     setLoading(true)
+    setThinkingSteps([])
     try {
       const payload = nextMsgs.map(m => ({ role: m.role, content: m.raw.content }))
-      const resp = await api.chatMessage(payload, context)
-      const assistantMsg: UIMessage = {
-        role: 'assistant',
-        text: resp.message || '(пусто)',
-        raw: { role: 'assistant', content: resp.message || '' },
-      }
-      setMessages(prev => [...prev, assistantMsg])
-      console.log('[PEBBLE] resp.actions:', JSON.stringify(resp.actions?.map((a: any) => ({ type: a.type, htmlLen: a.html?.length }))))
-      if (resp.actions?.length) applyActions(resp.actions)
+      await api.chatMessageStream(payload, context, (event) => {
+        if (event.type === 'thinking') {
+          setThinkingSteps(prev => [...prev, event.text])
+        } else if (event.type === 'done') {
+          setLoading(false)
+          setThinkingSteps([])
+          const finalText = event.text || '(пусто)'
+          typewrite(finalText, finalText)
+          if (event.actions?.length) applyActions(event.actions)
+        } else if (event.type === 'error') {
+          setLoading(false)
+          setThinkingSteps([])
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            text: `⚠️ Ошибка: ${event.text}`,
+            raw: { role: 'assistant', content: `Ошибка: ${event.text}` },
+          }])
+        }
+      })
     } catch (e: any) {
       setMessages(prev => [...prev, {
         role: 'assistant',
         text: `⚠️ Ошибка: ${e.message || e}`,
         raw: { role: 'assistant', content: `Ошибка: ${e.message || e}` },
       }])
-    } finally {
       setLoading(false)
+      setThinkingSteps([])
     }
-  }, [messages, context, applyActions])
+  }, [messages, context, applyActions, typewrite])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -370,9 +410,35 @@ export default function ChatPanel({
             </Box>
           </Box>
         ))}
+        {/* Typewriter: assistant message being revealed gradually */}
+        {typingText !== null && (
+          <Box sx={{ mb: 1, display: 'flex', justifyContent: 'flex-start' }}>
+            <Box sx={{
+              maxWidth: '90%', px: 1.25, py: 0.75, borderRadius: 1.5,
+              fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              background: '#fff', color: '#333', border: '1px solid #e0e0e0',
+            }}>
+              {typingText}<Box component="span" sx={{ animation: 'blink 0.7s infinite', '@keyframes blink': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0 } } }}>▊</Box>
+            </Box>
+          </Box>
+        )}
         {loading && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: '#888', fontSize: 12 }}>
-            <CircularProgress size={14} /> думаю…
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, color: '#888', fontSize: 12 }}>
+            {thinkingSteps.length > 0 ? (
+              thinkingSteps.map((step, i) => (
+                <Box key={i} sx={{
+                  display: 'flex', alignItems: 'center', gap: 0.5,
+                  opacity: i === thinkingSteps.length - 1 ? 1 : 0.5,
+                }}>
+                  {i === thinkingSteps.length - 1 && <CircularProgress size={12} />}
+                  {step}
+                </Box>
+              ))
+            ) : (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <CircularProgress size={14} /> думаю…
+              </Box>
+            )}
           </Box>
         )}
         {dragOver && (

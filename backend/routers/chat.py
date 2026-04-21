@@ -844,8 +844,8 @@ async def _build_presentation(db, sheet_id: str, title: str | None, focus: str |
 Верни ТОЛЬКО HTML код, без markdown обёртки, без ```html блоков."""
 
     import anthropic as _anthropic
-    _client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-    resp = _client.messages.create(
+    _aclient = _anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    resp = await _aclient.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=8000,
         messages=[{"role": "user", "content": prompt}],
@@ -1528,6 +1528,45 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
+# ── Friendly tool names for thinking display ─────────────────────────────
+
+TOOL_LABELS = {
+    "list_models": "Получаю список моделей",
+    "list_sheets": "Получаю список листов",
+    "list_analytics": "Получаю аналитики листа",
+    "list_model_analytics": "Получаю аналитики модели",
+    "list_analytic_records": "Получаю записи аналитики",
+    "read_cell": "Читаю ячейку",
+    "read_sheet_data": "Читаю данные листа",
+    "query_data": "Запрашиваю данные",
+    "set_cell": "Записываю значение",
+    "fill_sheet": "Заполняю лист",
+    "create_model": "Создаю модель",
+    "create_sheet": "Создаю лист",
+    "create_analytic": "Создаю аналитику",
+    "create_records": "Создаю записи",
+    "delete_model": "Удаляю модель",
+    "delete_sheet": "Удаляю лист",
+    "delete_analytic": "Удаляю аналитику",
+    "delete_record": "Удаляю запись",
+    "rename_model": "Переименовываю модель",
+    "rename_sheet": "Переименовываю лист",
+    "rename_analytic": "Переименовываю аналитику",
+    "recalc": "Пересчитываю формулы",
+    "build_chart": "Строю график",
+    "build_presentation": "Готовлю презентацию",
+    "import_excel_from_path": "Импортирую Excel",
+    "import_excel_from_browser": "Открываю выбор файла",
+    "add_analytic_to_all_sheets": "Добавляю аналитику на листы",
+    "add_analytic_to_sheet": "Добавляю аналитику на лист",
+    "remove_analytic_from_all_sheets": "Убираю аналитику с листов",
+    "open_sheet": "Открываю лист",
+    "switch_mode": "Переключаю режим",
+    "pin_analytic": "Фиксирую аналитику",
+    "unpin_analytic": "Снимаю фиксацию",
+}
+
+
 # ── Main endpoint ──────────────────────────────────────────────────────────
 
 @router.post("/message")
@@ -1552,7 +1591,7 @@ async def _chat_message_impl(req: ChatRequest):
     base_url = os.environ.get("ANTHROPIC_BASE_URL")
     if base_url:
         kwargs["base_url"] = base_url
-    client = anthropic.Anthropic(**kwargs)
+    client = anthropic.AsyncAnthropic(**kwargs)
 
     # Build context string injected into system prompt
     db = get_db()
@@ -1617,7 +1656,7 @@ async def _chat_message_impl(req: ChatRequest):
 
     # Tool-use loop (cap at 8 iterations to prevent runaway)
     for _ in range(15):
-        resp = client.messages.create(
+        resp = await client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=2000,
             system=system,
@@ -1643,3 +1682,114 @@ async def _chat_message_impl(req: ChatRequest):
         messages.append({"role": "user", "content": tool_results})
 
     return {"message": "(ограничение: слишком много итераций)", "actions": client_actions}
+
+
+@router.post("/message-stream")
+async def chat_message_stream(req: ChatRequest):
+    """Streaming version — sends SSE events for each thinking step."""
+    from starlette.responses import StreamingResponse
+
+    async def generate():
+        try:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                yield f"data: {json.dumps({'type': 'error', 'text': 'ANTHROPIC_API_KEY not set'})}\n\n"
+                return
+
+            import anthropic
+            kwargs = {"api_key": api_key}
+            base_url = os.environ.get("ANTHROPIC_BASE_URL")
+            if base_url:
+                kwargs["base_url"] = base_url
+            client = anthropic.AsyncAnthropic(**kwargs)
+
+            db = get_db()
+            ctx = req.context
+            ctx_lines = []
+            if ctx.current_model_id:
+                model_rows = await db.execute_fetchall(
+                    "SELECT name FROM models WHERE id = ?", (ctx.current_model_id,))
+                mname = model_rows[0]["name"] if model_rows else ctx.current_model_id
+                ctx_lines.append(f"Текущая модель: {mname} (id={ctx.current_model_id})")
+            if ctx.current_sheet_id:
+                sheet_rows = await db.execute_fetchall(
+                    "SELECT name FROM sheets WHERE id = ?", (ctx.current_sheet_id,))
+                sname = sheet_rows[0]["name"] if sheet_rows else ctx.current_sheet_id
+                ctx_lines.append(f"Текущий лист: {sname} (id={ctx.current_sheet_id})")
+                sa_rows = await db.execute_fetchall(
+                    """SELECT a.id, a.name, a.is_periods FROM sheet_analytics sa
+                       JOIN analytics a ON a.id = sa.analytic_id
+                       WHERE sa.sheet_id = ? ORDER BY sa.sort_order""",
+                    (ctx.current_sheet_id,),
+                )
+                if sa_rows:
+                    parts = []
+                    for r in sa_rows:
+                        label = 'периоды' if r['is_periods'] else 'справочник'
+                        part = f"  - {r['name']} (id={r['id']}, {label})"
+                        recs = await db.execute_fetchall(
+                            "SELECT id, data_json FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order LIMIT 30",
+                            (r['id'],),
+                        )
+                        if recs:
+                            rec_items = []
+                            for rec in recs:
+                                try:
+                                    d = json.loads(rec['data_json'] or '{}')
+                                    n = d.get('name', '')
+                                    if n:
+                                        rec_items.append(f"{n} (id={rec['id']})")
+                                except Exception:
+                                    pass
+                            if rec_items:
+                                part += f"\n    Записи: {', '.join(rec_items)}"
+                        parts.append(part)
+                    ctx_lines.append("Аналитики на листе:\n" + "\n".join(parts))
+            if ctx.user_id:
+                ctx_lines.append(f"Пользователь: {ctx.user_id}")
+            system = SYSTEM_PROMPT
+            if ctx_lines:
+                system += "\n\nКонтекст:\n" + "\n".join(ctx_lines)
+
+            messages = [m.model_dump() for m in req.messages]
+            if len(messages) > 20:
+                messages = messages[-20:]
+                while messages and messages[0].get("role") != "user":
+                    messages.pop(0)
+            client_actions: list[dict] = []
+
+            for iteration in range(15):
+                resp = await client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=2000,
+                    system=system,
+                    tools=TOOLS,
+                    messages=messages,
+                )
+                if resp.stop_reason != "tool_use":
+                    text = "".join(b.text for b in resp.content if b.type == "text")
+                    yield f"data: {json.dumps({'type': 'done', 'text': text, 'actions': client_actions}, ensure_ascii=False)}\n\n"
+                    return
+
+                # Execute tool calls and emit thinking events
+                tool_results = []
+                for block in resp.content:
+                    if block.type == "tool_use":
+                        label = TOOL_LABELS.get(block.name, block.name)
+                        yield f"data: {json.dumps({'type': 'thinking', 'text': label + '…'}, ensure_ascii=False)}\n\n"
+                        result = await _exec_tool(block.name, block.input, ctx, client_actions)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        })
+                messages.append({"role": "assistant", "content": [b.model_dump() for b in resp.content]})
+                messages.append({"role": "user", "content": tool_results})
+
+            yield f"data: {json.dumps({'type': 'done', 'text': '(ограничение: слишком много итераций)', 'actions': client_actions}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'text': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")

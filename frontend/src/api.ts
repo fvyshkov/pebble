@@ -265,3 +265,39 @@ export const chatMessage = (
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ messages, context }),
   }).then(r => json<{ message: string; actions: ChatAction[] }>(r))
+
+export const chatMessageStream = async (
+  messages: { role: string; content: any }[],
+  context: { current_model_id?: string | null; current_sheet_id?: string | null; user_id?: string | null },
+  onEvent: (event: { type: string; text: string; actions?: ChatAction[] }) => void,
+) => {
+  const resp = await fetch(`${BASE}/chat/message-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, context }),
+  })
+  if (!resp.ok) {
+    let detail = resp.statusText
+    try { const b = await resp.json(); detail = b.detail || detail } catch { /* */ }
+    throw new Error(`${resp.status}: ${detail}`)
+  }
+  const reader = resp.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try { onEvent(JSON.parse(line.slice(6))) } catch { /* ignore parse errors */ }
+      }
+    }
+  }
+  // Process remaining buffer
+  if (buffer.startsWith('data: ')) {
+    try { onEvent(JSON.parse(buffer.slice(6))) } catch { /* */ }
+  }
+}
