@@ -178,7 +178,7 @@ export default function ChatPanel({
         animFrameRef.current = requestAnimationFrame(tick)
       }
       tick()
-    } catch { /* mic access denied — speech recognition handles this */ }
+    } catch (e) { console.warn('[mic-meter] failed:', e) }
   }, [])
 
   const stopMicMeter = useCallback(() => {
@@ -263,13 +263,23 @@ export default function ChatPanel({
     }
     recognitionRef.current = rec
     setListening(true)
-    try {
-      rec.start()
-      startMicMeter() // only start mic meter after recognition starts
-    } catch (e) {
-      console.error('[voice] start failed:', e)
-      setListening(false)
-    }
+    // Start mic meter FIRST (getUserMedia), then speech recognition.
+    // This ensures AudioContext gets mic access before SpeechRecognition grabs it.
+    startMicMeter().then(() => {
+      try {
+        rec.start()
+      } catch (e) {
+        console.error('[voice] start failed:', e)
+        setListening(false)
+        stopMicMeter()
+      }
+    }).catch(() => {
+      // Mic meter failed — still try speech recognition
+      try { rec.start() } catch (e) {
+        console.error('[voice] start failed:', e)
+        setListening(false)
+      }
+    })
   }, [listening, startMicMeter, stopMicMeter])
 
   // Cleanup on unmount
