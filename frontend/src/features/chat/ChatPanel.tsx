@@ -196,16 +196,29 @@ export default function ChatPanel({
       // follows for >1.2s, commit fires regardless of final/interim state.
       schedulePauseCommit()
     }
-    rec.onerror = () => { /* swallow; user will click again to retry */ }
+    rec.onerror = (ev: any) => {
+      const err = ev?.error || 'unknown'
+      console.warn('[voice] SpeechRecognition error:', err)
+      if (err === 'not-allowed' || err === 'service-not-allowed') {
+        // Microphone permission denied
+        setVoiceUnsupported(true)
+        recognitionRef.current = null
+        setListening(false)
+      }
+      // 'no-speech' and 'aborted' are transient — onend will restart
+    }
     rec.onend = () => {
       // If still listening (user didn't toggle off), restart so it keeps going.
       if (recognitionRef.current === rec) {
-        try { rec.start() } catch { /* already started race */ }
+        try { rec.start() } catch (e) { console.warn('[voice] restart failed:', e) }
       }
     }
     recognitionRef.current = rec
     setListening(true)
-    try { rec.start() } catch { /* ignore */ }
+    try { rec.start() } catch (e) {
+      console.error('[voice] start failed:', e)
+      setListening(false)
+    }
   }, [listening])
 
   // Cleanup on unmount
