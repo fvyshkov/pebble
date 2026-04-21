@@ -1049,12 +1049,29 @@ async def chat_message(req: ChatRequest):
     client = anthropic.Anthropic(**kwargs)
 
     # Build context string injected into system prompt
+    db = get_db()
     ctx = req.context
     ctx_lines = []
     if ctx.current_model_id:
-        ctx_lines.append(f"Текущая модель: {ctx.current_model_id}")
+        model_rows = await db.execute_fetchall(
+            "SELECT name FROM models WHERE id = ?", (ctx.current_model_id,))
+        mname = model_rows[0]["name"] if model_rows else ctx.current_model_id
+        ctx_lines.append(f"Текущая модель: {mname} (id={ctx.current_model_id})")
     if ctx.current_sheet_id:
-        ctx_lines.append(f"Текущий лист: {ctx.current_sheet_id}")
+        sheet_rows = await db.execute_fetchall(
+            "SELECT name FROM sheets WHERE id = ?", (ctx.current_sheet_id,))
+        sname = sheet_rows[0]["name"] if sheet_rows else ctx.current_sheet_id
+        ctx_lines.append(f"Текущий лист: {sname} (id={ctx.current_sheet_id})")
+        # Include analytics bound to this sheet
+        sa_rows = await db.execute_fetchall(
+            """SELECT a.id, a.name, a.is_periods FROM sheet_analytics sa
+               JOIN analytics a ON a.id = sa.analytic_id
+               WHERE sa.sheet_id = ? ORDER BY sa.sort_order""",
+            (ctx.current_sheet_id,),
+        )
+        if sa_rows:
+            parts = [f"  - {r['name']} (id={r['id']}, {'периоды' if r['is_periods'] else 'справочник'})" for r in sa_rows]
+            ctx_lines.append("Аналитики на листе:\n" + "\n".join(parts))
     if ctx.user_id:
         ctx_lines.append(f"Пользователь: {ctx.user_id}")
     system = SYSTEM_PROMPT
