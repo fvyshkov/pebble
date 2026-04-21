@@ -1090,7 +1090,27 @@ async def chat_message(req: ChatRequest):
             (ctx.current_sheet_id,),
         )
         if sa_rows:
-            parts = [f"  - {r['name']} (id={r['id']}, {'периоды' if r['is_periods'] else 'справочник'})" for r in sa_rows]
+            parts = []
+            for r in sa_rows:
+                label = 'периоды' if r['is_periods'] else 'справочник'
+                part = f"  - {r['name']} (id={r['id']}, {label})"
+                # Add record names (up to 30) so agent knows the actual values
+                recs = await db.execute_fetchall(
+                    "SELECT data_json FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order LIMIT 30",
+                    (r['id'],),
+                )
+                if recs:
+                    import json as _json
+                    names = []
+                    for rec in recs:
+                        try:
+                            d = _json.loads(rec['data_json'] or '{}')
+                            names.append(d.get('name', ''))
+                        except Exception:
+                            pass
+                    if names:
+                        part += f"\n    Записи: {', '.join(n for n in names if n)}"
+                parts.append(part)
             ctx_lines.append("Аналитики на листе:\n" + "\n".join(parts))
     if ctx.user_id:
         ctx_lines.append(f"Пользователь: {ctx.user_id}")
