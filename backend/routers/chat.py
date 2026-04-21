@@ -58,6 +58,9 @@ SYSTEM_PROMPT = """Ты помощник в приложении Pebble — фи
 - Надо пересчитать → вызови recalc
 - Надо построить график → вызови build_chart с названиями показателей и группировки (данные бэкенд достанет сам)
 - Надо сделать презентацию / отчёт → вызови build_presentation (бэкенд сам соберёт данные и сгенерирует HTML)
+- Надо импортировать Excel с компьютера пользователя → вызови import_excel_from_browser (откроет файлопикер в браузере)
+- import_excel_from_path и list_excel_in_folder — только если Pebble развёрнут ЛОКАЛЬНО и пользователь указал путь к файлу на сервере.
+  Если пользователь просто хочет импортировать Excel — используй import_excel_from_browser.
 Ты — агент, который ВЫПОЛНЯЕТ действия, а не инструктор, который рассказывает, что делать.
 
 Контекст пользователя передаётся в каждом запросе (текущая модель, текущий лист, id пользователя).
@@ -243,6 +246,19 @@ TOOLS: list[dict] = [
                 "model_name": {"type": "string", "description": "Имя новой модели (по умолчанию — имя файла)"},
             },
             "required": ["file_path"],
+        },
+    },
+    {
+        "name": "import_excel_from_browser",
+        "description": (
+            "Открыть диалог выбора файла в браузере пользователя для импорта "
+            "Excel-файла. Используй этот инструмент, когда пользователь хочет "
+            "импортировать Excel с локального компьютера. После выбора файла "
+            "импорт запустится автоматически."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
         },
     },
     {
@@ -1250,6 +1266,10 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             await db.commit()
             return json.dumps({"ok": True}, ensure_ascii=False)
 
+        if name == "import_excel_from_browser":
+            client_actions.append({"type": "pick_excel_file"})
+            return json.dumps({"ok": True, "message": "Диалог выбора файла открыт в браузере."}, ensure_ascii=False)
+
         if name == "list_excel_in_folder":
             import os as _os
             folder = _os.path.expanduser(inp.get("folder_path", "")).strip()
@@ -1413,7 +1433,14 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
             return json.dumps({"id": sid, "name": sname}, ensure_ascii=False)
 
         if name == "build_presentation":
-            html = await _build_presentation(db, inp["sheet_id"], inp.get("title"), inp.get("focus"))
+            print(f"[PEBBLE] build_presentation called, sheet_id={inp.get('sheet_id')}")
+            try:
+                html = await _build_presentation(db, inp["sheet_id"], inp.get("title"), inp.get("focus"))
+                print(f"[PEBBLE] build_presentation OK, html length={len(html)}")
+            except Exception as pres_err:
+                print(f"[PEBBLE] build_presentation FAILED: {pres_err}")
+                import traceback; traceback.print_exc()
+                return json.dumps({"error": f"Ошибка генерации: {pres_err}"}, ensure_ascii=False)
             client_actions.append({
                 "type": "show_presentation",
                 "html": html,

@@ -74,6 +74,24 @@ export default function ChatPanel({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, loading])
 
+  const triggerFilePicker = useCallback(() => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.xlsx,.xls'
+    input.onchange = () => {
+      const file = input.files?.[0]
+      if (file && onImportExcel) {
+        setMessages(prev => [...prev, {
+          role: 'user',
+          text: `📎 ${file.name} (импорт)`,
+          raw: { role: 'user', content: `Импорт файла ${file.name}` },
+        }])
+        onImportExcel(file)
+      }
+    }
+    input.click()
+  }, [onImportExcel])
+
   const applyActions = useCallback((actions: ChatAction[]) => {
     let needReload = false
     for (const a of actions) {
@@ -81,10 +99,11 @@ export default function ChatPanel({
       else if (a.type === 'switch_mode' && onSwitchMode) onSwitchMode(a.mode)
       else if (a.type === 'show_chart' && onShowChart) onShowChart(a)
       else if (a.type === 'show_presentation' && onShowPresentation) onShowPresentation(a)
+      else if (a.type === 'pick_excel_file') triggerFilePicker()
       else if (a.type === 'reload_sheet' || a.type === 'reload_model') needReload = true
     }
     if (needReload && onRefreshData) onRefreshData()
-  }, [onOpenSheet, onSwitchMode, onRefreshData, onShowChart, onShowPresentation])
+  }, [onOpenSheet, onSwitchMode, onRefreshData, onShowChart, onShowPresentation, triggerFilePicker])
 
   const send = useCallback(async (text: string) => {
     // Local commands — no need to hit the server
@@ -109,6 +128,7 @@ export default function ChatPanel({
         raw: { role: 'assistant', content: resp.message || '' },
       }
       setMessages(prev => [...prev, assistantMsg])
+      console.log('[PEBBLE] resp.actions:', JSON.stringify(resp.actions?.map((a: any) => ({ type: a.type, htmlLen: a.html?.length }))))
       if (resp.actions?.length) applyActions(resp.actions)
     } catch (e: any) {
       setMessages(prev => [...prev, {
