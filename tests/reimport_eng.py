@@ -10,7 +10,7 @@ import openpyxl
 API = os.environ.get("PEBBLE_API", "http://localhost:8000/api")
 EXCEL_PATH = Path("/Users/mac/pebble/XLS-MODELS/ANNEX 1 Simply Ecosystem FinModel 2025-2029_ENG Final.xlsx")
 DB_PATH = Path("/Users/mac/pebble/pebble.db")
-OLD_MODEL_ID = "0cd32c02-9df6-4d15-aefe-1ef9049fd1c2"
+OLD_MODEL_ID = "63574f1d-379a-4c43-9a7b-31d33f23f19b"  # auto-updated on reimport
 
 # ── Step 1: Delete old model via API ──
 def delete_old():
@@ -61,7 +61,7 @@ def recalc(model_id):
                 print(f"  Recalc error sheet {sid}: {resp.status_code}")
         print(f"Recalc round {round_n} done")
 
-# ── Step 4: Compare with Excel using positional matching ──
+# ── Step 4: Compare with Excel — BIDIRECTIONAL ──
 def compare(model_id):
     from backend.routers.import_excel import _detect_periods_from_headers
 
@@ -93,6 +93,10 @@ def compare(model_id):
     total_match = total_cells = 0
     mismatch_categories = defaultdict(int)
     mismatch_details = defaultdict(list)
+    # Reverse check: Pebble cells not in Excel
+    total_extra_pebble = 0
+    extra_nonzero = 0
+    extra_details = defaultdict(list)
 
     for sid, sname, excel_code in sheets:
         # Match by excel_code (original Excel sheet name)
@@ -144,17 +148,20 @@ def compare(model_id):
 
         # Indicator records: with excel_row
         indicators = []
+        ind_rid_to_name = {}
         for ind_aid in ind_aids:
             recs = db.execute("""
                 SELECT id, data_json, excel_row, sort_order
                 FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order
             """, (ind_aid,)).fetchall()
             for r in recs:
+                data = json.loads(r[1])
+                name = data.get("name", "")
+                ind_rid_to_name[r[0]] = name
                 if r[2] is not None:  # has excel_row
-                    data = json.loads(r[1])
                     indicators.append({
                         "rid": r[0],
-                        "name": data.get("name", ""),
+                        "name": name,
                         "excel_row": r[2],
                     })
 
@@ -164,6 +171,7 @@ def compare(model_id):
             (sid,),
         ).fetchall()
         cell_map = {}  # (indicator_rid, period_rid) -> float
+        cell_rule_map = {}  # (indicator_rid, period_rid) -> rule
         for ck, val, rule in cells:
             parts = ck.split("|")
             if len(parts) != len(ordered_aids):
@@ -177,13 +185,12 @@ def compare(model_id):
             if period_rid and ind_rid and val is not None:
                 try:
                     cell_map[(ind_rid, period_rid)] = float(val)
+                    cell_rule_map[(ind_rid, period_rid)] = rule
                 except (ValueError, TypeError):
                     pass
 
         # Detect Excel periods — use global Y0 detection for consistent base_year
         max_col = min(ws.max_column or 1, 200)
-        # Import uses: start_year from period_config + 1 if global _has_y0
-        # For ENG model with Y0=2024: _nmes_base_year = 2024 + 1 = 2025
         base_year = 2025 if _global_has_y0 else 2024
         detected = _detect_periods_from_headers(ws, max_col, base_year=base_year)
         col_to_pk = {sp["col"]: sp["period_key"] for sp in detected}
@@ -193,7 +200,12 @@ def compare(model_id):
         for prid, pk in period_key_map.items():
             pk_to_rid[pk] = prid
 
+        # Set of Excel period_keys for this sheet
+        excel_period_keys = set(col_to_pk.values())
+
+        # Forward check: Excel → Pebble
         sheet_match = sheet_total = 0
+        excel_cells = set()  # (ind_rid, period_rid) cells checked from Excel
         for ind in indicators:
             row = ind["excel_row"]
             ind_rid = ind["rid"]
@@ -210,6 +222,7 @@ def compare(model_id):
                 if not p_rid:
                     continue
 
+                excel_cells.add((ind_rid, p_rid))
                 peb_num = cell_map.get((ind_rid, p_rid), 0.0)
 
                 total_cells += 1
@@ -233,18 +246,49 @@ def compare(model_id):
                         mismatch_details[sname].append(
                             (row, col, xl_num, peb_num, cat, ind["name"], pk))
 
+        # Reverse check: Pebble cells NOT in Excel (extra/phantom cells)
+        sheet_extra = 0
+        sheet_extra_nonzero = 0
+        for (ind_rid, period_rid), peb_val in cell_map.items():
+            if (ind_rid, period_rid) in excel_cells:
+                continue
+            pk = period_key_map.get(period_rid, "?")
+            # Skip cells whose period_key IS in Excel but indicator wasn't matched
+            # (those are legitimate cells for indicators without excel_row)
+            # Only flag cells at period_keys that DON'T exist in Excel at all
+            if pk not in excel_period_keys:
+                sheet_extra += 1
+                total_extra_pebble += 1
+                if abs(peb_val) > 1e-9:
+                    sheet_extra_nonzero += 1
+                    extra_nonzero += 1
+                    ind_name = ind_rid_to_name.get(ind_rid, "?")
+                    if len(extra_details[sname]) < 3:
+                        extra_details[sname].append((pk, peb_val, ind_name))
+
         pct = (sheet_match / sheet_total * 100) if sheet_total > 0 else 100
         status = "OK" if pct > 99.9 else "  "
-        print(f"  {status} {sname}: {sheet_match}/{sheet_total} ({pct:.1f}%)")
+        extra_info = f" +{sheet_extra}extra({sheet_extra_nonzero}≠0)" if sheet_extra > 0 else ""
+        print(f"  {status} {sname}: {sheet_match}/{sheet_total} ({pct:.1f}%){extra_info}")
 
     db.close()
 
     pct = (total_match / total_cells * 100) if total_cells > 0 else 0
-    print(f"\nTOTAL: {total_match}/{total_cells} ({pct:.1f}%)")
+    print(f"\nFORWARD (Excel→Pebble): {total_match}/{total_cells} ({pct:.1f}%)")
     print(f"Mismatches: {dict(mismatch_categories)}")
 
+    if total_extra_pebble > 0:
+        print(f"\nREVERSE: {total_extra_pebble} extra Pebble cells at non-Excel periods, {extra_nonzero} with nonzero values")
+        if extra_details:
+            print("Sample extra nonzero cells:")
+            for sn, details in sorted(extra_details.items()):
+                if details:
+                    print(f"  {sn}:")
+                    for pk, val, name in details:
+                        print(f"    pk={pk} [{name}] peb={val:.6f}")
+
     if mismatch_details:
-        print("\nSample mismatches:")
+        print("\nSample forward mismatches:")
         for sn, details in sorted(mismatch_details.items()):
             if details:
                 print(f"  {sn}:")
