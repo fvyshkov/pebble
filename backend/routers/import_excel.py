@@ -13,6 +13,7 @@ import uuid
 import json
 import io
 import os
+import re
 import logging
 from datetime import datetime, date
 from calendar import monthrange
@@ -422,39 +423,47 @@ async def _analyze_workbook_with_claude(sheet_texts: dict[str, str], period_date
 # ── Detect periods from date headers (fallback) ───────────────────────────
 
 def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> list[dict]:
-    """Detect period columns from date headers in the first 6 rows.
+    """Detect period columns from date headers.
 
-    Normalizes all dates to the 1st of the month — Excel formulas like
-    =C4+31 accumulate drift (e.g. March 4 instead of March 1), but the
-    intent is always month-start boundaries.
+    Scans rows 1-20, skipping empty rows. Supports:
+    - datetime objects → monthly periods
+    - "Январь 2026" text → monthly
+    - "N мес" / "N год" → monthly / yearly
+    - Q1/Q2/Q3/Q4 → quarterly (with year from adjacent row)
+    - H1/H2 → half-yearly (with year from adjacent row)
+    - Y0/Y1/... → yearly
 
-    Supports formats:
-    - datetime objects (standard)
-    - "Январь 2026" text (Russian month + year)
-    - "N мес" / "N год" (numbered months/years, base_year used for offset)
+    Returns list of dicts, each with:
+      col: column number
+      name: display name
+      period_key: unique key like "2026-01", "2025-Q1", "2026-H1", "2024-Y"
+      date: datetime (for monthly) or None
     """
     import re as _re_period
 
-    # Build lowercase month-name → month-number lookup for text-based headers
     _MONTH_LOWER = {name.lower(): i + 1 for i, name in enumerate(MONTH_NAMES_RU)}
-    # "N мес" pattern: "1 мес", "12 мес", etc.
     _NMES_RE = _re_period.compile(r'^(\d{1,2})\s*мес$', _re_period.IGNORECASE)
     _NGOD_RE = _re_period.compile(r'^(\d{1,2})\s*год$', _re_period.IGNORECASE)
+    _QHY_RE = _re_period.compile(r'^([QHY])(\d+)$', _re_period.IGNORECASE)
 
-    periods = []
+    # ── Phase 1: Find all candidate header rows ──
+    # Scan rows 1-20 for period identifiers (don't stop early — Q/H/Y may be below dates)
     date_row = None
-    text_date_row = None  # fallback: row with text like "январь 2026"
-    nmes_row = None       # fallback: row with "N мес" format
+    text_date_row = None
+    nmes_row = None
+    qhy_row = None  # row with Q1/H1/Y0 etc
 
-    for r in range(1, 7):
+    for r in range(1, 21):
         for c in range(1, min(max_col + 1, 50)):
             v = ws.cell(r, c).value
-            if isinstance(v, datetime):
+            if v is None:
+                continue
+
+            if isinstance(v, datetime) and not date_row:
                 date_row = r
-                break
+
             if isinstance(v, str):
                 stripped = v.strip()
-                # Check "январь 2026"
                 if not text_date_row:
                     parts = stripped.split()
                     if len(parts) == 2 and parts[0].lower() in _MONTH_LOWER:
@@ -463,64 +472,171 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
                             text_date_row = r
                         except ValueError:
                             pass
-                # Check "N мес"
                 if not nmes_row and _NMES_RE.match(stripped):
                     nmes_row = r
-        if date_row:
-            break
+                if not qhy_row and _QHY_RE.match(stripped):
+                    qhy_row = r
 
-    if date_row is None and text_date_row is None and nmes_row is None:
+    # ── Phase 2: For Q/H/Y, find the year row ──
+    year_row = None
+    year_row_values = {}  # {col: year_int}
+    if qhy_row:
+        # Look for a row with year numbers (2024, 2025, ...) near the qhy_row
+        for r in range(max(1, qhy_row - 3), min(qhy_row + 3, 21)):
+            if r == qhy_row:
+                continue
+            year_count = 0
+            for c in range(1, min(max_col + 1, 50)):
+                v = ws.cell(r, c).value
+                if isinstance(v, (int, float)) and 2020 <= v <= 2040:
+                    year_count += 1
+            if year_count >= 3:
+                year_row = r
+                for c in range(1, max_col + 1):
+                    v = ws.cell(r, c).value
+                    if isinstance(v, (int, float)) and 2020 <= v <= 2040:
+                        year_row_values[c] = int(v)
+                break
+
+    # ── Phase 3: No header found at all → return empty ──
+    if date_row is None and text_date_row is None and nmes_row is None and qhy_row is None:
         return []
 
-    seen_months = set()
-    scan_row = date_row or text_date_row or nmes_row
-
-    # For "N мес" format, we need to track cumulative month count
-    month_counter = 0
+    # ── Phase 4: Build period list ──
+    # Prefer Q/H/Y over dates (more specific period structure)
+    periods = []
+    seen_keys = set()
+    scan_row = qhy_row or date_row or text_date_row or nmes_row
+    month_counter = 0  # for "N мес" format
 
     for c in range(1, max_col + 1):
         v = ws.cell(scan_row, c).value
-        year, month = None, None
+        period_key = None
+        name = None
+        dt = None
 
         if isinstance(v, datetime):
             year, month = v.year, v.month
+            period_key = f"{year}-{month:02d}"
+            name = f"{MONTH_NAMES_RU[month - 1]} {year}"
+            dt = datetime(year, month, 1)
+
         elif isinstance(v, str):
             stripped = v.strip()
             parts = stripped.split()
+
+            # "Январь 2026"
             if len(parts) == 2 and parts[0].lower() in _MONTH_LOWER:
                 try:
                     year = int(parts[1])
                     month = _MONTH_LOWER[parts[0].lower()]
+                    period_key = f"{year}-{month:02d}"
+                    name = f"{MONTH_NAMES_RU[month - 1]} {year}"
+                    dt = datetime(year, month, 1)
                 except ValueError:
                     pass
-            elif nmes_row:
-                m_nmes = _NMES_RE.match(stripped)
-                if m_nmes:
-                    n = int(m_nmes.group(1))
-                    # "N мес" where N is 1-12 within a year block
-                    # month_counter tracks position across year blocks
-                    month_counter += 1
-                    year = base_year + (month_counter - 1) // 12
-                    month = ((month_counter - 1) % 12) + 1
-                else:
-                    m_god = _NGOD_RE.match(stripped)
-                    if m_god:
-                        # Year total — skip for monthly import
-                        continue
 
-        if year and month:
-            normalized = datetime(year, month, 1)
-            month_key = f"{year}-{month:02d}"
-            if month_key in seen_months:
-                continue
-            seen_months.add(month_key)
+            # "N мес"
+            elif _NMES_RE.match(stripped):
+                month_counter += 1
+                year = base_year + (month_counter - 1) // 12
+                month = ((month_counter - 1) % 12) + 1
+                period_key = f"{year}-{month:02d}"
+                name = f"{MONTH_NAMES_RU[month - 1]} {year}"
+                dt = datetime(year, month, 1)
+
+            # "N год" — yearly total
+            elif _NGOD_RE.match(stripped):
+                m_god = _NGOD_RE.match(stripped)
+                n = int(m_god.group(1))
+                year = base_year + n - 1
+                period_key = f"{year}-Y"
+                name = str(year)
+
+            # Q1/Q2/Q3/Q4, H1/H2, Y0/Y1/...
+            elif _QHY_RE.match(stripped):
+                m = _QHY_RE.match(stripped)
+                letter = m.group(1).upper()
+                num = int(m.group(2))
+                # Determine year from year_row
+                col_year = year_row_values.get(c)
+                if col_year is None and year_row_values:
+                    # Inherit from nearest column to the left that has a year
+                    for cc in range(c - 1, 0, -1):
+                        if cc in year_row_values:
+                            col_year = year_row_values[cc]
+                            break
+                if col_year is None:
+                    col_year = base_year + num  # fallback
+
+                if letter == 'Q':
+                    period_key = f"{col_year}-Q{num}"
+                    quarter_names = ["1-й квартал", "2-й квартал", "3-й квартал", "4-й квартал"]
+                    name = f"{quarter_names[num - 1]} {col_year}" if 1 <= num <= 4 else f"Q{num} {col_year}"
+                elif letter == 'H':
+                    period_key = f"{col_year}-H{num}"
+                    name = f"{'1-е' if num == 1 else '2-е'} полугодие {col_year}"
+                elif letter == 'Y':
+                    # Y0=base_year-1, Y1=base_year, Y2=base_year+1...
+                    period_key = f"{col_year}-Y"
+                    name = str(col_year)
+
+        if period_key and period_key not in seen_keys:
+            seen_keys.add(period_key)
             periods.append({
                 "col": c,
-                "name": f"{MONTH_NAMES_RU[month - 1]} {year}",
-                "date": normalized,
+                "name": name,
+                "period_key": period_key,
+                "date": dt,  # None for non-monthly
             })
 
     return periods
+
+
+# ── Pre-substitute total-column references with values ───────────────────
+
+_CELL_REF_SIMPLE = re.compile(r"(?<!')\b(\$?[A-Z]{1,3})(\$?\d+)\b")
+
+def _substitute_total_col_refs(
+    formula: str, ws_data, current_row: int, total_cols: set[int],
+    data_start_col: int,
+) -> str:
+    """Replace same-sheet cell refs pointing to total columns with their Excel values.
+
+    E.g. =P8 where col P (16) is a year-total → substituted with the actual value.
+    Only substitutes SAME-SHEET bare refs (not 'Sheet'!XX cross-sheet refs).
+    """
+    from openpyxl.utils import column_index_from_string
+
+    def replace_match(m):
+        col_str = m.group(1).replace("$", "")
+        row_str = m.group(2).replace("$", "")
+        try:
+            col_num = column_index_from_string(col_str)
+        except (ValueError, KeyError):
+            return m.group(0)
+        if col_num not in total_cols:
+            return m.group(0)
+        row_num = int(row_str)
+        v = ws_data.cell(row_num, col_num).value
+        if v is None:
+            return "0"
+        try:
+            fv = float(v)
+            return f"{fv:.10f}".rstrip("0").rstrip(".")
+        except (ValueError, TypeError):
+            return m.group(0)
+
+    # Only substitute bare refs (no sheet prefix)
+    # Split on quoted sheet refs to avoid touching cross-sheet references
+    parts = re.split(r"('[^']*'![A-Z]+\d+)", formula)
+    result_parts = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            result_parts.append(part)  # cross-sheet ref, keep as-is
+        else:
+            result_parts.append(_CELL_REF_SIMPLE.sub(replace_match, part))
+    return "".join(result_parts)
 
 
 # ── Total column detection (year / quarter totals) ────────────────────────
@@ -745,13 +861,17 @@ async def _extract_and_store_consolidation_rules(
 
 async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str],
                                    start_date: date, end_date: date) -> dict:
-    """Create year > quarter > month hierarchy. Returns {col_month_key: record_id} mapping."""
+    """Create year > quarter > month hierarchy. Returns {period_key: record_id} mapping.
+
+    period_key formats: "2026-01" (month), "2026-Q1" (quarter), "2026-H1" (half),
+                        "2026-Y" (year)
+    """
     has_year = "year" in period_types
     has_quarter = "quarter" in period_types
+    has_half = "half" in period_types
     has_month = "month" in period_types
 
-    # Map: "YYYY-MM" -> record_id (for matching to Excel columns later)
-    month_record_ids = {}
+    period_record_ids = {}
     sort = 0
     year = start_date.year
 
@@ -768,7 +888,32 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
                     {"name": str(year), "start": str(year_start), "end": str(year_end)},
                     ensure_ascii=False)),
             )
+            period_record_ids[f"{year}-Y"] = year_id
             sort += 1
+
+        # Half-year records
+        half_ids = {}
+        if has_half:
+            for h in range(1, 3):
+                h_start_month = (h - 1) * 6 + 1
+                h_end_month = h * 6
+                h_start = date(year, h_start_month, 1)
+                h_end = date(year, h_end_month, monthrange(year, h_end_month)[1])
+                if h_start > end_date or h_end < start_date:
+                    continue
+                h_start = max(h_start, start_date)
+                h_end = min(h_end, end_date)
+                hid = str(uuid.uuid4())
+                await db.execute(
+                    "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
+                    (hid, analytic_id, year_id, sort, json.dumps(
+                        {"name": f"{'1-е' if h == 1 else '2-е'} полугодие {year}",
+                         "start": str(h_start), "end": str(h_end)},
+                        ensure_ascii=False)),
+                )
+                period_record_ids[f"{year}-H{h}"] = hid
+                half_ids[h] = hid
+                sort += 1
 
         for q in range(4):
             q_start_month = q * 3 + 1
@@ -780,15 +925,20 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
             q_start = max(q_start, start_date)
             q_end = min(q_end, end_date)
 
+            # Quarter parent: half > year > None
+            half_num = 1 if q < 2 else 2
+            quarter_parent = half_ids.get(half_num) or year_id
+
             quarter_id = None
             if has_quarter:
                 quarter_id = str(uuid.uuid4())
                 await db.execute(
                     "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
-                    (quarter_id, analytic_id, year_id, sort, json.dumps(
+                    (quarter_id, analytic_id, quarter_parent, sort, json.dumps(
                         {"name": f"{QUARTER_NAMES_RU[q]} {year}", "start": str(q_start), "end": str(q_end)},
                         ensure_ascii=False)),
                 )
+                period_record_ids[f"{year}-Q{q + 1}"] = quarter_id
                 sort += 1
 
             if has_month:
@@ -800,19 +950,19 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
                     m_start = max(m_start, start_date)
                     m_end = min(m_end, end_date)
                     mid = str(uuid.uuid4())
-                    parent = quarter_id if quarter_id else year_id
+                    parent = quarter_id if quarter_id else (half_ids.get(half_num) or year_id)
                     await db.execute(
                         "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
                         (mid, analytic_id, parent, sort, json.dumps(
                             {"name": f"{MONTH_NAMES_RU[m - 1]} {year}", "start": str(m_start), "end": str(m_end)},
                             ensure_ascii=False)),
                     )
-                    month_record_ids[f"{year}-{m:02d}"] = mid
+                    period_record_ids[f"{year}-{m:02d}"] = mid
                     sort += 1
 
         year += 1
 
-    return month_record_ids
+    return period_record_ids
 
 
 # ── Post-process: fix missing parent-child grouping ─────────────────────────
@@ -1156,22 +1306,41 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     wb_formulas = load_workbook(io.BytesIO(content))
     wb_data = load_workbook(io.BytesIO(content), data_only=True)
 
-    # ── Step 1: Extract text and detect dates ──
+    # ── Step 1: Extract text, detect dates and period types ──
     sheet_texts = {}
     all_dates = []
+    detected_period_types = set()  # "month", "quarter", "half", "year"
+    _qhy_re_scan = re.compile(r'^([QHY])(\d+)$', re.IGNORECASE)
+    _nmes_re_scan = re.compile(r'^\d{1,2}\s*мес$', re.IGNORECASE)
     for sn in wb_formulas.sheetnames:
         ws = wb_formulas[sn]
         sheet_texts[sn] = _extract_sheet_text(ws, sn)
-        # Collect dates for period detection (normalize to 1st of month)
-        # Scan BOTH formulas and data_only workbooks (formula-derived dates like =B1+31
-        # only resolve in data_only mode)
+        # Scan rows 1-20 for dates AND period type identifiers
         ws_d_scan = wb_data[sn] if sn in wb_data.sheetnames else None
         for scan_ws in ([ws, ws_d_scan] if ws_d_scan else [ws]):
-            for r in range(1, 7):
+            for r in range(1, 21):
                 for c in range(1, min((scan_ws.max_column or 1) + 1, 200)):
                     v = scan_ws.cell(r, c).value
                     if isinstance(v, datetime):
                         all_dates.append(datetime(v.year, v.month, 1))
+                        detected_period_types.add("month")
+                    elif isinstance(v, str):
+                        stripped = v.strip()
+                        m = _qhy_re_scan.match(stripped)
+                        if m:
+                            letter = m.group(1).upper()
+                            if letter == 'Q':
+                                detected_period_types.add("quarter")
+                            elif letter == 'H':
+                                detected_period_types.add("half")
+                            elif letter == 'Y':
+                                detected_period_types.add("year")
+                        elif _nmes_re_scan.match(stripped):
+                            detected_period_types.add("month")
+                    # Detect year numbers in header rows (2024, 2025, etc.)
+                    if isinstance(v, (int, float)) and 2020 <= v <= 2040 and r <= 10:
+                        all_dates.append(datetime(int(v), 1, 1))
+                        all_dates.append(datetime(int(v), 12, 1))
 
     # ── Step 2: Analyze with Claude API (per sheet) ──
     try:
@@ -1182,6 +1351,14 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
 
     period_config = analysis["period_config"]
     sheets_config = analysis["sheets"]
+
+    # Merge detected period types with Claude's analysis
+    if detected_period_types:
+        pt = set(period_config.get("period_types", []))
+        pt.update(detected_period_types)
+        if any(x in pt for x in ("quarter", "half", "month")):
+            pt.add("year")
+        period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
 
     # ── Step 3: Create model ──
     model_id = str(uuid.uuid4())
@@ -1219,7 +1396,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     # Create period records with year > quarter > month hierarchy
     start_d = date.fromisoformat(period_start)
     end_d = date.fromisoformat(period_end)
-    month_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
+    period_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
 
     # ── Step 5: Process each sheet (two passes: 1. create structure, 2. import cells) ──
     from backend.excel_formula_translator import translate_excel_formula
@@ -1350,20 +1527,35 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     pass
 
         # ── Import cell data ──
-        # Build col -> month_record_id mapping from date headers
+        # Build col -> period_record_id mapping from headers
         _base_year = date.fromisoformat(period_config.get("start", "2026-01-01")).year
         sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_base_year)
         col_to_period_rid = {}
         for sp in sheet_periods:
-            d = sp["date"]
-            if isinstance(d, datetime):
+            pkey = sp.get("period_key")
+            if pkey and pkey in period_record_ids:
+                col_to_period_rid[sp["col"]] = period_record_ids[pkey]
+            elif sp.get("date"):
+                # Backward compat: try year-month key from date
+                d = sp["date"]
                 key = f"{d.year}-{d.month:02d}"
-                if key in month_record_ids:
-                    col_to_period_rid[sp["col"]] = month_record_ids[key]
+                if key in period_record_ids:
+                    col_to_period_rid[sp["col"]] = period_record_ids[key]
 
         # Determine which period is "first" (for formula_first)
         sorted_period_cols = sorted(col_to_period_rid.keys())
         first_period_rid = col_to_period_rid[sorted_period_cols[0]] if sorted_period_cols else None
+
+        # Identify "total" columns (year/quarter/half) vs "leaf" columns (month)
+        # When a leaf cell formula references a total column, substitute with value
+        total_cols = set()
+        leaf_cols = set()
+        for sp in sheet_periods:
+            pk = sp.get("period_key", "")
+            if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                total_cols.add(sp["col"])
+            else:
+                leaf_cols.add(sp["col"])
 
         cell_count = 0
         for row_num, indicator_rid in row_to_rid.items():
@@ -1412,6 +1604,10 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     if isinstance(excel_formula, str) and excel_formula.startswith("="):
                         rule = "formula"
                         try:
+                            # Pre-substitute: replace same-sheet refs to total columns with Excel values
+                            if total_cols and col_num not in total_cols:
+                                excel_formula = _substitute_total_col_refs(
+                                    excel_formula, ws_d, row_num, total_cols, data_start_col)
                             # Build parent name maps: use __self__ for current sheet
                             parent_maps = dict(all_row_to_parent_names)
                             parent_maps["__self__"] = row_to_parent_name
@@ -1485,7 +1681,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         "model_name": model_name,
         "sheets": len(created_sheets),
         "sheet_list": created_sheets,
-        "periods": len(month_record_ids),
+        "periods": len(period_record_ids),
         "period_hierarchy": period_types,
     }
 
@@ -1526,21 +1722,39 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
         yield event(f"Найдено {len(sheet_names)} листов: {', '.join(sheet_names)}")
 
-        # Extract text and dates
+        # Extract text, dates and period types
         sheet_texts = {}
         all_dates = []
+        detected_period_types = set()
+        _qhy_re_scan2 = re.compile(r'^([QHY])(\d+)$', re.IGNORECASE)
+        _nmes_re_scan2 = re.compile(r'^\d{1,2}\s*мес$', re.IGNORECASE)
         for sn in sheet_names:
             ws = wb_formulas[sn]
             sheet_texts[sn] = _extract_sheet_text(ws, sn)
-            # Scan BOTH formulas and data_only workbooks for dates
-            # (formula-derived dates like =B1+31 only resolve in data_only)
             ws_d_scan = wb_data[sn] if sn in wb_data.sheetnames else None
             for scan_ws in ([ws, ws_d_scan] if ws_d_scan else [ws]):
-                for r in range(1, 7):
+                for r in range(1, 21):
                     for c in range(1, min((scan_ws.max_column or 1) + 1, 200)):
                         v = scan_ws.cell(r, c).value
                         if isinstance(v, datetime):
                             all_dates.append(datetime(v.year, v.month, 1))
+                            detected_period_types.add("month")
+                        elif isinstance(v, str):
+                            stripped = v.strip()
+                            m = _qhy_re_scan2.match(stripped)
+                            if m:
+                                letter = m.group(1).upper()
+                                if letter == 'Q':
+                                    detected_period_types.add("quarter")
+                                elif letter == 'H':
+                                    detected_period_types.add("half")
+                                elif letter == 'Y':
+                                    detected_period_types.add("year")
+                            elif _nmes_re_scan2.match(stripped):
+                                detected_period_types.add("month")
+                        if isinstance(v, (int, float)) and 2020 <= v <= 2040 and r <= 10:
+                            all_dates.append(datetime(int(v), 1, 1))
+                            all_dates.append(datetime(int(v), 12, 1))
 
         yield event("Анализ структуры с помощью Claude AI...")
 
@@ -1559,6 +1773,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 p_start, p_end = "2026-01-01", "2028-12-31"
 
             period_config = {"period_types": ["year", "quarter", "month"], "start": p_start, "end": p_end}
+            # Merge detected period types with defaults
+            if detected_period_types:
+                pt = set(period_config["period_types"])
+                pt.update(detected_period_types)
+                if any(x in pt for x in ("quarter", "half", "month")):
+                    pt.add("year")
+                period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
             sheets_config = []
 
             # Launch ALL sheets in parallel for speed
@@ -1604,6 +1825,14 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         period_config = analysis["period_config"]
         sheets_config = analysis["sheets"]
 
+        # Ensure detected period types are always included (fallback may have overridden)
+        if detected_period_types:
+            pt = set(period_config.get("period_types", []))
+            pt.update(detected_period_types)
+            if any(x in pt for x in ("quarter", "half", "month")):
+                pt.add("year")
+            period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
+
         # Create model
         model_id = str(uuid.uuid4())
         await db.execute(
@@ -1637,8 +1866,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
         start_d = date.fromisoformat(period_start)
         end_d = date.fromisoformat(period_end)
-        month_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
-        yield event(f"Создана иерархия периодов: {period_start} — {period_end} ({len(month_record_ids)} месяцев)")
+        period_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
+        yield event(f"Создана иерархия периодов: {period_start} — {period_end} ({len(period_record_ids)} периодов)")
 
         # Count total indicators across all sheets for progress
         def _count_indicators(items):
@@ -1775,14 +2004,24 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_base_year2)
             col_to_period_rid = {}
             for sp in sheet_periods:
-                d = sp["date"]
-                if isinstance(d, datetime):
+                pkey = sp.get("period_key")
+                if pkey and pkey in period_record_ids:
+                    col_to_period_rid[sp["col"]] = period_record_ids[pkey]
+                elif sp.get("date"):
+                    d = sp["date"]
                     key = f"{d.year}-{d.month:02d}"
-                    if key in month_record_ids:
-                        col_to_period_rid[sp["col"]] = month_record_ids[key]
+                    if key in period_record_ids:
+                        col_to_period_rid[sp["col"]] = period_record_ids[key]
 
             sorted_period_cols = sorted(col_to_period_rid.keys())
             first_period_rid = col_to_period_rid[sorted_period_cols[0]] if sorted_period_cols else None
+
+            # Identify total vs leaf columns for value substitution
+            total_cols2 = set()
+            for sp in sheet_periods:
+                pk = sp.get("period_key", "")
+                if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                    total_cols2.add(sp["col"])
 
             cell_count = 0
             for row_num, indicator_rid in row_to_rid.items():
@@ -1819,6 +2058,10 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         if isinstance(excel_formula, str) and excel_formula.startswith("="):
                             rule = "formula"
                             try:
+                                # Pre-substitute total-column refs with values
+                                if total_cols2 and col_num not in total_cols2:
+                                    excel_formula = _substitute_total_col_refs(
+                                        excel_formula, ws_d, row_num, total_cols2, data_start_col)
                                 parent_maps = dict(all_row_to_parent_names)
                                 parent_maps["__self__"] = row_to_parent_name
                                 formula_text = translate_excel_formula(
