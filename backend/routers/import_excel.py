@@ -690,8 +690,9 @@ def _substitute_non_indicator_refs(
         except (ValueError, TypeError):
             return m.group(0)
 
-    # Split on quoted sheet refs to avoid touching cross-sheet references
-    parts = re.split(r"('[^']*'![A-Z]+\d+)", formula)
+    # Split on cross-sheet references (both quoted and unquoted) to avoid
+    # touching them — they belong to other sheets, not the current one.
+    parts = re.split(r"('[^']*'!\$?[A-Z]+\$?\d+|(?<!['\w])[A-Za-z\w.+\-]+!\$?[A-Z]+\$?\d+)", formula)
     result_parts = []
     for i, part in enumerate(parts):
         if i % 2 == 1:
@@ -732,8 +733,8 @@ def _substitute_total_col_refs(
             return m.group(0)
 
     # Only substitute bare refs (no sheet prefix)
-    # Split on quoted sheet refs to avoid touching cross-sheet references
-    parts = re.split(r"('[^']*'![A-Z]+\d+)", formula)
+    # Split on cross-sheet refs (quoted and unquoted) to avoid touching them
+    parts = re.split(r"('[^']*'!\$?[A-Z]+\$?\d+|(?<!['\w])[A-Za-z\w.+\-]+!\$?[A-Z]+\$?\d+)", formula)
     result_parts = []
     for i, part in enumerate(parts):
         if i % 2 == 1:
@@ -1907,14 +1908,8 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                         except Exception:
                             # Fallback to Claude's formula if translator fails
                             formula_text = (formula_info or {}).get("formula", excel_formula)
-                    elif formula_info:
-                        # No Excel formula but Claude detected one (rare edge case)
-                        rule = "formula"
-                        if is_first and formula_info.get("formula_first"):
-                            formula_text = formula_info["formula_first"]
-                        else:
-                            formula_text = formula_info.get("formula", "")
                     else:
+                        # Excel cell has no formula (constant) — import as manual.
                         rule = "manual"
                         formula_text = ""
 
@@ -2438,13 +2433,10 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                 pass  # rule/formula_text already set
                             except Exception:
                                 formula_text = (formula_info or {}).get("formula", excel_formula)
-                        elif formula_info:
-                            rule = "formula"
-                            if is_first and formula_info.get("formula_first"):
-                                formula_text = formula_info["formula_first"]
-                            else:
-                                formula_text = formula_info.get("formula", "")
                         else:
+                            # Excel cell has no formula (constant) — import as manual.
+                            # Claude's formula_info is NOT used here because the Excel
+                            # value is authoritative for non-formula cells.
                             rule = "manual"
                             formula_text = ""
                     # Post-translation: if formula has unparseable `:` range, fall back to manual

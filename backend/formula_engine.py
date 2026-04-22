@@ -25,6 +25,7 @@ import math
 import itertools
 from typing import Any
 
+
 # ── Tokenizer ──────────────────────────────────────────────────────────────
 
 TOKEN_RE = re.compile(r"""
@@ -121,7 +122,11 @@ def tokenize(formula: str) -> list:
 # ── Evaluator ──────────────────────────────────────────────────────────────
 
 def evaluate(formula: str, get_ref_value) -> float:
-    """Evaluate formula. get_ref_value(token_str) -> float."""
+    """Evaluate formula. get_ref_value(token_str) -> float | None.
+
+    get_ref_value may return None to signal "cell does not exist".
+    AVERAGE skips None args (like Excel). All other ops treat None as 0.
+    """
     if not formula or not formula.strip():
         return 0.0
     try:
@@ -143,6 +148,10 @@ def evaluate(formula: str, get_ref_value) -> float:
         if t and t[0] == "OP" and t[1] == op: advance(); return True
         return False
 
+    def _n(v):
+        """Coerce None (missing cell) to 0.0 for arithmetic."""
+        return 0.0 if v is None else v
+
     def parse_comparison():
         """Parse comparison: expr < expr, expr > expr, etc."""
         left = parse_additive()
@@ -150,11 +159,11 @@ def evaluate(formula: str, get_ref_value) -> float:
             t = peek()
             if t and t[0] == "OP" and t[1] in ("<", ">", "=", "!"):
                 op1 = advance()[1]
-                # Check for two-char operators: <=, >=, !=
                 t2 = peek()
                 if t2 and t2[0] == "OP" and t2[1] == "=":
                     op1 += advance()[1]
-                right = parse_additive()
+                right = _n(parse_additive())
+                left = _n(left)
                 if op1 == "<": left = 1.0 if left < right else 0.0
                 elif op1 == ">": left = 1.0 if left > right else 0.0
                 elif op1 == "<=": left = 1.0 if left <= right else 0.0
@@ -173,32 +182,32 @@ def evaluate(formula: str, get_ref_value) -> float:
         while True:
             t = peek()
             if t and t[0] == "OP" and t[1] in ("+", "-"):
-                op = advance()[1]; right = parse_term()
-                left = left + right if op == "+" else left - right
+                op = advance()[1]; right = _n(parse_term())
+                left = _n(left) + right if op == "+" else _n(left) - right
             else: break
-        return left
+        return left  # preserves None if no operators
 
     def parse_term():
         left = parse_unary()
         while True:
             t = peek()
             if t and t[0] == "OP" and t[1] in ("*", "/"):
-                op = advance()[1]; right = parse_unary()
-                left = left * right if op == "*" else (left / right if right != 0 else float('nan'))
+                op = advance()[1]; right = _n(parse_unary())
+                left = _n(left) * right if op == "*" else (_n(left) / right if right != 0 else float('nan'))
             else: break
-        return left
+        return left  # preserves None if no operators
 
     def parse_unary():
         t = peek()
         if t and t[0] == "OP" and t[1] == "-":
-            advance(); return -parse_unary()  # recursive for --x = x
+            advance(); val = parse_unary(); return -_n(val)
         return parse_primary()
 
     def parse_primary():
         t = peek()
         if t is None: return 0.0
         if t[0] == "NUM": advance(); return t[1]
-        if t[0] == "REF": advance(); return get_ref_value(t[1])
+        if t[0] == "REF": advance(); return get_ref_value(t[1])  # may return None
         if t[0] == "FUNC":
             func_name = advance()[1]
             args = []
@@ -207,27 +216,31 @@ def evaluate(formula: str, get_ref_value) -> float:
                 if not expect_op(","): break
             expect_op(")")
             if func_name == "SUM":
-                return sum(args)
+                return sum(_n(a) for a in args)
             elif func_name == "AVERAGE":
-                return sum(args) / len(args) if args else 0.0
+                # Excel AVERAGE skips empty/missing cells
+                present = [_n(a) for a in args if a is not None]
+                return sum(present) / len(present) if present else 0.0
             elif func_name == "IF":
-                cond = args[0] if len(args) > 0 else 0.0
-                true_val = args[1] if len(args) > 1 else 0.0
-                false_val = args[2] if len(args) > 2 else 0.0
+                cond = _n(args[0]) if len(args) > 0 else 0.0
+                true_val = _n(args[1]) if len(args) > 1 else 0.0
+                false_val = _n(args[2]) if len(args) > 2 else 0.0
                 return true_val if cond != 0.0 else false_val
             elif func_name == "MIN":
-                return min(args) if args else 0.0
+                return min(_n(a) for a in args) if args else 0.0
             elif func_name == "MAX":
-                return max(args) if args else 0.0
+                return max(_n(a) for a in args) if args else 0.0
             elif func_name == "ABS":
-                return abs(args[0]) if args else 0.0
-            return sum(args)  # fallback
+                return abs(_n(args[0])) if args else 0.0
+            return sum(_n(a) for a in args)  # fallback
         if t[0] == "OP" and t[1] == "(":
             advance(); val = parse_expr(); expect_op(")"); return val
         advance(); return 0.0
 
     try:
         result = parse_expr()
+        if result is None:
+            return None  # propagate "missing" to caller
         return result if not math.isinf(result) else 0.0
     except Exception:
         return 0.0
@@ -598,15 +611,23 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                                     _has_unresolved_ref = True
                     return val
                 rs = _resolve_local(ref, context, meta)
-                if not rs or rs == coord_key:
+                if rs is None:
+                    return None  # ref couldn't resolve (e.g. prev period doesn't exist)
+                if rs == coord_key:
                     return 0.0
+                target_gk = (sheet_id, rs)
+                # Check if cell exists (has value, formula, or is manual)
+                if target_gk not in global_cells and target_gk not in global_formulas and target_gk not in _manual_cells:
+                    return None  # cell doesn't exist → missing (AVERAGE will skip)
                 val = get_cell(sheet_id, rs)
                 # Propagate unresolved status from dependencies
-                if (sheet_id, rs) in _unresolved:
+                if target_gk in _unresolved:
                     _has_unresolved_ref = True
                 return val
 
             result = evaluate(formula, get_ref_value)
+            if result is None:
+                result = 0.0
             # Division by zero in consolidation formula → fall through to SUM
             if not math.isfinite(result) and _is_consolidating(context, meta):
                 computing_set.discard(gk)
@@ -627,7 +648,17 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         # ── 3. Consolidating coord with no formula → default SUM over children
         # But skip consolidation for manual cells — they have user-entered values
         # that must not be overwritten (e.g. yearly-only sheets like Product/Funnel)
-        if _is_consolidating(context, meta) and gk not in _manual_cells:
+        # Also skip indicator-axis consolidation for cells that don't exist in the
+        # original data — creating phantom parent indicator cells causes cascading
+        # errors when formulas reference the parent.
+        _skip_default_sum = False
+        if _is_consolidating(context, meta) and gk not in _original_cell_keys:
+            # Check if the consolidation axis is the main (indicator) axis
+            main = meta.get("main_aid")
+            indicator_rid = context.get(main) if main else None
+            if indicator_rid and meta["children_by_rid"].get(indicator_rid):
+                _skip_default_sum = True
+        if _is_consolidating(context, meta) and gk not in _manual_cells and not _skip_default_sum:
             computing_set.add(gk)
             children_cks = list(_expand_children_one_level(coord_key, context, meta))
             total = 0.0
@@ -1197,6 +1228,24 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                                     oi += 1
                             ck = "|".join(parts)
                             gk = (sid, ck)
+                            # Skip if neither the parent cell nor any child
+                            # cell exists in the original data for this
+                            # period.  This prevents phantom consolidation
+                            # rows when Excel has None for the parent.
+                            if gk not in _original_cell_keys and gk not in computed_set:
+                                child_rids_for_parent = children_by.get(parent_rid, [])
+                                has_child = False
+                                for crid in child_rids_for_parent:
+                                    cparts = list(parts)
+                                    for ci2, a2 in enumerate(ordered_aids):
+                                        if a2 == consol_aid:
+                                            cparts[ci2] = crid
+                                    cgk = (sid, "|".join(cparts))
+                                    if cgk in _original_cell_keys or cgk in computed_set:
+                                        has_child = True
+                                        break
+                                if not has_child:
+                                    continue
                             if gk not in computed_set:
                                 get_cell(sid, ck)
                             if gk in computed_set:
