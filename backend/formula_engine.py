@@ -574,7 +574,11 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         return {aid: parts[i] for i, aid in enumerate(ordered_aids) if i < len(parts)}
 
     def _resolve_cross_sheet(ref, context, src_meta, src_sheet_id):
-        """Resolve [Sheet::indicator] cross-sheet reference."""
+        """Resolve [Sheet::indicator] cross-sheet reference.
+
+        Supports period modifiers like (периоды="предыдущий") and
+        (периоды=назад(N)).
+        """
         target_sid = sheet_name_to_id.get(ref["sheet"].lower())
         if not target_sid:
             return 0.0
@@ -601,7 +605,41 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         if not period_rid:
             return 0.0
 
-        target_ck = f"{period_rid}|{ind_rid}"
+        # Apply period modifiers from params (e.g. периоды="предыдущий")
+        params = ref.get("params", {})
+        for param_name, param_value in params.items():
+            # Check if this param refers to the period analytic
+            param_aid = src_meta["analytic_name_to_id"].get(param_name)
+            if not param_aid:
+                for aname, aid in src_meta["analytic_name_to_id"].items():
+                    if param_name.lower() in aname.lower():
+                        param_aid = aid
+                        break
+            if param_aid and param_aid == src_meta["period_aid"]:
+                if param_value == "предыдущий":
+                    period_rid = prev_period.get(period_rid)
+                    if not period_rid:
+                        return 0.0
+                elif param_value.startswith("назад("):
+                    try:
+                        back_n = int(param_value[6:-1])
+                    except ValueError:
+                        return 0.0
+                    for _ in range(back_n):
+                        period_rid = prev_period.get(period_rid)
+                        if not period_rid:
+                            return 0.0
+
+        # Build coord key in target sheet's analytic order
+        target_ordered = target_meta["ordered_aids"]
+        target_period_aid = target_meta["period_aid"]
+        ck_parts = []
+        for aid in target_ordered:
+            if aid == target_period_aid:
+                ck_parts.append(period_rid)
+            else:
+                ck_parts.append(ind_rid)
+        target_ck = "|".join(ck_parts)
         return get_cell(target_sid, target_ck)
 
     def _resolve_local(ref, context, meta):
