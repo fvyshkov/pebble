@@ -1335,6 +1335,20 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         ws_f = wb_formulas[excel_name]
         ws_d = wb_data[excel_name]
 
+        # ── Extract starting values (column before data_start) ──
+        pre_data_values: dict[int, float] = {}
+        if data_start_col > 1:
+            pre_col = data_start_col - 1
+            for row_num in row_to_name:
+                try:
+                    v = ws_d.cell(row_num, pre_col).value
+                    if v is not None:
+                        fv = float(v)
+                        if fv != 0:
+                            pre_data_values[row_num] = fv
+                except (ValueError, TypeError):
+                    pass
+
         # ── Import cell data ──
         # Build col -> month_record_id mapping from date headers
         _base_year = date.fromisoformat(period_config.get("start", "2026-01-01")).year
@@ -1411,6 +1425,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                                 is_first_period=is_first,
                                 sheet_data_starts=all_sheet_data_starts,
                                 row_to_parent_names=parent_maps,
+                                pre_data_values=pre_data_values if is_first else None,
                             )
                         except Exception:
                             # Fallback to Claude's formula if translator fails
@@ -1742,6 +1757,20 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             ws_f = wb_formulas[excel_name]
             ws_d = wb_data[excel_name]
 
+            # Extract starting values (column before data_start)
+            pre_data_values: dict[int, float] = {}
+            if data_start_col > 1:
+                pre_col = data_start_col - 1
+                for row_num in row_to_name:
+                    try:
+                        v = ws_d.cell(row_num, pre_col).value
+                        if v is not None:
+                            fv = float(v)
+                            if fv != 0:
+                                pre_data_values[row_num] = fv
+                    except (ValueError, TypeError):
+                        pass
+
             _base_year2 = date.fromisoformat(period_config.get("start", "2026-01-01")).year
             sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_base_year2)
             col_to_period_rid = {}
@@ -1802,6 +1831,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                     is_first_period=is_first,
                                     sheet_data_starts=all_sheet_data_starts,
                                     row_to_parent_names=parent_maps,
+                                    pre_data_values=pre_data_values if is_first else None,
                                 )
                             except Exception:
                                 formula_text = (formula_info or {}).get("formula", excel_formula)

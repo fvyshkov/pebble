@@ -62,6 +62,7 @@ def translate_excel_formula(
     is_first_period: bool = False,
     sheet_data_starts: dict[str, int] | None = None,
     row_to_parent_names: dict[str, dict[int, str]] | None = None,
+    pre_data_values: dict[int, float] | None = None,
 ) -> str:
     """Translate an Excel formula to Pebble formula syntax.
 
@@ -100,7 +101,7 @@ def translate_excel_formula(
     result = _replace_cell_refs(
         formula, base_col, data_start_col, row_to_name,
         sheet_row_maps, sheet_display_names, is_first_period,
-        sheet_data_starts, row_to_parent_names,
+        sheet_data_starts, row_to_parent_names, pre_data_values,
     )
 
     return result
@@ -155,6 +156,7 @@ def _replace_cell_refs(
     is_first_period: bool,
     sheet_data_starts: dict[str, int] | None = None,
     row_to_parent_names: dict[str, dict[int, str]] | None = None,
+    pre_data_values: dict[int, float] | None = None,
 ) -> str:
     """Replace all cell references in formula with [name] or [Sheet::name] tokens."""
 
@@ -191,7 +193,7 @@ def _replace_cell_refs(
         replacement = _translate_ref(
             ref, base_col, data_start_col, row_to_name,
             sheet_row_maps, sheet_display_names, is_first_period,
-            sheet_data_starts, row_to_parent_names,
+            sheet_data_starts, row_to_parent_names, pre_data_values,
         )
         result = result[:ref["start"]] + replacement + result[ref["end"]:]
 
@@ -208,6 +210,7 @@ def _translate_ref(
     is_first_period: bool,
     sheet_data_starts: dict[str, int] | None = None,
     row_to_parent_names: dict[str, dict[int, str]] | None = None,
+    pre_data_values: dict[int, float] | None = None,
 ) -> str:
     """Translate a single cell reference to Pebble [name] token."""
     sheet_name = ref["sheet"]
@@ -215,6 +218,7 @@ def _translate_ref(
     row = ref["row"]
     sheet_data_starts = sheet_data_starts or {}
     row_to_parent_names = row_to_parent_names or {}
+    pre_data_values = pre_data_values or {}
 
     # Determine indicator name
     if sheet_name:
@@ -267,7 +271,12 @@ def _translate_ref(
         n_back = abs(period_diff)
         # Reference to a previous period
         if is_first_period and ref_period_idx < 0:
-            # Before first data column — no previous period exists
+            # Before first data column — use starting value if available
+            starting_val = pre_data_values.get(row)
+            if starting_val is not None and starting_val != 0:
+                # Format: remove trailing zeros for cleaner formulas
+                s = f"{starting_val:.10f}".rstrip("0").rstrip(".")
+                return s
             return "0"
         ref_name = f"[{display}::{name}]" if display else f"[{name}]"
         if n_back == 1:
