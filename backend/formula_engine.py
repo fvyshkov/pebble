@@ -494,7 +494,8 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         formula_source = "cell" if formula else None
 
         # ── 2. Indicator rule (scoped → consolidation/leaf base)
-        if not formula:
+        #    But NEVER override manual cells — user-entered values are sacrosanct.
+        if not formula and gk not in _manual_cells:
             resolved = _resolve_indicator_formula(sheet_id, context, meta)
             if resolved:
                 formula, formula_source = resolved

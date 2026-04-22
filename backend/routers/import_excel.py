@@ -612,6 +612,72 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
 
 _CELL_REF_SIMPLE = re.compile(r"(?<!')\b(\$?[A-Z]{1,3})(\$?\d+)\b")
 
+_CELL_REF_DOLLAR = re.compile(r"(?<!['\w])(\$?[A-Z]{1,3})(\$?\d+)(?=\b)")
+
+
+def _substitute_non_indicator_refs(
+    formula: str, ws_data, row_to_name: dict[int, str], data_start_col: int,
+    base_col: int = 0,
+) -> str:
+    """Replace same-sheet cell refs with Excel values when they can't be translated.
+
+    Two categories get substituted:
+    1. Refs to rows NOT in row_to_name (header rows, date rows, rate constants)
+    2. Refs to indicator rows with ABSOLUTE column ($X) pointing to a DIFFERENT
+       column than base_col — these are interpolation anchors (e.g. $D8, $H8 in
+       =$D8+(E3-$D3)/($H3-$D3)*($H8-$D8)) that reference fixed period values.
+    """
+    from openpyxl.utils import column_index_from_string
+    from datetime import datetime, date
+
+    def replace_match(m):
+        col_str = m.group(1)
+        row_str = m.group(2).replace("$", "")
+        row_num = int(row_str)
+        col_clean = col_str.replace("$", "")
+        try:
+            col_num = column_index_from_string(col_clean)
+        except (ValueError, KeyError):
+            return m.group(0)
+
+        should_substitute = False
+        if row_num not in row_to_name:
+            # Non-indicator row — always substitute
+            should_substitute = True
+        elif col_str.startswith("$") and base_col > 0 and col_num != base_col:
+            # Absolute column ref to a different column on an indicator row
+            # (interpolation anchor like $D8 or $H8)
+            should_substitute = True
+
+        if not should_substitute:
+            return m.group(0)
+
+        v = ws_data.cell(row_num, col_num).value
+        if v is None:
+            return "0"
+        # Convert datetime to ordinal for numeric operations (Excel stores dates as numbers)
+        if isinstance(v, (datetime, date)):
+            if isinstance(v, datetime):
+                v = v.toordinal() + 2  # Excel epoch offset (1900-01-00 = day 1)
+            else:
+                v = v.toordinal() + 2
+        try:
+            fv = float(v)
+            return f"{fv:.10f}".rstrip("0").rstrip(".")
+        except (ValueError, TypeError):
+            return m.group(0)
+
+    # Split on quoted sheet refs to avoid touching cross-sheet references
+    parts = re.split(r"('[^']*'![A-Z]+\d+)", formula)
+    result_parts = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            result_parts.append(part)
+        else:
+            result_parts.append(_CELL_REF_DOLLAR.sub(replace_match, part))
+    return "".join(result_parts)
+
+
 def _substitute_total_col_refs(
     formula: str, ws_data, current_row: int, total_cols: set[int],
     data_start_col: int,
@@ -1756,6 +1822,9 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                             if src_ptype != "unknown":
                                 excel_formula = _substitute_cross_period_refs(
                                     excel_formula, src_ptype, all_sheet_period_types, wb_data, all_sheet_total_cols)
+                            # Pre-substitute: replace refs to non-indicator rows with values
+                            excel_formula = _substitute_non_indicator_refs(
+                                excel_formula, ws_d, row_to_name, data_start_col, base_col=col_num)
                             # Build parent name maps: use __self__ for current sheet
                             parent_maps = dict(all_row_to_parent_names)
                             parent_maps["__self__"] = row_to_parent_name
@@ -2243,6 +2312,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                 if src_ptype != "unknown":
                                     excel_formula = _substitute_cross_period_refs(
                                         excel_formula, src_ptype, all_sheet_period_types, wb_data, all_sheet_total_cols)
+                                # Pre-substitute: replace refs to non-indicator rows with values
+                                excel_formula = _substitute_non_indicator_refs(
+                                    excel_formula, ws_d, row_to_name, data_start_col, base_col=col_num)
                                 parent_maps = dict(all_row_to_parent_names)
                                 parent_maps["__self__"] = row_to_parent_name
                                 formula_text = translate_excel_formula(
