@@ -29,9 +29,9 @@ from typing import Any
 
 TOKEN_RE = re.compile(r"""
     (\[(?:[^\[\]]+)\](?:\((?:[^()]*|\([^()]*\))*\))?)  |  # [ref](params) — one nesting level
-    (SUM)\s*\(                         |  # SUM function
+    (SUM|AVERAGE|IF|MIN|MAX|ABS)\s*\(   |  # functions
     (\d+(?:\.\d+)?)                    |  # number
-    ([+\-*/(),])                       |  # operators and parens
+    ([+\-*/(),<>=!])                   |  # operators, parens, comparison
     (\s+)                                 # whitespace (skip)
 """, re.VERBOSE)
 
@@ -109,7 +109,7 @@ def tokenize(formula: str) -> list:
         if m.group(1):
             tokens.append(("REF", m.group(1)))
         elif m.group(2):
-            tokens.append(("SUM", "SUM"))
+            tokens.append(("FUNC", m.group(2).upper()))
         elif m.group(3):
             tokens.append(("NUM", float(m.group(3))))
         elif m.group(4):
@@ -143,7 +143,32 @@ def evaluate(formula: str, get_ref_value) -> float:
         if t and t[0] == "OP" and t[1] == op: advance(); return True
         return False
 
+    def parse_comparison():
+        """Parse comparison: expr < expr, expr > expr, etc."""
+        left = parse_additive()
+        while True:
+            t = peek()
+            if t and t[0] == "OP" and t[1] in ("<", ">", "=", "!"):
+                op1 = advance()[1]
+                # Check for two-char operators: <=, >=, !=
+                t2 = peek()
+                if t2 and t2[0] == "OP" and t2[1] == "=":
+                    op1 += advance()[1]
+                right = parse_additive()
+                if op1 == "<": left = 1.0 if left < right else 0.0
+                elif op1 == ">": left = 1.0 if left > right else 0.0
+                elif op1 == "<=": left = 1.0 if left <= right else 0.0
+                elif op1 == ">=": left = 1.0 if left >= right else 0.0
+                elif op1 == "=" or op1 == "==": left = 1.0 if abs(left - right) < 1e-12 else 0.0
+                elif op1 == "!=": left = 1.0 if abs(left - right) >= 1e-12 else 0.0
+            else:
+                break
+        return left
+
     def parse_expr():
+        return parse_comparison()
+
+    def parse_additive():
         left = parse_term()
         while True:
             t = peek()
@@ -174,13 +199,29 @@ def evaluate(formula: str, get_ref_value) -> float:
         if t is None: return 0.0
         if t[0] == "NUM": advance(); return t[1]
         if t[0] == "REF": advance(); return get_ref_value(t[1])
-        if t[0] == "SUM":
-            advance()
+        if t[0] == "FUNC":
+            func_name = advance()[1]
             args = []
             while True:
                 args.append(parse_expr())
                 if not expect_op(","): break
-            expect_op(")"); return sum(args)
+            expect_op(")")
+            if func_name == "SUM":
+                return sum(args)
+            elif func_name == "AVERAGE":
+                return sum(args) / len(args) if args else 0.0
+            elif func_name == "IF":
+                cond = args[0] if len(args) > 0 else 0.0
+                true_val = args[1] if len(args) > 1 else 0.0
+                false_val = args[2] if len(args) > 2 else 0.0
+                return true_val if cond != 0.0 else false_val
+            elif func_name == "MIN":
+                return min(args) if args else 0.0
+            elif func_name == "MAX":
+                return max(args) if args else 0.0
+            elif func_name == "ABS":
+                return abs(args[0]) if args else 0.0
+            return sum(args)  # fallback
         if t[0] == "OP" and t[1] == "(":
             advance(); val = parse_expr(); expect_op(")"); return val
         advance(); return 0.0

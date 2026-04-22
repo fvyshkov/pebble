@@ -36,8 +36,8 @@ RANGE_RE = re.compile(
     re.UNICODE,
 )
 
-# SUM(range) pattern
-SUM_RE = re.compile(r"SUM\s*\(([^)]+)\)", re.IGNORECASE)
+# SUM/AVERAGE(range) pattern
+SUM_RE = re.compile(r"(SUM|AVERAGE)\s*\(([^)]+)\)", re.IGNORECASE)
 
 
 def _col_num(col_str: str) -> int:
@@ -63,6 +63,8 @@ def translate_excel_formula(
     sheet_data_starts: dict[str, int] | None = None,
     row_to_parent_names: dict[str, dict[int, str]] | None = None,
     pre_data_values: dict[int, float] | None = None,
+    col_to_period_idx: dict[int, int] | None = None,
+    sheet_col_to_period_idx: dict[str, dict[int, int]] | None = None,
 ) -> str:
     """Translate an Excel formula to Pebble formula syntax.
 
@@ -102,6 +104,7 @@ def translate_excel_formula(
         formula, base_col, data_start_col, row_to_name,
         sheet_row_maps, sheet_display_names, is_first_period,
         sheet_data_starts, row_to_parent_names, pre_data_values,
+        col_to_period_idx, sheet_col_to_period_idx,
     )
 
     return result
@@ -112,10 +115,11 @@ def _expand_sum_ranges(
     row_to_name: dict[int, str],
     sheet_row_maps: dict[str, dict[int, str]],
 ) -> str:
-    """Expand SUM(E19:E25) into SUM(E19,E20,...,E25) using row map to skip missing rows."""
+    """Expand SUM/AVERAGE(E19:E25) into SUM/AVERAGE(E19,E20,...,E25) using row map to skip missing rows."""
 
     def expand_match(m):
-        inner = m.group(1)
+        func_name = m.group(1).upper()  # SUM or AVERAGE
+        inner = m.group(2)
         rm = RANGE_RE.match(inner.strip())
         if not rm:
             return m.group(0)
@@ -131,14 +135,13 @@ def _expand_sum_ranges(
 
         if col1_clean != col2_clean and row1 == row2:
             # Horizontal range (same row, different cols): D5:N5
-            # Expand to D5,E5,F5,...,N5
             from openpyxl.utils import get_column_letter
             c1 = _col_num(col1)
             c2 = _col_num(col2)
             prefix = f"'{sheet1}'!" if sheet1 else ""
             refs = [f"{prefix}{get_column_letter(c)}{row1}" for c in range(c1, c2 + 1)]
             if refs:
-                return f"SUM({','.join(refs)})"
+                return f"{func_name}({','.join(refs)})"
             return m.group(0)
 
         if col1_clean != col2_clean:
@@ -155,7 +158,7 @@ def _expand_sum_ranges(
                 refs.append(f"{prefix}{col1}{r}")
 
         if refs:
-            return f"SUM({','.join(refs)})"
+            return f"{func_name}({','.join(refs)})"
         return m.group(0)
 
     return SUM_RE.sub(expand_match, formula)
@@ -172,6 +175,8 @@ def _replace_cell_refs(
     sheet_data_starts: dict[str, int] | None = None,
     row_to_parent_names: dict[str, dict[int, str]] | None = None,
     pre_data_values: dict[int, float] | None = None,
+    col_to_period_idx: dict[int, int] | None = None,
+    sheet_col_to_period_idx: dict[str, dict[int, int]] | None = None,
 ) -> str:
     """Replace all cell references in formula with [name] or [Sheet::name] tokens."""
 
@@ -209,6 +214,7 @@ def _replace_cell_refs(
             ref, base_col, data_start_col, row_to_name,
             sheet_row_maps, sheet_display_names, is_first_period,
             sheet_data_starts, row_to_parent_names, pre_data_values,
+            col_to_period_idx, sheet_col_to_period_idx,
         )
         result = result[:ref["start"]] + replacement + result[ref["end"]:]
 
@@ -226,6 +232,8 @@ def _translate_ref(
     sheet_data_starts: dict[str, int] | None = None,
     row_to_parent_names: dict[str, dict[int, str]] | None = None,
     pre_data_values: dict[int, float] | None = None,
+    col_to_period_idx: dict[int, int] | None = None,
+    sheet_col_to_period_idx: dict[str, dict[int, int]] | None = None,
 ) -> str:
     """Translate a single cell reference to Pebble [name] token."""
     sheet_name = ref["sheet"]
@@ -269,15 +277,29 @@ def _translate_ref(
             name = f"{name}#row{row}"
 
     # Determine period modifier using period index alignment
-    # Period index = col - data_start for that sheet
-    source_period_idx = base_col - data_start_col
+    # Use col_to_period_idx mapping if available (skips total columns)
+    # Otherwise fall back to simple column arithmetic
+    col_to_period_idx = col_to_period_idx or {}
+    sheet_col_to_period_idx = sheet_col_to_period_idx or {}
 
-    if sheet_name and sheet_name in sheet_data_starts:
-        # Cross-sheet: use target sheet's data_start for alignment
+    if base_col in col_to_period_idx:
+        source_period_idx = col_to_period_idx[base_col]
+    else:
+        source_period_idx = base_col - data_start_col
+
+    if sheet_name and sheet_name in sheet_col_to_period_idx:
+        target_map = sheet_col_to_period_idx[sheet_name]
+        if col in target_map:
+            ref_period_idx = target_map[col]
+        else:
+            target_data_start = (sheet_data_starts or {}).get(sheet_name, data_start_col)
+            ref_period_idx = col - target_data_start
+    elif sheet_name and sheet_name in (sheet_data_starts or {}):
         target_data_start = sheet_data_starts[sheet_name]
         ref_period_idx = col - target_data_start
+    elif col in col_to_period_idx:
+        ref_period_idx = col_to_period_idx[col]
     else:
-        # Same sheet
         ref_period_idx = col - data_start_col
 
     period_diff = ref_period_idx - source_period_idx

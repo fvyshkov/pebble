@@ -614,6 +614,22 @@ _CELL_REF_SIMPLE = re.compile(r"(?<!')\b(\$?[A-Z]{1,3})(\$?\d+)\b")
 
 _CELL_REF_DOLLAR = re.compile(r"(?<!['\w])(\$?[A-Z]{1,3})(\$?\d+)(?=\b)")
 
+# External workbook refs: [11]CashCredit_dossym!D46 or [11]'Sheet Name'!D46
+_EXTERNAL_REF_RE = re.compile(
+    r"\[(\d+)\](?:'([^']+)'|([\w.+\-() ]+))!(\$?[A-Z]{1,3})(\$?\d+)",
+    re.UNICODE,
+)
+
+
+class _ExternalRefSkip(Exception):
+    """Raised when a formula has external workbook refs that can't be resolved."""
+    pass
+
+
+def _has_external_refs(formula: str) -> bool:
+    """Check if formula contains [number]Sheet!Cell external workbook references."""
+    return bool(_EXTERNAL_REF_RE.search(formula))
+
 
 def _substitute_non_indicator_refs(
     formula: str, ws_data, row_to_name: dict[int, str], data_start_col: int,
@@ -1603,6 +1619,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     all_row_to_parent_names: dict[str, dict[int, str]] = {}  # {excel_sheet_name_or___self__: {row: parent_name}}
     all_sheet_period_types: dict[str, str] = {}  # {excel_sheet_name: "monthly"|"qhy"|"yearly"}
     all_sheet_total_cols: dict[str, set[int]] = {}  # {excel_sheet_name: set of total column numbers}
+    _all_col_to_pidx: dict[str, dict[int, int]] = {}  # {excel_sheet_name: {col: period_idx}}
     sheet_meta: list[dict] = []  # store per-sheet metadata for second pass
     _used_display_names: set[str] = set()  # track used names to avoid duplicates
 
@@ -1697,6 +1714,18 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 _tc.add(_spp["col"])
         all_sheet_total_cols[excel_name] = _tc
 
+        # Build col→period_idx for cross-sheet refs (leaf columns only)
+        _sorted_sp_fp = sorted(_sp_fp, key=lambda x: x["col"])
+        _all_col_to_pidx_sheet: dict[int, int] = {}
+        _leaf_idx_fp = 0
+        for _spp in _sorted_sp_fp:
+            pk = _spp.get("period_key", "")
+            if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                continue
+            _all_col_to_pidx_sheet[_spp["col"]] = _leaf_idx_fp
+            _leaf_idx_fp += 1
+        _all_col_to_pidx[excel_name] = _all_col_to_pidx_sheet
+
         sheet_meta.append({
             "excel_name": excel_name,
             "sheet_display": sheet_display,
@@ -1766,6 +1795,19 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             else:
                 leaf_cols.add(sp["col"])
 
+        # Build col→period_idx mapping: sequential indices for LEAF columns only,
+        # skipping total columns (year/quarter/half). This ensures cross-year-boundary
+        # refs get correct period_diff (col 17→col 15 = 1 period, not 2).
+        _sorted_sp = sorted(sheet_periods, key=lambda x: x["col"])
+        _col_to_pidx: dict[int, int] = {}
+        _leaf_idx = 0
+        for _sp in _sorted_sp:
+            pk = _sp.get("period_key", "")
+            if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                continue  # skip total columns
+            _col_to_pidx[_sp["col"]] = _leaf_idx
+            _leaf_idx += 1
+
         cell_count = 0
         for row_num, indicator_rid in row_to_rid.items():
             formula_info = rid_to_formula.get(indicator_rid)
@@ -1813,6 +1855,17 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     if isinstance(excel_formula, str) and excel_formula.startswith("="):
                         rule = "formula"
                         try:
+                            # External workbook refs [N]Sheet!Cell → can't resolve, keep manual
+                            if _has_external_refs(excel_formula):
+                                rule = "manual"
+                                formula_text = ""
+                                raise _ExternalRefSkip()
+                            # Pre-substitute: for total columns (year/quarter/half),
+                            # substitute ALL same-sheet refs with values — the column
+                            # position translation doesn't work across section boundaries
+                            if total_cols and col_num in total_cols:
+                                excel_formula = _substitute_non_indicator_refs(
+                                    excel_formula, ws_d, {}, data_start_col, base_col=col_num)
                             # Pre-substitute: replace same-sheet refs to total columns with Excel values
                             if total_cols and col_num not in total_cols:
                                 excel_formula = _substitute_total_col_refs(
@@ -1839,7 +1892,11 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                                 sheet_data_starts=all_sheet_data_starts,
                                 row_to_parent_names=parent_maps,
                                 pre_data_values=pre_data_values,
+                                col_to_period_idx=_col_to_pidx,
+                                sheet_col_to_period_idx=_all_col_to_pidx,
                             )
+                        except _ExternalRefSkip:
+                            pass  # rule/formula_text already set to manual/""
                         except Exception:
                             # Fallback to Claude's formula if translator fails
                             formula_text = (formula_info or {}).get("formula", excel_formula)
@@ -2116,6 +2173,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         all_row_to_parent_names: dict[str, dict[int, str]] = {}
         all_sheet_period_types: dict[str, str] = {}
         all_sheet_total_cols: dict[str, set[int]] = {}
+        _all_col_to_pidx2: dict[str, dict[int, int]] = {}
         sheet_meta: list[dict] = []
         _used_display_names2: set[str] = set()
 
@@ -2203,6 +2261,18 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     _tc2.add(_spp2["col"])
             all_sheet_total_cols[excel_name] = _tc2
 
+            # Build col→period_idx for cross-sheet refs (leaf columns only)
+            _sorted_sp_fp2 = sorted(_sp_fp2, key=lambda x: x["col"])
+            _pidx_map2: dict[int, int] = {}
+            _leaf_idx_fp2 = 0
+            for _spp2x in _sorted_sp_fp2:
+                pk = _spp2x.get("period_key", "")
+                if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                    continue
+                _pidx_map2[_spp2x["col"]] = _leaf_idx_fp2
+                _leaf_idx_fp2 += 1
+            _all_col_to_pidx2[excel_name] = _pidx_map2
+
             done_indicators += sheet_indicators
             sheet_meta.append({
                 "excel_name": excel_name,
@@ -2268,6 +2338,17 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
                     total_cols2.add(sp["col"])
 
+            # Build col→period_idx for this sheet (leaf columns only)
+            _sorted_sp2 = sorted(sheet_periods, key=lambda x: x["col"])
+            _col_to_pidx2: dict[int, int] = {}
+            _leaf_idx2 = 0
+            for _sp2 in _sorted_sp2:
+                pk = _sp2.get("period_key", "")
+                if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                    continue
+                _col_to_pidx2[_sp2["col"]] = _leaf_idx2
+                _leaf_idx2 += 1
+
             cell_count = 0
             for row_num, indicator_rid in row_to_rid.items():
                 formula_info = rid_to_formula.get(indicator_rid)
@@ -2303,6 +2384,15 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         if isinstance(excel_formula, str) and excel_formula.startswith("="):
                             rule = "formula"
                             try:
+                                # External workbook refs → import as manual
+                                if _has_external_refs(excel_formula):
+                                    rule = "manual"
+                                    formula_text = ""
+                                    raise _ExternalRefSkip()
+                                # For total columns, substitute ALL same-sheet refs with values
+                                if total_cols2 and col_num in total_cols2:
+                                    excel_formula = _substitute_non_indicator_refs(
+                                        excel_formula, ws_d, {}, data_start_col, base_col=col_num)
                                 # Pre-substitute total-column refs with values
                                 if total_cols2 and col_num not in total_cols2:
                                     excel_formula = _substitute_total_col_refs(
@@ -2328,7 +2418,11 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                     sheet_data_starts=all_sheet_data_starts,
                                     row_to_parent_names=parent_maps,
                                     pre_data_values=pre_data_values,
+                                    col_to_period_idx=_col_to_pidx2,
+                                    sheet_col_to_period_idx=_all_col_to_pidx2,
                                 )
+                            except _ExternalRefSkip:
+                                pass  # rule/formula_text already set
                             except Exception:
                                 formula_text = (formula_info or {}).get("formula", excel_formula)
                         elif formula_info:
