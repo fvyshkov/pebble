@@ -1364,6 +1364,70 @@ def _enrich_with_indent(indicators: list[dict], ws) -> None:
     _walk(indicators)
 
 
+def _validate_hierarchy_by_indent(indicators: list[dict]) -> list[dict]:
+    """Validate Claude's hierarchy against Excel indent levels.
+
+    If a group has ANY children at the same indent as itself, the LLM's
+    grouping is wrong. Flatten ALL children of that group back to siblings
+    so that _fix_indent_grouping can rebuild the hierarchy correctly.
+    """
+    has_indent = False
+    def _check(items):
+        nonlocal has_indent
+        for item in items:
+            if item.get("_indent") is not None:
+                has_indent = True
+                return
+            if item.get("children"):
+                _check(item["children"])
+    _check(indicators)
+    if not has_indent:
+        return indicators
+
+    def _flatten(items: list[dict]) -> list[dict]:
+        """Recursively flatten all children into a flat list."""
+        result: list[dict] = []
+        for item in items:
+            children = item.get("children", [])
+            item["children"] = []
+            item["is_group"] = False
+            result.append(item)
+            if children:
+                result.extend(_flatten(children))
+        return result
+
+    def _walk(items: list[dict]) -> list[dict]:
+        result: list[dict] = []
+        for item in items:
+            children = item.get("children", [])
+            if not children:
+                result.append(item)
+                continue
+
+            # Recursively validate children first
+            children = _walk(children)
+
+            parent_indent = item.get("_indent", 0)
+            # Check if ANY child has same indent as parent → LLM grouping is wrong
+            has_same_indent = any(ch.get("_indent", 0) <= parent_indent for ch in children)
+
+            if has_same_indent:
+                # Flatten ALL children — let _fix_indent_grouping rebuild correctly
+                item["children"] = []
+                item["is_group"] = False
+                if item.get("rule") == "sum_children":
+                    item["rule"] = "manual"
+                result.append(item)
+                result.extend(_flatten(children))
+            else:
+                item["children"] = children
+                result.append(item)
+
+        return result
+
+    return _walk(indicators)
+
+
 def _fix_indicator_hierarchy(indicators: list[dict]) -> list[dict]:
     """Post-process indicator list: ensure rows matching grouping name patterns
     (e.g. "в т.ч.:", "Итого") have subsequent rows nested as children.
@@ -2034,6 +2098,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             )
 
         _enrich_with_indent(indicators, ws_d)
+        indicators = _validate_hierarchy_by_indent(indicators)
         indicators = _fix_indicator_hierarchy(indicators)
         _verify_group_rules(indicators, ws_d, data_start_col)
         indicators = _recover_missing_rows(indicators, ws_d, data_start_col)
@@ -2692,6 +2757,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
             if excel_name in wb_data.sheetnames:
                 _enrich_with_indent(indicators, wb_data[excel_name])
+            indicators = _validate_hierarchy_by_indent(indicators)
             indicators = _fix_indicator_hierarchy(indicators)
             if excel_name in wb_data.sheetnames:
                 _verify_group_rules(indicators, wb_data[excel_name], data_start_col)
