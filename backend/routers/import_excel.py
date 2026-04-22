@@ -1099,6 +1099,8 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
             data = {"name": item["name"]}
             if item.get("unit"):
                 data["unit"] = item["unit"]
+                if item["unit"] == "%":
+                    data["format"] = "percent"
 
             excel_row = item.get("row")
             await db.execute(
@@ -1353,6 +1355,20 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         for row_num, indicator_rid in row_to_rid.items():
             formula_info = rid_to_formula.get(indicator_rid)
 
+            # Detect percentage number_format from the first data cell in this row
+            _fmt_detected = False
+            for _fc in sorted_period_cols:
+                nf = ws_d.cell(row_num, _fc).number_format or ""
+                if "%" in nf:
+                    await db.execute(
+                        "UPDATE analytic_records SET data_json = json_set(data_json, '$.format', 'percent') WHERE id = ?",
+                        (indicator_rid,),
+                    )
+                    _fmt_detected = True
+                    break
+                if nf and nf != "General":
+                    break  # has a non-percent format, skip
+
             for col_num, period_rid in col_to_period_rid.items():
                 cell_val = ws_d.cell(row_num, col_num)
                 val = cell_val.value
@@ -1413,11 +1429,17 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 coord_key = f"{period_rid}|{indicator_rid}"
                 value_str = str(val)
 
-                # If formula is "0" but Excel has a real value (common for first-period
-                # cells referencing starting balances before data_start), use manual value
-                if rule == "formula" and formula_text.strip() == "0" and val != 0:
-                    rule = "manual"
-                    formula_text = ""
+                # First-period formula cells often reference starting balances from
+                # before data_start. If our translated formula would produce 0
+                # but Excel has a non-zero value, import as manual to preserve
+                # the starting balance.
+                if rule == "formula" and is_first and val != 0:
+                    # Check if formula contains "0" literal or references that would be 0
+                    ft = formula_text.strip()
+                    if ft == "0" or ft.startswith("0/") or ft.startswith("0*") or \
+                       'предыдущий' in ft or 'назад' in ft:
+                        rule = "manual"
+                        formula_text = ""
 
                 cid = str(uuid.uuid4())
                 try:
@@ -1736,6 +1758,19 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             cell_count = 0
             for row_num, indicator_rid in row_to_rid.items():
                 formula_info = rid_to_formula.get(indicator_rid)
+
+                # Detect percentage number_format from the first data cell
+                for _fc in sorted_period_cols:
+                    nf = ws_d.cell(row_num, _fc).number_format or ""
+                    if "%" in nf:
+                        await db.execute(
+                            "UPDATE analytic_records SET data_json = json_set(data_json, '$.format', 'percent') WHERE id = ?",
+                            (indicator_rid,),
+                        )
+                        break
+                    if nf and nf != "General":
+                        break
+
                 for col_num, period_rid in col_to_period_rid.items():
                     val = ws_d.cell(row_num, col_num).value
                     if val is None:
@@ -1779,10 +1814,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         else:
                             rule = "manual"
                             formula_text = ""
-                    # If formula is "0" but Excel has a real value, use manual value
-                    if rule == "formula" and formula_text.strip() == "0" and val != 0:
-                        rule = "manual"
-                        formula_text = ""
+                    # First-period formula cells: preserve starting balances
+                    if rule == "formula" and is_first and val != 0:
+                        ft = formula_text.strip()
+                        if ft == "0" or ft.startswith("0/") or ft.startswith("0*") or \
+                           'предыдущий' in ft or 'назад' in ft:
+                            rule = "manual"
+                            formula_text = ""
 
                     try:
                         await db.execute(

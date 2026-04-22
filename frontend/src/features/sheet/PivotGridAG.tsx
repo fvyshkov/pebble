@@ -624,6 +624,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
               isLeaf: !isGroup,
               recordIds: recIds,
               unit: node.data?.unit,
+              format: node.data?.format,
             }
             // Populate period cell values. For leaves we pull from cellMap;
             // for group rows the value is recomputed in a bottom-up pass
@@ -1091,6 +1092,10 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         if (v == null || v === '') return ''
         const num = Number(v)
         if (!Number.isNaN(num)) {
+          const fmt = p.data?.format
+          if (fmt === 'percent') {
+            return (num * 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%'
+          }
           return num.toLocaleString('ru-RU', { maximumFractionDigits: 2 })
         }
         return String(v)
@@ -1119,8 +1124,14 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         }
         // Cleanup: bare '-' / '.' / '-.' → empty
         if (out === '' || out === '-' || out === '.' || out === '-.') return ''
-        const num = Number(out)
+        let num = Number(out)
         if (Number.isNaN(num)) return p.oldValue
+        // For percent cells: user types "15" meaning 15%, store as 0.15
+        const fmt = p.data?.format
+        if (fmt === 'percent') {
+          num = num / 100
+          return String(num)
+        }
         return out
       },
       cellStyle: (p: any) => {
