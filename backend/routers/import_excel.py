@@ -1578,46 +1578,98 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         (model_id, model_name, "Импортировано из Excel"),
     )
 
-    # ── Step 4: Create period analytic with proper hierarchy ──
-    period_analytic_id = str(uuid.uuid4())
-    period_types = period_config.get("period_types", ["year", "quarter", "month"])
+    # ── Step 4: Create period analytics ──
+    # Pre-scan all sheets to detect per-sheet period granularity (monthly/qhy/yearly).
+    # Create separate period analytics for each granularity so yearly sheets
+    # don't show 114 monthly periods.
     period_start = period_config.get("start", "2026-01-01")
     period_end = period_config.get("end", "2028-12-31")
-
-    await db.execute(
-        """INSERT INTO analytics (id, model_id, name, code, icon, is_periods, data_type,
-           period_types, period_start, period_end, sort_order)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        (period_analytic_id, model_id, "Периоды", "periods", "CalendarMonthOutlined",
-         1, "sum", json.dumps(period_types), period_start, period_end, 0),
-    )
-
-    # Create period fields (proper Russian names, matching manual creation)
-    for sort_i, (fname, fcode, ftype) in enumerate([
-        ("Наименование", "name", "string"),
-        ("Начало", "start", "date"),
-        ("Окончание", "end", "date"),
-    ]):
-        fid = str(uuid.uuid4())
-        await db.execute(
-            "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
-            (fid, period_analytic_id, fname, fcode, ftype, sort_i),
-        )
-
-    # Create period records with year > quarter > month hierarchy
     start_d = date.fromisoformat(period_start)
     end_d = date.fromisoformat(period_end)
-    period_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
+    all_period_types = period_config.get("period_types", ["year", "quarter", "month"])
 
-    # Compute base_year for "N мес" sheets: if Y0 exists, monthly data starts 1 year after
+    # Compute base_year early (needed for period detection)
     _base_year_raw = date.fromisoformat(period_config.get("start", "2026-01-01")).year
     _nmes_base_year = _base_year_raw + (1 if _has_y0 else 0)
+
+    # Pre-scan: detect period type for each sheet
+    _prescan_sheet_ptypes: dict[str, str] = {}  # excel_name → "monthly"|"qhy"|"yearly"
+    for sheet_cfg in sheets_config:
+        excel_name = sheet_cfg["excel_name"]
+        if excel_name not in wb_data.sheetnames:
+            continue
+        ws_scan = wb_data[excel_name]
+        max_col_scan = min(ws_scan.max_column or 1, 200)
+        sp_scan = _detect_periods_from_headers(ws_scan, max_col_scan, base_year=_nmes_base_year)
+        _prescan_sheet_ptypes[excel_name] = _get_sheet_period_type(sp_scan)
+
+    # Determine which period analytic variants we need
+    _needed_ptypes: set[str] = set(_prescan_sheet_ptypes.values()) - {"unknown"}
+    if not _needed_ptypes:
+        _needed_ptypes = {"monthly"}
+
+    # Create a period analytic for each needed granularity
+    _period_analytics: dict[str, tuple[str, dict]] = {}  # ptype → (analytic_id, {period_key: record_id})
+    _period_analytic_sort = 0
+    for ptype in sorted(_needed_ptypes, key=lambda x: ["monthly", "qhy", "yearly"].index(x) if x in ["monthly", "qhy", "yearly"] else 99):
+        if ptype == "monthly":
+            pt_list = [t for t in all_period_types]  # full set
+            suffix = ""
+        elif ptype == "qhy":
+            pt_list = [t for t in all_period_types if t != "month"]  # year + half + quarter
+            suffix = " (кварталы)"
+        elif ptype == "yearly":
+            pt_list = ["year"]
+            suffix = " (годы)"
+        else:
+            pt_list = [t for t in all_period_types]
+            suffix = ""
+
+        # Ensure "year" is always present
+        if "year" not in pt_list:
+            pt_list = ["year"] + pt_list
+
+        pa_id = str(uuid.uuid4())
+        await db.execute(
+            """INSERT INTO analytics (id, model_id, name, code, icon, is_periods, data_type,
+               period_types, period_start, period_end, sort_order)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (pa_id, model_id, f"Периоды{suffix}", f"periods_{ptype}",
+             "CalendarMonthOutlined", 1, "sum",
+             json.dumps(pt_list), period_start, period_end, _period_analytic_sort),
+        )
+        _period_analytic_sort += 1
+
+        for sort_i, (fname, fcode, ftype) in enumerate([
+            ("Наименование", "name", "string"),
+            ("Начало", "start", "date"),
+            ("Окончание", "end", "date"),
+        ]):
+            fid = str(uuid.uuid4())
+            await db.execute(
+                "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
+                (fid, pa_id, fname, fcode, ftype, sort_i),
+            )
+
+        rec_ids = await _create_period_hierarchy(db, pa_id, pt_list, start_d, end_d)
+        _period_analytics[ptype] = (pa_id, rec_ids)
+
+    # Backward compat: period_analytic_id = the most detailed one (monthly preferred)
+    _default_ptype = "monthly" if "monthly" in _period_analytics else list(_period_analytics.keys())[0]
+    period_analytic_id = _period_analytics[_default_ptype][0]
+    period_record_ids = _period_analytics[_default_ptype][1]
+
+    # Merge ALL period_record_ids across all analytics for cell import
+    # (each ptype has its own record IDs, keyed by the same period_key)
+    _all_period_record_ids: dict[str, dict[str, str]] = {}  # ptype → {period_key: record_id}
+    for ptype, (_, rids) in _period_analytics.items():
+        _all_period_record_ids[ptype] = rids
 
     # ── Step 5: Process each sheet (two passes: 1. create structure, 2. import cells) ──
     from backend.excel_formula_translator import translate_excel_formula
 
     created_sheets = []
-    analytic_sort = 1  # 0 is periods
+    analytic_sort = _period_analytic_sort  # after all period analytics
     sheet_sort = 0
 
     # First pass: create indicator hierarchies for ALL sheets (needed for cross-sheet formula translation)
@@ -1687,7 +1739,13 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         )
         sheet_sort += 1
 
-        for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
+        # Bind the right period analytic based on sheet's period type
+        _sheet_ptype = _prescan_sheet_ptypes.get(excel_name, "monthly")
+        if _sheet_ptype not in _period_analytics:
+            _sheet_ptype = _default_ptype
+        _sheet_period_aid = _period_analytics[_sheet_ptype][0]
+
+        for bind_idx, aid in enumerate([_sheet_period_aid, indicator_analytic_id]):
             sa_id = str(uuid.uuid4())
             is_main = 1 if aid == indicator_analytic_id else 0
             await db.execute(
@@ -1775,18 +1833,24 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
 
         # ── Import cell data ──
         # Build col -> period_record_id mapping from headers
+        # Use the period_record_ids for THIS sheet's period analytic type
+        _sheet_ptype2 = _prescan_sheet_ptypes.get(excel_name, "monthly")
+        if _sheet_ptype2 not in _all_period_record_ids:
+            _sheet_ptype2 = _default_ptype
+        _sheet_period_rids = _all_period_record_ids[_sheet_ptype2]
+
         sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_nmes_base_year)
         col_to_period_rid = {}
         for sp in sheet_periods:
             pkey = sp.get("period_key")
-            if pkey and pkey in period_record_ids:
-                col_to_period_rid[sp["col"]] = period_record_ids[pkey]
+            if pkey and pkey in _sheet_period_rids:
+                col_to_period_rid[sp["col"]] = _sheet_period_rids[pkey]
             elif sp.get("date"):
                 # Backward compat: try year-month key from date
                 d = sp["date"]
                 key = f"{d.year}-{d.month:02d}"
-                if key in period_record_ids:
-                    col_to_period_rid[sp["col"]] = period_record_ids[key]
+                if key in _sheet_period_rids:
+                    col_to_period_rid[sp["col"]] = _sheet_period_rids[key]
 
         # Determine which period is "first" (for formula_first)
         sorted_period_cols = sorted(col_to_period_rid.keys())
@@ -2127,33 +2191,81 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         )
         yield event(f"Создана модель «{model_name_final}»")
 
-        # Period analytic
-        period_types = period_config.get("period_types", ["year", "quarter", "month"])
+        # Period analytics — one per granularity (monthly/qhy/yearly)
+        all_period_types = period_config.get("period_types", ["year", "quarter", "month"])
         period_start = period_config.get("start", "2026-01-01")
         period_end = period_config.get("end", "2028-12-31")
-
-        period_analytic_id = str(uuid.uuid4())
-        await db.execute(
-            """INSERT INTO analytics (id, model_id, name, code, icon, is_periods, data_type,
-               period_types, period_start, period_end, sort_order)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (period_analytic_id, model_id, "Периоды", "periods", "CalendarMonthOutlined",
-             1, "sum", json.dumps(period_types), period_start, period_end, 0),
-        )
-        for sort_i, (fname, fcode, ftype) in enumerate([
-            ("Наименование", "name", "string"),
-            ("Начало", "start", "date"),
-            ("Окончание", "end", "date"),
-        ]):
-            await db.execute(
-                "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
-                (str(uuid.uuid4()), period_analytic_id, fname, fcode, ftype, sort_i),
-            )
-
         start_d = date.fromisoformat(period_start)
         end_d = date.fromisoformat(period_end)
-        period_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
-        yield event(f"Создана иерархия периодов: {period_start} — {period_end} ({len(period_record_ids)} периодов)")
+
+        # Compute base_year early (needed for period detection)
+        _base_year_raw = date.fromisoformat(period_config.get("start", "2026-01-01")).year
+        _nmes_base_year = _base_year_raw + (1 if _has_y0 else 0)
+
+        # Pre-scan: detect period type for each sheet
+        _prescan_sheet_ptypes: dict[str, str] = {}
+        for sheet_cfg in sheets_config:
+            excel_name = sheet_cfg["excel_name"]
+            if excel_name not in wb_data.sheetnames:
+                continue
+            ws_scan = wb_data[excel_name]
+            max_col_scan = min(ws_scan.max_column or 1, 200)
+            sp_scan = _detect_periods_from_headers(ws_scan, max_col_scan, base_year=_nmes_base_year)
+            _prescan_sheet_ptypes[excel_name] = _get_sheet_period_type(sp_scan)
+
+        _needed_ptypes: set[str] = set(_prescan_sheet_ptypes.values()) - {"unknown"}
+        if not _needed_ptypes:
+            _needed_ptypes = {"monthly"}
+
+        _period_analytics: dict[str, tuple[str, dict]] = {}
+        _period_analytic_sort = 0
+        for ptype in sorted(_needed_ptypes, key=lambda x: ["monthly", "qhy", "yearly"].index(x) if x in ["monthly", "qhy", "yearly"] else 99):
+            if ptype == "monthly":
+                pt_list = list(all_period_types)
+                suffix = ""
+            elif ptype == "qhy":
+                pt_list = [t for t in all_period_types if t != "month"]
+                suffix = " (кварталы)"
+            elif ptype == "yearly":
+                pt_list = ["year"]
+                suffix = " (годы)"
+            else:
+                pt_list = list(all_period_types)
+                suffix = ""
+            if "year" not in pt_list:
+                pt_list = ["year"] + pt_list
+
+            pa_id = str(uuid.uuid4())
+            await db.execute(
+                """INSERT INTO analytics (id, model_id, name, code, icon, is_periods, data_type,
+                   period_types, period_start, period_end, sort_order)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (pa_id, model_id, f"Периоды{suffix}", f"periods_{ptype}",
+                 "CalendarMonthOutlined", 1, "sum",
+                 json.dumps(pt_list), period_start, period_end, _period_analytic_sort),
+            )
+            _period_analytic_sort += 1
+            for sort_i, (fname, fcode, ftype) in enumerate([
+                ("Наименование", "name", "string"),
+                ("Начало", "start", "date"),
+                ("Окончание", "end", "date"),
+            ]):
+                await db.execute(
+                    "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), pa_id, fname, fcode, ftype, sort_i),
+                )
+            rec_ids = await _create_period_hierarchy(db, pa_id, pt_list, start_d, end_d)
+            _period_analytics[ptype] = (pa_id, rec_ids)
+
+        _default_ptype = "monthly" if "monthly" in _period_analytics else list(_period_analytics.keys())[0]
+        period_analytic_id = _period_analytics[_default_ptype][0]
+        period_record_ids = _period_analytics[_default_ptype][1]
+        _all_period_record_ids: dict[str, dict[str, str]] = {}
+        for ptype, (_, rids) in _period_analytics.items():
+            _all_period_record_ids[ptype] = rids
+
+        total_period_count = sum(len(rids) for _, rids in _period_analytics.values())
+        yield event(f"Создана иерархия периодов: {period_start} — {period_end} ({total_period_count} периодов, {len(_period_analytics)} вариантов)")
 
         # Count total indicators across all sheets for progress
         def _count_indicators(items):
@@ -2162,15 +2274,11 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         done_indicators = 0
         yield event(f"📊 Всего {total_indicators} показателей в {len(sheets_config)} листах")
 
-        # Compute base_year for "N мес" sheets: Y0 shifts by +1
-        _base_year_raw = date.fromisoformat(period_config.get("start", "2026-01-01")).year
-        _nmes_base_year = _base_year_raw + (1 if _has_y0 else 0)
-
         # Process sheets (two passes: 1. create structure, 2. import cells)
         from backend.excel_formula_translator import translate_excel_formula
 
         created_sheets = []
-        analytic_sort = 1
+        analytic_sort = _period_analytic_sort
         sheet_sort = 0
         total_cells = 0
 
@@ -2234,7 +2342,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                              (pebble_sheet_id, model_id, sheet_display, sheet_sort, excel_name))
             sheet_sort += 1
 
-            for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
+            # Bind the right period analytic for this sheet's granularity
+            _sheet_ptype = _prescan_sheet_ptypes.get(excel_name, "monthly")
+            if _sheet_ptype not in _period_analytics:
+                _sheet_ptype = _default_ptype
+            _sheet_period_aid = _period_analytics[_sheet_ptype][0]
+
+            for bind_idx, aid in enumerate([_sheet_period_aid, indicator_analytic_id]):
                 is_main = 1 if aid == indicator_analytic_id else 0
                 await db.execute(
                     "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_main) VALUES (?,?,?,?,?)",
@@ -2324,17 +2438,23 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     except (ValueError, TypeError):
                         pass
 
+            # Use per-sheet period_record_ids based on sheet's period type
+            _sheet_ptype2 = _prescan_sheet_ptypes.get(excel_name, "monthly")
+            if _sheet_ptype2 not in _all_period_record_ids:
+                _sheet_ptype2 = _default_ptype
+            _sheet_period_rids = _all_period_record_ids[_sheet_ptype2]
+
             sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_nmes_base_year)
             col_to_period_rid = {}
             for sp in sheet_periods:
                 pkey = sp.get("period_key")
-                if pkey and pkey in period_record_ids:
-                    col_to_period_rid[sp["col"]] = period_record_ids[pkey]
+                if pkey and pkey in _sheet_period_rids:
+                    col_to_period_rid[sp["col"]] = _sheet_period_rids[pkey]
                 elif sp.get("date"):
                     d = sp["date"]
                     key = f"{d.year}-{d.month:02d}"
-                    if key in period_record_ids:
-                        col_to_period_rid[sp["col"]] = period_record_ids[key]
+                    if key in _sheet_period_rids:
+                        col_to_period_rid[sp["col"]] = _sheet_period_rids[key]
 
             sorted_period_cols = sorted(col_to_period_rid.keys())
             first_period_rid = col_to_period_rid[sorted_period_cols[0]] if sorted_period_cols else None

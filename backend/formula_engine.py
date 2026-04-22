@@ -324,12 +324,15 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
             if b["is_periods"]:
                 period_aid = aid
+                # Build prev_period chain for this period analytic
+                parent_ids = {r["parent_id"] for r in recs if r["parent_id"]}
+                _leaf_order = [r["id"] for r in recs if r["id"] not in parent_ids]
+                for i in range(1, len(_leaf_order)):
+                    if _leaf_order[i] not in prev_period:
+                        prev_period[_leaf_order[i]] = _leaf_order[i - 1]
                 if not period_aid_global:
                     period_aid_global = aid
-                    parent_ids = {r["parent_id"] for r in recs if r["parent_id"]}
-                    period_order = [r["id"] for r in recs if r["id"] not in parent_ids]
-                    for i in range(1, len(period_order)):
-                        prev_period[period_order[i]] = period_order[i - 1]
+                    period_order = _leaf_order
 
         # Indicator formula rules for this sheet, indexed by indicator_id.
         rules_by_indicator: dict[str, list[dict]] = {}
@@ -348,6 +351,17 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 "formula": r["formula"] or "",
             })
 
+        # Build period_key ↔ rid mappings for cross-sheet period translation
+        _rid_to_pk: dict[str, str] = {}
+        _pk_to_rid: dict[str, str] = {}
+        if period_aid:
+            for rid, rec in record_by_id.items():
+                data = rec.get("_data") or {}
+                pk = data.get("period_key", "")
+                if pk and rec.get("analytic_id") == period_aid:
+                    _rid_to_pk[rid] = pk
+                    _pk_to_rid[pk] = rid
+
         sheet_meta[sid] = {
             "ordered_aids": ordered_aids,
             "name_to_rids": name_to_rids,
@@ -358,6 +372,8 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             "analytic_name_to_id": analytic_name_to_id,
             "rules_by_indicator": rules_by_indicator,
             "name": sname,
+            "rid_to_period_key": _rid_to_pk,
+            "period_key_to_rid": _pk_to_rid,
         }
 
         for c in await db.execute_fetchall(
@@ -814,13 +830,43 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                         if not period_rid:
                             return 0.0
 
-        # Build coord key in target sheet's analytic order
+        # Build coord key in target sheet's analytic order.
+        # If source and target use different period analytics, translate
+        # the period_rid via period_key matching.
         target_ordered = target_meta["ordered_aids"]
         target_period_aid = target_meta["period_aid"]
+
+        target_period_rid = period_rid
+        if src_meta["period_aid"] != target_period_aid:
+            # Different period analytics — translate via period_key
+            src_pk = src_meta.get("rid_to_period_key", {}).get(period_rid)
+            if src_pk:
+                target_period_rid = target_meta.get("period_key_to_rid", {}).get(src_pk)
+                if not target_period_rid:
+                    # Source is more granular (monthly → yearly target):
+                    # try parent period keys (2025-07 → 2025-Y)
+                    import re as _re
+                    m = _re.match(r'(\d{4})-\d{2}$', src_pk)
+                    if m:
+                        for fallback_pk in [f"{m.group(1)}-Y"]:
+                            target_period_rid = target_meta.get("period_key_to_rid", {}).get(fallback_pk)
+                            if target_period_rid:
+                                break
+                    if not target_period_rid:
+                        # Try quarter/half fallbacks
+                        m2 = _re.match(r'(\d{4})-Q(\d)$', src_pk)
+                        if m2:
+                            target_period_rid = target_meta.get("period_key_to_rid", {}).get(f"{m2.group(1)}-Y")
+                        m3 = _re.match(r'(\d{4})-H(\d)$', src_pk)
+                        if m3:
+                            target_period_rid = target_meta.get("period_key_to_rid", {}).get(f"{m3.group(1)}-Y")
+                if not target_period_rid:
+                    return 0.0  # Can't map period between analytics
+
         ck_parts = []
         for aid in target_ordered:
             if aid == target_period_aid:
-                ck_parts.append(period_rid)
+                ck_parts.append(target_period_rid)
             else:
                 ck_parts.append(ind_rid)
         target_ck = "|".join(ck_parts)
