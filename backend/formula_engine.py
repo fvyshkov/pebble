@@ -379,9 +379,21 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         return False
 
     def _expand_children_one_level(coord_key: str, context: dict, meta: dict) -> list[str]:
-        """Cartesian of 1-level children along every consolidating axis (including main)."""
+        """Expand children along exactly ONE consolidating axis.
+
+        When multiple axes have children (e.g. parent period + parent indicator),
+        we must NOT take the Cartesian product — each axis is consolidated
+        independently by the outer consolidation loops.  Priority:
+        1. Period axis (quarter/year → months)
+        2. Main (indicator) axis (section total → leaf indicators)
+        3. Any other axis
+        """
         children = meta.get("children_by_rid", {})
         ordered_aids = meta["ordered_aids"]
+        period_aid = meta.get("period_aid")
+        main_aid = meta.get("main_aid")
+
+        # Find all axes that have children
         axes = []
         for aid in ordered_aids:
             rid = context.get(aid)
@@ -389,13 +401,31 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 axes.append((aid, children[rid]))
         if not axes:
             return []
+
+        # Pick ONE axis to expand — period first, then main, then other
+        chosen = None
+        for aid, ch in axes:
+            if aid == period_aid:
+                chosen = (aid, ch)
+                break
+        if not chosen:
+            for aid, ch in axes:
+                if aid == main_aid:
+                    chosen = (aid, ch)
+                    break
+        if not chosen:
+            chosen = axes[0]
+
+        expand_aid, expand_children = chosen
         combos = []
-        for prod in itertools.product(*[ch for _, ch in axes]):
-            new_parts = []
-            swap = {aid: crid for (aid, _), crid in zip(axes, prod)}
+        for crid in expand_children:
+            parts = []
             for aid in ordered_aids:
-                new_parts.append(swap.get(aid, context.get(aid, "")))
-            combos.append("|".join(new_parts))
+                if aid == expand_aid:
+                    parts.append(crid)
+                else:
+                    parts.append(context.get(aid, ""))
+            combos.append("|".join(parts))
         return combos
 
     def _resolve_indicator_formula(sheet_id: str, context: dict, meta: dict):
