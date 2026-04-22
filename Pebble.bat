@@ -15,6 +15,13 @@ if not exist ".venv" (
 call .venv\Scripts\activate.bat
 pip install -q -r requirements.txt 2>nul
 
+:: Load .env file (sets ANTHROPIC_API_KEY etc.)
+if exist ".env" (
+    for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
+        if not "%%A"=="" if not "%%A:~0,1%"=="#" set "%%A=%%B"
+    )
+)
+
 echo.
 echo  ========================================
 echo   Pebble: http://localhost:8000
