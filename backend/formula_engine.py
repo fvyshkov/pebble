@@ -191,7 +191,7 @@ def evaluate(formula: str, get_ref_value) -> float:
     def parse_unary():
         t = peek()
         if t and t[0] == "OP" and t[1] == "-":
-            advance(); return -parse_primary()
+            advance(); return -parse_unary()  # recursive for --x = x
         return parse_primary()
 
     def parse_primary():

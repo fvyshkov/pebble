@@ -615,8 +615,12 @@ _CELL_REF_SIMPLE = re.compile(r"(?<!')\b(\$?[A-Z]{1,3})(\$?\d+)\b")
 _CELL_REF_DOLLAR = re.compile(r"(?<!['\w])(\$?[A-Z]{1,3})(\$?\d+)(?=\b)")
 
 # External workbook refs: [11]CashCredit_dossym!D46 or [11]'Sheet Name'!D46
+# External workbook refs: [11]Sheet!D46, [11]'Sheet Name'!D46, '[12]Sheet Name'!D46
 _EXTERNAL_REF_RE = re.compile(
-    r"\[(\d+)\](?:'([^']+)'|([\w.+\-() ]+))!(\$?[A-Z]{1,3})(\$?\d+)",
+    r"(?:"
+    r"'?\[(\d+)\](?:'?([^'!]+)'?)"          # [N]Sheet or [N]'Sheet' or '[N]Sheet'
+    r"!(\$?[A-Z]{1,3})(\$?\d+)"
+    r")",
     re.UNICODE,
 )
 
@@ -628,6 +632,9 @@ class _ExternalRefSkip(Exception):
 
 def _has_external_refs(formula: str) -> bool:
     """Check if formula contains [number]Sheet!Cell external workbook references."""
+    # Quick check before running regex
+    if "[" not in formula:
+        return False
     return bool(_EXTERNAL_REF_RE.search(formula))
 
 
@@ -1911,6 +1918,12 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                         rule = "manual"
                         formula_text = ""
 
+                # Post-translation: if formula contains unparseable range `:` notation
+                # (from partially substituted SUM/AVERAGE ranges), fall back to manual
+                if rule == "formula" and formula_text and ":" in formula_text:
+                    rule = "manual"
+                    formula_text = ""
+
                 coord_key = f"{period_rid}|{indicator_rid}"
                 value_str = str(val)
 
@@ -2434,6 +2447,10 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         else:
                             rule = "manual"
                             formula_text = ""
+                    # Post-translation: if formula has unparseable `:` range, fall back to manual
+                    if rule == "formula" and formula_text and ":" in formula_text:
+                        rule = "manual"
+                        formula_text = ""
                     # First-period formula cells: preserve starting balances
                     if rule == "formula" and is_first and val != 0:
                         ft = formula_text.strip()
