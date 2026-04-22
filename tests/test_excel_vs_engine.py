@@ -500,7 +500,7 @@ def test_verify_all_values(model_id):
     #   - OPEX: matching error for "Итого CAPEX" ↔ "Итого"
     #   - BS/PL: cascading from incorrect values in upstream sheets
     match_pct = 100 * match / total if total else 0
-    BASELINE_PCT = 97.0  # raise as bugs are fixed
+    BASELINE_PCT = 99.0  # raise as bugs are fixed
     assert match_pct >= BASELINE_PCT, (
         f"Match rate {match_pct:.1f}% fell below baseline {BASELINE_PCT}%. "
         f"{len(mismatches)} of {total} cells don't match. See output above."

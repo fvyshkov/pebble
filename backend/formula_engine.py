@@ -625,8 +625,33 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 if len(rids) == 1:
                     ind_rid = rids[0]
                 else:
-                    # Use context from source to disambiguate
-                    ind_rid = rids[0]  # default to first
+                    # Disambiguate: use source indicator's name to find
+                    # a matching section in the target sheet.
+                    src_main = src_meta.get("main_aid")
+                    src_ind_rid = context.get(src_main) if src_main else None
+                    src_name = ""
+                    if src_ind_rid:
+                        src_rec = src_meta.get("record_by_id", {}).get(src_ind_rid, {})
+                        src_data = src_rec.get("_data") or {}
+                        src_name = src_data.get("name", "").lower()
+                    # Try to match section prefix from source name
+                    best_rid = rids[0]
+                    if src_name:
+                        target_rbi = target_meta.get("record_by_id", {})
+                        for crid in rids:
+                            # Walk up to section header in target
+                            node = target_rbi.get(crid, {}).get("parent_id")
+                            while node:
+                                prec = target_rbi.get(node, {})
+                                pdata = prec.get("_data") or {}
+                                pname = pdata.get("name", "").lower()
+                                if pname and pname in src_name:
+                                    best_rid = crid
+                                    break
+                                node = prec.get("parent_id")
+                            if best_rid != rids[0]:
+                                break
+                    ind_rid = best_rid
                 break
         if not ind_rid:
             return 0.0
@@ -693,14 +718,48 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             if len(candidates) == 1:
                 target_rid = candidates[0]; target_aid = aid; break
 
-            # Multiple records with same name — pick one with same parent
+            # Multiple records with same name — pick nearest by sort_order.
+            # Direct parent match first; if no match, walk up ancestors
+            # to find common section; finally fall back to closest sort_order.
             cur_rid = context.get(aid)
             if cur_rid:
-                cur_parent = record_by_id.get(cur_rid, {}).get("parent_id")
+                cur_rec = record_by_id.get(cur_rid, {})
+                cur_parent = cur_rec.get("parent_id")
+                # 1. Direct parent match
                 for crid in candidates:
                     crec = record_by_id.get(crid)
                     if crec and crec.get("parent_id") == cur_parent:
                         target_rid = crid; target_aid = aid; break
+                # 2. Common ancestor — pick candidate sharing deepest ancestor
+                if not target_rid:
+                    # Build ancestor list with depth (closer = higher depth)
+                    cur_ancestors = {}  # rid → depth
+                    node = cur_parent
+                    depth = 0
+                    while node:
+                        cur_ancestors[node] = depth
+                        node = record_by_id.get(node, {}).get("parent_id")
+                        depth += 1
+                    best_crid = None
+                    best_depth = float('inf')
+                    for crid in candidates:
+                        node = record_by_id.get(crid, {}).get("parent_id")
+                        while node:
+                            if node in cur_ancestors:
+                                d = cur_ancestors[node]
+                                if d < best_depth:
+                                    best_depth = d
+                                    best_crid = crid
+                                break
+                            node = record_by_id.get(node, {}).get("parent_id")
+                    if best_crid and best_depth < 10:  # reasonable depth
+                        target_rid = best_crid; target_aid = aid
+                # 3. Closest by sort_order
+                if not target_rid:
+                    cur_sort = cur_rec.get("sort_order", 0)
+                    best = min(candidates,
+                               key=lambda c: abs(record_by_id.get(c, {}).get("sort_order", 0) - cur_sort))
+                    target_rid = best; target_aid = aid
             if not target_rid:
                 target_rid = candidates[0]; target_aid = aid
             break
