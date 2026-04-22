@@ -613,7 +613,30 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         if not target_sid:
             return 0.0
         target_meta = sheet_meta[target_sid]
-        name_lower = ref["name"].lower()
+        raw_name = ref["name"]
+        name_lower = raw_name.lower()
+
+        # Handle "name#rowN" format
+        row_hint = None
+        if "#row" in name_lower:
+            nm, row_str = name_lower.rsplit("#row", 1)
+            name_lower = nm
+            try:
+                row_hint = int(row_str)
+            except ValueError:
+                pass
+
+        # Handle "parent/child" — only if exact name not found
+        parent_hint = None
+        found_exact = False
+        for aid, nmap in target_meta["name_to_rids"].items():
+            if aid == target_meta["period_aid"]: continue
+            if nmap.get(name_lower):
+                found_exact = True; break
+        if not found_exact and "/" in raw_name:
+            parts_split = raw_name.split("/", 1)
+            parent_hint = parts_split[0].strip().lower()
+            name_lower = parts_split[1].strip().lower()
 
         # Find indicator by exact name (case-insensitive)
         ind_rid = None
@@ -621,6 +644,31 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             if aid == target_meta["period_aid"]: continue
             rids = nmap.get(name_lower)
             if rids:
+                # Row hint — match by excel_row
+                if row_hint is not None:
+                    target_rbi = target_meta.get("record_by_id", {})
+                    for crid in rids:
+                        rec = target_rbi.get(crid, {})
+                        if rec.get("excel_row") == row_hint:
+                            ind_rid = crid; break
+                    if ind_rid:
+                        break
+
+                # Parent hint — filter by parent name
+                if parent_hint and len(rids) > 1:
+                    target_rbi = target_meta.get("record_by_id", {})
+                    for crid in rids:
+                        prec = target_rbi.get(crid, {})
+                        pid = prec.get("parent_id")
+                        if pid:
+                            parent_rec = target_rbi.get(pid, {})
+                            pdata = parent_rec.get("_data") or {}
+                            pname = pdata.get("name", "").lower()
+                            if pname == parent_hint:
+                                ind_rid = crid; break
+                    if ind_rid:
+                        break
+
                 # If multiple, pick one with same parent context
                 if len(rids) == 1:
                     ind_rid = rids[0]
@@ -699,7 +747,8 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
     def _resolve_local(ref, context, meta):
         """Resolve [indicator] local reference. Exact match only."""
-        name_lower = ref["name"].lower()
+        raw_name = ref["name"]
+        name_lower = raw_name.lower()
         params = ref.get("params", {})
         ordered_aids = meta["ordered_aids"]
         period_aid = meta["period_aid"]
@@ -707,13 +756,68 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         record_by_id = meta["record_by_id"]
         analytic_name_to_id = meta["analytic_name_to_id"]
 
+        # Handle "name#rowN" format — match by excel_row
+        row_hint = None
+        if "#row" in name_lower:
+            nm, row_str = name_lower.rsplit("#row", 1)
+            name_lower = nm
+            try:
+                row_hint = int(row_str)
+            except ValueError:
+                pass
+
+        # Handle "parent/child" disambiguation format.
+        # Only if: first try with full name fails, AND name has exactly
+        # one "/" without spaces around it (translator format: "Parent/Child")
+        parent_hint = None
+
         target_rid = None
         target_aid = None
+
+        # First try exact name match (handles names with "/" like "QR прием / оплата")
+        found_exact = False
+        for aid, nmap in name_to_rids.items():
+            if aid == period_aid: continue
+            candidates = nmap.get(name_lower, [])
+            if candidates:
+                found_exact = True
+                break
+
+        if not found_exact and "/" in raw_name:
+            # Try parent/child split only when exact match fails
+            parts_split = raw_name.split("/", 1)
+            parent_hint = parts_split[0].strip().lower()
+            name_lower = parts_split[1].strip().lower()
 
         for aid, nmap in name_to_rids.items():
             if aid == period_aid: continue
             candidates = nmap.get(name_lower, [])
             if not candidates: continue
+
+            # If we have a row hint, filter by excel_row
+            if row_hint is not None:
+                for crid in candidates:
+                    rec = record_by_id.get(crid, {})
+                    if rec.get("excel_row") == row_hint:
+                        target_rid = crid; target_aid = aid; break
+                if target_rid:
+                    break
+                # Row hint didn't match, fall through to normal resolution
+
+            # If we have a parent hint, filter candidates by parent name
+            if parent_hint and len(candidates) > 1:
+                filtered = []
+                for crid in candidates:
+                    prec = record_by_id.get(crid, {})
+                    pid = prec.get("parent_id")
+                    if pid:
+                        parent_rec = record_by_id.get(pid, {})
+                        pdata = parent_rec.get("_data") or {}
+                        pname = pdata.get("name", "").lower()
+                        if pname == parent_hint:
+                            filtered.append(crid)
+                if filtered:
+                    candidates = filtered
 
             if len(candidates) == 1:
                 target_rid = candidates[0]; target_aid = aid; break

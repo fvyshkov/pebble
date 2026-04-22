@@ -408,7 +408,12 @@ def _find_model() -> str | None:
         return None
     models = r.json()
     for m in reversed(models):
-        if any(hint in m["name"].lower() for hint in ["mis", "excel", "import", "model"]):
+        if any(hint in m["name"].lower() for hint in ["mis", "excelverify"]):
+            return m["id"]
+    # Fallback: match "model" but not ЦО/BaaS/ENG specific models
+    for m in reversed(models):
+        name_lower = m["name"].lower()
+        if "model" in name_lower and not any(x in name_lower for x in ["цо", "baas", "eng", "v18", "v12"]):
             return m["id"]
     if models:
         return models[-1]["id"]

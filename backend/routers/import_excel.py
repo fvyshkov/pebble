@@ -421,19 +421,30 @@ async def _analyze_workbook_with_claude(sheet_texts: dict[str, str], period_date
 
 # ── Detect periods from date headers (fallback) ───────────────────────────
 
-def _detect_periods_from_headers(ws, max_col: int) -> list[dict]:
+def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> list[dict]:
     """Detect period columns from date headers in the first 6 rows.
 
     Normalizes all dates to the 1st of the month — Excel formulas like
     =C4+31 accumulate drift (e.g. March 4 instead of March 1), but the
     intent is always month-start boundaries.
+
+    Supports formats:
+    - datetime objects (standard)
+    - "Январь 2026" text (Russian month + year)
+    - "N мес" / "N год" (numbered months/years, base_year used for offset)
     """
+    import re as _re_period
+
     # Build lowercase month-name → month-number lookup for text-based headers
     _MONTH_LOWER = {name.lower(): i + 1 for i, name in enumerate(MONTH_NAMES_RU)}
+    # "N мес" pattern: "1 мес", "12 мес", etc.
+    _NMES_RE = _re_period.compile(r'^(\d{1,2})\s*мес$', _re_period.IGNORECASE)
+    _NGOD_RE = _re_period.compile(r'^(\d{1,2})\s*год$', _re_period.IGNORECASE)
 
     periods = []
     date_row = None
     text_date_row = None  # fallback: row with text like "январь 2026"
+    nmes_row = None       # fallback: row with "N мес" format
 
     for r in range(1, 7):
         for c in range(1, min(max_col + 1, 50)):
@@ -441,41 +452,67 @@ def _detect_periods_from_headers(ws, max_col: int) -> list[dict]:
             if isinstance(v, datetime):
                 date_row = r
                 break
-            # Check for text-based month headers: "январь 2026", "Февраль 2025", etc.
-            if isinstance(v, str) and not text_date_row:
-                parts = v.strip().split()
-                if len(parts) == 2 and parts[0].lower() in _MONTH_LOWER:
-                    try:
-                        int(parts[1])
-                        text_date_row = r
-                    except ValueError:
-                        pass
+            if isinstance(v, str):
+                stripped = v.strip()
+                # Check "январь 2026"
+                if not text_date_row:
+                    parts = stripped.split()
+                    if len(parts) == 2 and parts[0].lower() in _MONTH_LOWER:
+                        try:
+                            int(parts[1])
+                            text_date_row = r
+                        except ValueError:
+                            pass
+                # Check "N мес"
+                if not nmes_row and _NMES_RE.match(stripped):
+                    nmes_row = r
         if date_row:
             break
 
-    if date_row is None and text_date_row is None:
+    if date_row is None and text_date_row is None and nmes_row is None:
         return []
 
     seen_months = set()
-    scan_row = date_row or text_date_row
+    scan_row = date_row or text_date_row or nmes_row
+
+    # For "N мес" format, we need to track cumulative month count
+    month_counter = 0
+
     for c in range(1, max_col + 1):
         v = ws.cell(scan_row, c).value
         year, month = None, None
+
         if isinstance(v, datetime):
             year, month = v.year, v.month
         elif isinstance(v, str):
-            parts = v.strip().split()
+            stripped = v.strip()
+            parts = stripped.split()
             if len(parts) == 2 and parts[0].lower() in _MONTH_LOWER:
                 try:
                     year = int(parts[1])
                     month = _MONTH_LOWER[parts[0].lower()]
                 except ValueError:
                     pass
+            elif nmes_row:
+                m_nmes = _NMES_RE.match(stripped)
+                if m_nmes:
+                    n = int(m_nmes.group(1))
+                    # "N мес" where N is 1-12 within a year block
+                    # month_counter tracks position across year blocks
+                    month_counter += 1
+                    year = base_year + (month_counter - 1) // 12
+                    month = ((month_counter - 1) % 12) + 1
+                else:
+                    m_god = _NGOD_RE.match(stripped)
+                    if m_god:
+                        # Year total — skip for monthly import
+                        continue
+
         if year and month:
             normalized = datetime(year, month, 1)
             month_key = f"{year}-{month:02d}"
             if month_key in seen_months:
-                continue  # Skip duplicate months
+                continue
             seen_months.add(month_key)
             periods.append({
                 "col": c,
@@ -792,6 +829,20 @@ _GROUP_PREFIX = _re.compile(
 )
 
 
+def _enrich_with_indent(indicators: list[dict], ws) -> None:
+    """Read Excel indent values and store them on each indicator dict."""
+    def _walk(items):
+        for item in items:
+            row = item.get("row")
+            if row:
+                cell = ws.cell(row, 1)
+                indent = cell.alignment.indent if cell.alignment and cell.alignment.indent else 0
+                item["_indent"] = int(indent)
+            if item.get("children"):
+                _walk(item["children"])
+    _walk(indicators)
+
+
 def _fix_indicator_hierarchy(indicators: list[dict]) -> list[dict]:
     """Post-process indicator list: ensure rows matching grouping name patterns
     (e.g. "в т.ч.:", "Итого") have subsequent rows nested as children.
@@ -841,6 +892,193 @@ def _fix_indicator_hierarchy(indicators: list[dict]) -> list[dict]:
             result.append(item)
             i += 1
 
+    # Second pass: indent-based grouping for remaining flat items.
+    # If item at indent=N is followed by items at indent>N, make it a group.
+    result = _fix_indent_grouping(result)
+
+    return result
+
+
+def _fix_indent_grouping(indicators: list[dict]) -> list[dict]:
+    """Group flat items based on Excel indent levels (_indent field)."""
+    # First, recursively fix children
+    for item in indicators:
+        if item.get("children"):
+            item["children"] = _fix_indent_grouping(item["children"])
+
+    # Check if any items have indent info
+    has_indent = any(item.get("_indent") is not None for item in indicators)
+    if not has_indent:
+        return indicators
+
+    result: list[dict] = []
+    i = 0
+    while i < len(indicators):
+        item = indicators[i]
+        cur_indent = item.get("_indent", 0)
+        already_group = item.get("is_group", False) and len(item.get("children", [])) > 0
+
+        if already_group:
+            result.append(item)
+            i += 1
+            continue
+
+        # Look ahead: if next item has deeper indent, this is a group header
+        if i + 1 < len(indicators):
+            next_indent = indicators[i + 1].get("_indent", 0)
+            if next_indent > cur_indent and not already_group:
+                # Collect all items with deeper indent as children
+                item["is_group"] = True
+                if item.get("rule") in (None, "manual", ""):
+                    item["rule"] = "sum_children"
+                existing_children = item.get("children", [])
+                j = i + 1
+                while j < len(indicators):
+                    nxt = indicators[j]
+                    nxt_indent = nxt.get("_indent", 0)
+                    if nxt_indent <= cur_indent:
+                        break
+                    existing_children.append(nxt)
+                    j += 1
+                item["children"] = existing_children
+                # Recursively fix the collected children too
+                item["children"] = _fix_indent_grouping(item["children"])
+                result.append(item)
+                i = j
+                continue
+
+        result.append(item)
+        i += 1
+
+    return result
+
+
+def _recover_missing_rows(indicators: list[dict], ws, data_start_col: int) -> list[dict]:
+    """Scan Excel sheet for data rows that Claude's analysis missed.
+
+    Claude sometimes omits large sections of a sheet (e.g. currency sub-groups).
+    This function finds rows with a name + numeric data in period columns
+    that are NOT already in the indicator list, and inserts them at the correct
+    position. Then re-runs indent grouping to establish hierarchy.
+    """
+    # 1. Collect all row numbers already present
+    known_rows: set[int] = set()
+    def _collect(items):
+        for item in items:
+            if item.get("row"):
+                known_rows.add(item["row"])
+            if item.get("children"):
+                _collect(item["children"])
+    _collect(indicators)
+
+    if not known_rows:
+        return indicators
+
+    min_row = min(known_rows)
+    max_row_known = max(known_rows)
+    # Extend scan beyond known max — Claude may have truncated early
+    max_row = min(ws.max_row or 1, max_row_known + 500, 2000)
+
+    max_col = min(ws.max_column or 1, 200)
+
+    # 2. Determine label column (usually 1, sometimes 2)
+    label_col = 1
+    # Heuristic: if most known indicators have labels in col B not col A, use B
+    b_count = 0
+    a_count = 0
+    for r in list(known_rows)[:20]:
+        va = ws.cell(r, 1).value
+        vb = ws.cell(r, 2).value
+        if va and str(va).strip():
+            a_count += 1
+        if vb and str(vb).strip():
+            b_count += 1
+    if b_count > a_count and a_count == 0:
+        label_col = 2
+
+    # 3. Scan for missing rows
+    recovered: list[dict] = []
+    for r in range(min_row, max_row + 1):
+        if r in known_rows:
+            continue
+
+        name_val = ws.cell(r, label_col).value
+        if name_val is None:
+            continue
+        name = str(name_val).strip()
+        if not name or len(name) > 200:
+            continue
+
+        # Check for numeric data in period columns
+        has_data = False
+        for c in range(data_start_col, min(data_start_col + 10, max_col + 1)):
+            cv = ws.cell(r, c).value
+            if cv is not None:
+                if isinstance(cv, (int, float)):
+                    has_data = True
+                    break
+                if isinstance(cv, str) and cv.startswith("="):
+                    has_data = True
+                    break
+
+        # Also accept rows that look like group headers (bold, no data)
+        is_bold = ws.cell(r, label_col).font and ws.cell(r, label_col).font.bold
+        is_group_by_name = bool(_GROUP_PATTERN.search(name)) or bool(_GROUP_PREFIX.match(name))
+        is_group_header = is_group_by_name or (is_bold and not has_data)
+
+        if not has_data and not is_group_header:
+            continue
+
+        # Read indent
+        cell = ws.cell(r, label_col)
+        indent = int(cell.alignment.indent) if cell.alignment and cell.alignment.indent else 0
+
+        # Read unit from next column
+        unit_val = ws.cell(r, label_col + 1).value
+        unit = str(unit_val).strip() if unit_val else ""
+
+        item = {
+            "name": name,
+            "unit": unit,
+            "row": r,
+            "is_group": is_group_header,
+            "children": [],
+            "rule": "sum_children" if is_group_header else "manual",
+            "_indent": indent,
+            "_recovered": True,
+        }
+        recovered.append(item)
+
+    if not recovered:
+        return indicators
+
+    # 4. Flatten existing indicators, merge with recovered, sort by row
+    flat: list[dict] = []
+    def _flatten(items):
+        for item in items:
+            # Strip existing hierarchy — we'll rebuild from indent
+            children = item.pop("children", [])
+            flat.append(item)
+            if children:
+                _flatten(children)
+    _flatten(indicators)
+
+    flat.extend(recovered)
+    flat.sort(key=lambda x: x.get("row", 0))
+
+    # 5. Re-enrich indent for items that don't have it yet
+    for item in flat:
+        if "_indent" not in item:
+            r = item.get("row")
+            if r:
+                cell = ws.cell(r, label_col)
+                indent = int(cell.alignment.indent) if cell.alignment and cell.alignment.indent else 0
+                item["_indent"] = indent
+
+    # 6. Rebuild hierarchy via indent grouping
+    result = _fix_indent_grouping(flat)
+    # Also run name-based grouping
+    result = _fix_indicator_hierarchy(result)
     return result
 
 
@@ -885,17 +1123,20 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
 
     await insert_items(indicators, None)
 
-    # Build row_to_name mapping for formula translator
+    # Build row_to_name and row_to_parent_name mappings for formula translator
     row_to_name: dict[int, str] = {}
-    def collect_names(items: list[dict]):
+    row_to_parent_name: dict[int, str] = {}
+    def collect_names(items: list[dict], parent_name: str | None = None):
         for item in items:
             if item.get("row") and item.get("name"):
                 row_to_name[item["row"]] = item["name"]
+                if parent_name:
+                    row_to_parent_name[item["row"]] = parent_name
             if item.get("children"):
-                collect_names(item["children"])
+                collect_names(item["children"], item.get("name"))
     collect_names(indicators)
 
-    return row_to_rid, rid_to_formula, row_to_name
+    return row_to_rid, rid_to_formula, row_to_name, row_to_parent_name
 
 
 # ── Main import endpoint ───────────────────────────────────────────────────
@@ -989,6 +1230,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     all_sheet_row_maps: dict[str, dict[int, str]] = {}  # {excel_sheet_name: {row: indicator_name}}
     all_sheet_display_names: dict[str, str] = {}  # {excel_sheet_name: pebble_display_name}
     all_sheet_data_starts: dict[str, int] = {}  # {excel_sheet_name: data_start_col}
+    all_row_to_parent_names: dict[str, dict[int, str]] = {}  # {excel_sheet_name_or___self__: {row: parent_name}}
     sheet_meta: list[dict] = []  # store per-sheet metadata for second pass
 
     for sheet_cfg in sheets_config:
@@ -1028,8 +1270,10 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 (fid, indicator_analytic_id, fname, fcode, ftype, sort_i),
             )
 
+        _enrich_with_indent(indicators, ws_d)
         indicators = _fix_indicator_hierarchy(indicators)
-        row_to_rid, rid_to_formula, row_to_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
+        indicators = _recover_missing_rows(indicators, ws_d, data_start_col)
+        row_to_rid, rid_to_formula, row_to_name, row_to_parent_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
         # Create Pebble sheet
         pebble_sheet_id = str(uuid.uuid4())
@@ -1062,6 +1306,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         all_sheet_row_maps[excel_name] = row_to_name
         all_sheet_display_names[excel_name] = sheet_display
         all_sheet_data_starts[excel_name] = data_start_col
+        all_row_to_parent_names[excel_name] = row_to_parent_name
 
         sheet_meta.append({
             "excel_name": excel_name,
@@ -1070,6 +1315,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             "row_to_rid": row_to_rid,
             "rid_to_formula": rid_to_formula,
             "row_to_name": row_to_name,
+            "row_to_parent_name": row_to_parent_name,
             "data_start_col": data_start_col,
         })
 
@@ -1081,6 +1327,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         row_to_rid = meta["row_to_rid"]
         rid_to_formula = meta["rid_to_formula"]
         row_to_name = meta["row_to_name"]
+        row_to_parent_name = meta.get("row_to_parent_name", {})
         data_start_col = meta["data_start_col"]
 
         ws_f = wb_formulas[excel_name]
@@ -1088,7 +1335,8 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
 
         # ── Import cell data ──
         # Build col -> month_record_id mapping from date headers
-        sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200))
+        _base_year = date.fromisoformat(period_config.get("start", "2026-01-01")).year
+        sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_base_year)
         col_to_period_rid = {}
         for sp in sheet_periods:
             d = sp["date"]
@@ -1134,6 +1382,9 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     if isinstance(excel_formula, str) and excel_formula.startswith("="):
                         rule = "formula"
                         try:
+                            # Build parent name maps: use __self__ for current sheet
+                            parent_maps = dict(all_row_to_parent_names)
+                            parent_maps["__self__"] = row_to_parent_name
                             formula_text = translate_excel_formula(
                                 excel_formula,
                                 base_col=col_num,
@@ -1143,6 +1394,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                                 sheet_display_names=all_sheet_display_names,
                                 is_first_period=is_first,
                                 sheet_data_starts=all_sheet_data_starts,
+                                row_to_parent_names=parent_maps,
                             )
                         except Exception:
                             # Fallback to Claude's formula if translator fails
@@ -1160,6 +1412,12 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
 
                 coord_key = f"{period_rid}|{indicator_rid}"
                 value_str = str(val)
+
+                # If formula is "0" but Excel has a real value (common for first-period
+                # cells referencing starting balances before data_start), use manual value
+                if rule == "formula" and formula_text.strip() == "0" and val != 0:
+                    rule = "manual"
+                    formula_text = ""
 
                 cid = str(uuid.uuid4())
                 try:
@@ -1364,6 +1622,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         all_sheet_row_maps: dict[str, dict[int, str]] = {}
         all_sheet_display_names: dict[str, str] = {}
         all_sheet_data_starts: dict[str, int] = {}
+        all_row_to_parent_names: dict[str, dict[int, str]] = {}
         sheet_meta: list[dict] = []
 
         for sheet_cfg in sheets_config:
@@ -1398,8 +1657,12 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     (str(uuid.uuid4()), indicator_analytic_id, fname, fcode, ftype, sort_i),
                 )
 
+            if excel_name in wb_data.sheetnames:
+                _enrich_with_indent(indicators, wb_data[excel_name])
             indicators = _fix_indicator_hierarchy(indicators)
-            row_to_rid, rid_to_formula, row_to_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
+            if excel_name in wb_data.sheetnames:
+                indicators = _recover_missing_rows(indicators, wb_data[excel_name], data_start_col)
+            row_to_rid, rid_to_formula, row_to_name, row_to_parent_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
             await db.execute("INSERT INTO sheets (id, model_id, name, sort_order, excel_code) VALUES (?,?,?,?,?)",
@@ -1426,6 +1689,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             all_sheet_row_maps[excel_name] = row_to_name
             all_sheet_display_names[excel_name] = sheet_display
             all_sheet_data_starts[excel_name] = data_start_col
+            all_row_to_parent_names[excel_name] = row_to_parent_name
 
             done_indicators += sheet_indicators
             sheet_meta.append({
@@ -1435,6 +1699,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 "row_to_rid": row_to_rid,
                 "rid_to_formula": rid_to_formula,
                 "row_to_name": row_to_name,
+                "row_to_parent_name": row_to_parent_name,
                 "data_start_col": data_start_col,
                 "sheet_indicators": sheet_indicators,
             })
@@ -1449,12 +1714,14 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             row_to_rid = meta["row_to_rid"]
             rid_to_formula = meta["rid_to_formula"]
             row_to_name = meta["row_to_name"]
+            row_to_parent_name = meta.get("row_to_parent_name", {})
             data_start_col = meta["data_start_col"]
 
             ws_f = wb_formulas[excel_name]
             ws_d = wb_data[excel_name]
 
-            sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200))
+            _base_year2 = date.fromisoformat(period_config.get("start", "2026-01-01")).year
+            sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_base_year2)
             col_to_period_rid = {}
             for sp in sheet_periods:
                 d = sp["date"]
@@ -1488,6 +1755,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         if isinstance(excel_formula, str) and excel_formula.startswith("="):
                             rule = "formula"
                             try:
+                                parent_maps = dict(all_row_to_parent_names)
+                                parent_maps["__self__"] = row_to_parent_name
                                 formula_text = translate_excel_formula(
                                     excel_formula,
                                     base_col=col_num,
@@ -1497,6 +1766,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                     sheet_display_names=all_sheet_display_names,
                                     is_first_period=is_first,
                                     sheet_data_starts=all_sheet_data_starts,
+                                    row_to_parent_names=parent_maps,
                                 )
                             except Exception:
                                 formula_text = (formula_info or {}).get("formula", excel_formula)
@@ -1509,6 +1779,11 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         else:
                             rule = "manual"
                             formula_text = ""
+                    # If formula is "0" but Excel has a real value, use manual value
+                    if rule == "formula" and formula_text.strip() == "0" and val != 0:
+                        rule = "manual"
+                        formula_text = ""
+
                     try:
                         await db.execute(
                             "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",

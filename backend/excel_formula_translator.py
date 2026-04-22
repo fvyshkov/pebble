@@ -18,19 +18,22 @@ from openpyxl.utils import column_index_from_string
 # ── Excel cell reference parser ────────────────────────────────────────────
 
 # Matches: 'Sheet Name'!E19, Sheet!E19, E19, $E$19, E$19, $E19
+# Note: \w with re.UNICODE matches Cyrillic and other Unicode word chars
 CELL_REF_RE = re.compile(
-    r"(?:'([^']+)'|([A-Za-z0-9_.]+))!"         # optional sheet prefix (quoted or simple name)
+    r"(?:'([^']+)'|([\w.+\-]+))!"              # optional sheet prefix (quoted or simple name, Unicode-aware)
     r"(\$?[A-Z]{1,3})(\$?\d+)"                # column + row
     r"|"                                        # OR
-    r"(\$?[A-Z]{1,3})(\$?\d+)"                # bare column + row
+    r"(\$?[A-Z]{1,3})(\$?\d+)",               # bare column + row
+    re.UNICODE,
 )
 
 # Matches Excel range like E19:E25 or 'Sheet'!E19:E25
 RANGE_RE = re.compile(
-    r"(?:(?:'([^']+)'|([A-Za-z0-9_.\+\- ]+))!)?"
+    r"(?:(?:'([^']+)'|([\w.+\- ]+))!)?"
     r"(\$?[A-Z]{1,3})(\$?\d+)"
     r":"
-    r"(\$?[A-Z]{1,3})(\$?\d+)"
+    r"(\$?[A-Z]{1,3})(\$?\d+)",
+    re.UNICODE,
 )
 
 # SUM(range) pattern
@@ -58,6 +61,7 @@ def translate_excel_formula(
     sheet_display_names: dict[str, str] | None = None,
     is_first_period: bool = False,
     sheet_data_starts: dict[str, int] | None = None,
+    row_to_parent_names: dict[str, dict[int, str]] | None = None,
 ) -> str:
     """Translate an Excel formula to Pebble formula syntax.
 
@@ -70,6 +74,7 @@ def translate_excel_formula(
         sheet_display_names: {excel_sheet_name: pebble_display_name} for cross-sheet refs
         is_first_period: True if this is the first period column
         sheet_data_starts: {excel_sheet_name: data_start_col} for cross-sheet period alignment
+        row_to_parent_names: {sheet_name_or___self__: {row: parent_name}} for disambiguation
 
     Returns:
         Pebble formula string (without =)
@@ -95,7 +100,7 @@ def translate_excel_formula(
     result = _replace_cell_refs(
         formula, base_col, data_start_col, row_to_name,
         sheet_row_maps, sheet_display_names, is_first_period,
-        sheet_data_starts,
+        sheet_data_starts, row_to_parent_names,
     )
 
     return result
@@ -149,6 +154,7 @@ def _replace_cell_refs(
     sheet_display_names: dict[str, str],
     is_first_period: bool,
     sheet_data_starts: dict[str, int] | None = None,
+    row_to_parent_names: dict[str, dict[int, str]] | None = None,
 ) -> str:
     """Replace all cell references in formula with [name] or [Sheet::name] tokens."""
 
@@ -185,7 +191,7 @@ def _replace_cell_refs(
         replacement = _translate_ref(
             ref, base_col, data_start_col, row_to_name,
             sheet_row_maps, sheet_display_names, is_first_period,
-            sheet_data_starts,
+            sheet_data_starts, row_to_parent_names,
         )
         result = result[:ref["start"]] + replacement + result[ref["end"]:]
 
@@ -201,12 +207,14 @@ def _translate_ref(
     sheet_display_names: dict[str, str],
     is_first_period: bool,
     sheet_data_starts: dict[str, int] | None = None,
+    row_to_parent_names: dict[str, dict[int, str]] | None = None,
 ) -> str:
     """Translate a single cell reference to Pebble [name] token."""
     sheet_name = ref["sheet"]
     col = ref["col"]
     row = ref["row"]
     sheet_data_starts = sheet_data_starts or {}
+    row_to_parent_names = row_to_parent_names or {}
 
     # Determine indicator name
     if sheet_name:
@@ -219,6 +227,27 @@ def _translate_ref(
     name = rmap.get(row)
     if name is None:
         return ref["original"]  # Can't resolve — keep original
+
+    # Check if name is duplicate in the row map — if so, disambiguate
+    name_lower = name.lower()
+    duplicates = sum(1 for r, n in rmap.items() if n.lower() == name_lower)
+    if duplicates > 1:
+        target_sheet = sheet_name or "__self__"
+        parent_map = row_to_parent_names.get(target_sheet, {})
+        parent_name = parent_map.get(row)
+        if parent_name:
+            # Check if parent/child combo is unique
+            qual_dups = sum(
+                1 for r, n in rmap.items()
+                if n.lower() == name_lower
+                and parent_map.get(r, "").lower() == parent_name.lower()
+            )
+            if qual_dups <= 1:
+                name = f"{parent_name}/{name}"
+            else:
+                name = f"{name}#row{row}"
+        else:
+            name = f"{name}#row{row}"
 
     # Determine period modifier using period index alignment
     # Period index = col - data_start for that sheet
