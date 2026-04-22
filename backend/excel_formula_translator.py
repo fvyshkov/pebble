@@ -126,8 +126,23 @@ def _expand_sum_ranges(
         col2 = rm.group(5)
         row2 = _row_num(rm.group(6))
 
-        if col1.replace("$", "") != col2.replace("$", ""):
-            return m.group(0)  # Multi-column range — don't expand
+        col1_clean = col1.replace("$", "")
+        col2_clean = col2.replace("$", "")
+
+        if col1_clean != col2_clean and row1 == row2:
+            # Horizontal range (same row, different cols): D5:N5
+            # Expand to D5,E5,F5,...,N5
+            from openpyxl.utils import get_column_letter
+            c1 = _col_num(col1)
+            c2 = _col_num(col2)
+            prefix = f"'{sheet1}'!" if sheet1 else ""
+            refs = [f"{prefix}{get_column_letter(c)}{row1}" for c in range(c1, c2 + 1)]
+            if refs:
+                return f"SUM({','.join(refs)})"
+            return m.group(0)
+
+        if col1_clean != col2_clean:
+            return m.group(0)  # Multi-column multi-row range — don't expand
 
         rmap = row_to_name
         if sheet1:
