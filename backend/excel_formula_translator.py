@@ -269,12 +269,10 @@ def _translate_ref(
 
     if period_diff < 0:
         n_back = abs(period_diff)
-        # Reference to a previous period
-        if is_first_period and ref_period_idx < 0:
-            # Before first data column — use starting value if available
+        # Reference to column before data_start — always use starting value
+        if ref_period_idx < 0:
             starting_val = pre_data_values.get(row)
             if starting_val is not None and starting_val != 0:
-                # Format: remove trailing zeros for cleaner formulas
                 s = f"{starting_val:.10f}".rstrip("0").rstrip(".")
                 return s
             return "0"

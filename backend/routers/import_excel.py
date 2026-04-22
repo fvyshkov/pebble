@@ -1621,7 +1621,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                                 is_first_period=is_first,
                                 sheet_data_starts=all_sheet_data_starts,
                                 row_to_parent_names=parent_maps,
-                                pre_data_values=pre_data_values if is_first else None,
+                                pre_data_values=pre_data_values,
                             )
                         except Exception:
                             # Fallback to Claude's formula if translator fails
@@ -2074,7 +2074,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                     is_first_period=is_first,
                                     sheet_data_starts=all_sheet_data_starts,
                                     row_to_parent_names=parent_maps,
-                                    pre_data_values=pre_data_values if is_first else None,
+                                    pre_data_values=pre_data_values,
                                 )
                             except Exception:
                                 formula_text = (formula_info or {}).get("formula", excel_formula)
