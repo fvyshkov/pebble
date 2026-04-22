@@ -315,6 +315,12 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 if not c["formula"].startswith("="):
                     global_formulas[gk] = c["formula"]
 
+    # Track manual cells — they must not be overwritten by consolidation
+    _manual_cells: set[tuple] = set()
+    for gk in global_cells:
+        if gk not in global_formulas:
+            _manual_cells.add(gk)
+
     # Track original DB cell keys (before computation adds synthetic ones)
     _original_cell_keys = set(global_cells.keys())
     # Snapshot original values so we can detect what actually changed.
@@ -577,7 +583,9 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 return result
 
         # ── 3. Consolidating coord with no formula → default SUM over children
-        if _is_consolidating(context, meta):
+        # But skip consolidation for manual cells — they have user-entered values
+        # that must not be overwritten (e.g. yearly-only sheets like Product/Funnel)
+        if _is_consolidating(context, meta) and gk not in _manual_cells:
             computing_set.add(gk)
             children_cks = list(_expand_children_one_level(coord_key, context, meta))
             total = 0.0

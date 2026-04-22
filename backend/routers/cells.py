@@ -172,10 +172,12 @@ async def _recalc_model(db, sheet_id: str) -> int:
     total = 0
     for sid, changes in result.items():
         for ck, val in changes.items():
+            # Never overwrite manually-entered values — only create/update formula cells
             await db.execute(
                 """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
                    VALUES (?, ?, ?, ?, 'formula')
-                   ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value""",
+                   ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value
+                   WHERE rule != 'manual'""",
                 (str(__import__('uuid').uuid4()), sid, ck, val),
             )
         total += len(changes)

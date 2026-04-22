@@ -452,8 +452,10 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
     text_date_row = None
     nmes_row = None
     qhy_row = None  # row with Q1/H1/Y0 etc
+    bare_year_row = None  # row with bare year numbers (2024, 2025, ...)
 
     for r in range(1, 21):
+        row_year_count = 0
         for c in range(1, min(max_col + 1, 50)):
             v = ws.cell(r, c).value
             if v is None:
@@ -461,6 +463,9 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
 
             if isinstance(v, datetime) and not date_row:
                 date_row = r
+
+            if isinstance(v, (int, float)) and 2020 <= v <= 2040:
+                row_year_count += 1
 
             if isinstance(v, str):
                 stripped = v.strip()
@@ -476,6 +481,10 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
                     nmes_row = r
                 if not qhy_row and _QHY_RE.match(stripped):
                     qhy_row = r
+
+        # Bare year row: 3+ year numbers, no more specific header type found yet
+        if row_year_count >= 3 and not bare_year_row:
+            bare_year_row = r
 
     # ── Phase 2: For Q/H/Y, find the year row ──
     year_row = None
@@ -499,14 +508,14 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
                 break
 
     # ── Phase 3: No header found at all → return empty ──
-    if date_row is None and text_date_row is None and nmes_row is None and qhy_row is None:
+    if date_row is None and text_date_row is None and nmes_row is None and qhy_row is None and bare_year_row is None:
         return []
 
     # ── Phase 4: Build period list ──
-    # Prefer Q/H/Y over dates (more specific period structure)
+    # Prefer Q/H/Y over dates, then N мес, then bare years (least specific)
     periods = []
     seen_keys = set()
-    scan_row = qhy_row or date_row or text_date_row or nmes_row
+    scan_row = qhy_row or date_row or text_date_row or nmes_row or bare_year_row
     month_counter = 0  # for "N мес" format
 
     for c in range(1, max_col + 1):
@@ -520,6 +529,12 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
             period_key = f"{year}-{month:02d}"
             name = f"{MONTH_NAMES_RU[month - 1]} {year}"
             dt = datetime(year, month, 1)
+
+        elif isinstance(v, (int, float)) and 2020 <= v <= 2040 and scan_row == bare_year_row:
+            # Bare year number (2024, 2025, ...) on a yearly sheet
+            year = int(v)
+            period_key = f"{year}-Y"
+            name = str(year)
 
         elif isinstance(v, str):
             stripped = v.strip()
@@ -637,6 +652,104 @@ def _substitute_total_col_refs(
         else:
             result_parts.append(_CELL_REF_SIMPLE.sub(replace_match, part))
     return "".join(result_parts)
+
+
+# ── Cross-period-level reference substitution ────────────────────────────
+
+_CROSS_SHEET_REF_RE = re.compile(
+    r"'([^']+)'!(\$?[A-Z]{1,3})(\$?\d+)"   # quoted: 'Sheet Name'!E19
+    r"|"
+    r"(?<!['\w])([A-Za-z\w.+\-]+)!(\$?[A-Z]{1,3})(\$?\d+)",  # unquoted: Sheet!E19
+    re.UNICODE,
+)
+
+
+def _get_sheet_period_type(sheet_periods: list[dict]) -> str:
+    """Categorize sheet as 'monthly', 'qhy', or 'yearly' based on its period keys."""
+    has_month = has_qhy = has_year = False
+    for sp in sheet_periods:
+        pk = sp.get("period_key", "")
+        if re.match(r'\d{4}-\d{2}$', pk):
+            has_month = True
+        elif "-Q" in pk or "-H" in pk:
+            has_qhy = True
+        elif pk.endswith("-Y"):
+            has_year = True
+    if has_month:
+        return "monthly"
+    if has_qhy:
+        return "qhy"
+    if has_year:
+        return "yearly"
+    return "unknown"
+
+
+def _substitute_cross_period_refs(
+    formula: str,
+    source_period_type: str,
+    sheet_period_types: dict[str, str],
+    wb_data,
+    all_sheet_total_cols: dict[str, set[int]] | None = None,
+) -> str:
+    """Replace cross-sheet refs with Excel values when period alignment can't work.
+
+    Substitutes when:
+    1. Target sheet has a different period type (monthly→qhy, etc.)
+    2. Target column is a total column (year/quarter/half) in another sheet —
+       even if both sheets share the same period type, because the formula engine
+       can't correctly consolidate cross-sheet year-total values.
+    """
+    from openpyxl.utils import column_index_from_string
+
+    def replace_match(m):
+        if m.group(1):
+            # Quoted: 'Sheet Name'!E19
+            sheet_name = m.group(1)
+            col_str = m.group(2).replace("$", "")
+            row_str = m.group(3).replace("$", "")
+        elif m.group(4):
+            # Unquoted: Sheet!E19
+            sheet_name = m.group(4)
+            col_str = m.group(5).replace("$", "")
+            row_str = m.group(6).replace("$", "")
+        else:
+            return m.group(0)
+
+        target_type = sheet_period_types.get(sheet_name)
+        should_substitute = False
+
+        if target_type is not None and target_type != source_period_type:
+            # Different period type — always substitute
+            should_substitute = True
+        elif all_sheet_total_cols:
+            # Same period type — check if target column is a total column
+            try:
+                col_num = column_index_from_string(col_str)
+                target_totals = all_sheet_total_cols.get(sheet_name)
+                if target_totals and col_num in target_totals:
+                    should_substitute = True
+            except (ValueError, KeyError):
+                pass
+
+        if not should_substitute:
+            return m.group(0)
+
+        # Substitute with actual Excel value
+        try:
+            if sheet_name not in wb_data.sheetnames:
+                return m.group(0)
+            ws = wb_data[sheet_name]
+            col_num = column_index_from_string(col_str)
+            row_num = int(row_str)
+            v = ws.cell(row_num, col_num).value
+            if v is None:
+                return "0"
+            fv = float(v)
+            return f"{fv:.10f}".rstrip("0").rstrip(".")
+        except (ValueError, TypeError, KeyError):
+            return m.group(0)
+
+    return _CROSS_SHEET_REF_RE.sub(replace_match, formula)
 
 
 # ── Total column detection (year / quarter totals) ────────────────────────
@@ -885,7 +998,8 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
             await db.execute(
                 "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
                 (year_id, analytic_id, None, sort, json.dumps(
-                    {"name": str(year), "start": str(year_start), "end": str(year_end)},
+                    {"name": str(year), "start": str(year_start), "end": str(year_end),
+                     "period_key": f"{year}-Y"},
                     ensure_ascii=False)),
             )
             period_record_ids[f"{year}-Y"] = year_id
@@ -908,7 +1022,8 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
                     "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
                     (hid, analytic_id, year_id, sort, json.dumps(
                         {"name": f"{'1-е' if h == 1 else '2-е'} полугодие {year}",
-                         "start": str(h_start), "end": str(h_end)},
+                         "start": str(h_start), "end": str(h_end),
+                         "period_key": f"{year}-H{h}"},
                         ensure_ascii=False)),
                 )
                 period_record_ids[f"{year}-H{h}"] = hid
@@ -935,7 +1050,8 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
                 await db.execute(
                     "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
                     (quarter_id, analytic_id, quarter_parent, sort, json.dumps(
-                        {"name": f"{QUARTER_NAMES_RU[q]} {year}", "start": str(q_start), "end": str(q_end)},
+                        {"name": f"{QUARTER_NAMES_RU[q]} {year}", "start": str(q_start), "end": str(q_end),
+                         "period_key": f"{year}-Q{q + 1}"},
                         ensure_ascii=False)),
                 )
                 period_record_ids[f"{year}-Q{q + 1}"] = quarter_id
@@ -954,7 +1070,8 @@ async def _create_period_hierarchy(db, analytic_id: str, period_types: list[str]
                     await db.execute(
                         "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
                         (mid, analytic_id, parent, sort, json.dumps(
-                            {"name": f"{MONTH_NAMES_RU[m - 1]} {year}", "start": str(m_start), "end": str(m_end)},
+                            {"name": f"{MONTH_NAMES_RU[m - 1]} {year}", "start": str(m_start), "end": str(m_end),
+                             "period_key": f"{year}-{m:02d}"},
                             ensure_ascii=False)),
                     )
                     period_record_ids[f"{year}-{m:02d}"] = mid
@@ -1310,6 +1427,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     sheet_texts = {}
     all_dates = []
     detected_period_types = set()  # "month", "quarter", "half", "year"
+    _has_y0 = False  # Track if Y0 baseline period exists (shifts monthly base_year by +1)
     _qhy_re_scan = re.compile(r'^([QHY])(\d+)$', re.IGNORECASE)
     _nmes_re_scan = re.compile(r'^\d{1,2}\s*мес$', re.IGNORECASE)
     for sn in wb_formulas.sheetnames:
@@ -1329,12 +1447,15 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                         m = _qhy_re_scan.match(stripped)
                         if m:
                             letter = m.group(1).upper()
+                            num = int(m.group(2))
                             if letter == 'Q':
                                 detected_period_types.add("quarter")
                             elif letter == 'H':
                                 detected_period_types.add("half")
                             elif letter == 'Y':
                                 detected_period_types.add("year")
+                                if num == 0:
+                                    _has_y0 = True
                         elif _nmes_re_scan.match(stripped):
                             detected_period_types.add("month")
                     # Detect year numbers in header rows (2024, 2025, etc.)
@@ -1398,6 +1519,10 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     end_d = date.fromisoformat(period_end)
     period_record_ids = await _create_period_hierarchy(db, period_analytic_id, period_types, start_d, end_d)
 
+    # Compute base_year for "N мес" sheets: if Y0 exists, monthly data starts 1 year after
+    _base_year_raw = date.fromisoformat(period_config.get("start", "2026-01-01")).year
+    _nmes_base_year = _base_year_raw + (1 if _has_y0 else 0)
+
     # ── Step 5: Process each sheet (two passes: 1. create structure, 2. import cells) ──
     from backend.excel_formula_translator import translate_excel_formula
 
@@ -1410,6 +1535,8 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     all_sheet_display_names: dict[str, str] = {}  # {excel_sheet_name: pebble_display_name}
     all_sheet_data_starts: dict[str, int] = {}  # {excel_sheet_name: data_start_col}
     all_row_to_parent_names: dict[str, dict[int, str]] = {}  # {excel_sheet_name_or___self__: {row: parent_name}}
+    all_sheet_period_types: dict[str, str] = {}  # {excel_sheet_name: "monthly"|"qhy"|"yearly"}
+    all_sheet_total_cols: dict[str, set[int]] = {}  # {excel_sheet_name: set of total column numbers}
     sheet_meta: list[dict] = []  # store per-sheet metadata for second pass
     _used_display_names: set[str] = set()  # track used names to avoid duplicates
 
@@ -1494,6 +1621,16 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         all_sheet_data_starts[excel_name] = data_start_col
         all_row_to_parent_names[excel_name] = row_to_parent_name
 
+        # Detect period type and total columns for cross-sheet substitution
+        _sp_fp = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_nmes_base_year)
+        all_sheet_period_types[excel_name] = _get_sheet_period_type(_sp_fp)
+        _tc = set()
+        for _spp in _sp_fp:
+            pk = _spp.get("period_key", "")
+            if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                _tc.add(_spp["col"])
+        all_sheet_total_cols[excel_name] = _tc
+
         sheet_meta.append({
             "excel_name": excel_name,
             "sheet_display": sheet_display,
@@ -1535,8 +1672,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
 
         # ── Import cell data ──
         # Build col -> period_record_id mapping from headers
-        _base_year = date.fromisoformat(period_config.get("start", "2026-01-01")).year
-        sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_base_year)
+        sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_nmes_base_year)
         col_to_period_rid = {}
         for sp in sheet_periods:
             pkey = sp.get("period_key")
@@ -1615,6 +1751,11 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                             if total_cols and col_num not in total_cols:
                                 excel_formula = _substitute_total_col_refs(
                                     excel_formula, ws_d, row_num, total_cols, data_start_col)
+                            # Pre-substitute: replace cross-sheet refs to different period types or total columns
+                            src_ptype = all_sheet_period_types.get(excel_name, "unknown")
+                            if src_ptype != "unknown":
+                                excel_formula = _substitute_cross_period_refs(
+                                    excel_formula, src_ptype, all_sheet_period_types, wb_data, all_sheet_total_cols)
                             # Build parent name maps: use __self__ for current sheet
                             parent_maps = dict(all_row_to_parent_names)
                             parent_maps["__self__"] = row_to_parent_name
@@ -1733,6 +1874,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         sheet_texts = {}
         all_dates = []
         detected_period_types = set()
+        _has_y0 = False
         _qhy_re_scan2 = re.compile(r'^([QHY])(\d+)$', re.IGNORECASE)
         _nmes_re_scan2 = re.compile(r'^\d{1,2}\s*мес$', re.IGNORECASE)
         for sn in sheet_names:
@@ -1751,12 +1893,15 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             m = _qhy_re_scan2.match(stripped)
                             if m:
                                 letter = m.group(1).upper()
+                                num = int(m.group(2))
                                 if letter == 'Q':
                                     detected_period_types.add("quarter")
                                 elif letter == 'H':
                                     detected_period_types.add("half")
                                 elif letter == 'Y':
                                     detected_period_types.add("year")
+                                    if num == 0:
+                                        _has_y0 = True
                             elif _nmes_re_scan2.match(stripped):
                                 detected_period_types.add("month")
                         if isinstance(v, (int, float)) and 2020 <= v <= 2040 and r <= 10:
@@ -1883,6 +2028,10 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         done_indicators = 0
         yield event(f"📊 Всего {total_indicators} показателей в {len(sheets_config)} листах")
 
+        # Compute base_year for "N мес" sheets: Y0 shifts by +1
+        _base_year_raw = date.fromisoformat(period_config.get("start", "2026-01-01")).year
+        _nmes_base_year = _base_year_raw + (1 if _has_y0 else 0)
+
         # Process sheets (two passes: 1. create structure, 2. import cells)
         from backend.excel_formula_translator import translate_excel_formula
 
@@ -1896,6 +2045,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         all_sheet_display_names: dict[str, str] = {}
         all_sheet_data_starts: dict[str, int] = {}
         all_row_to_parent_names: dict[str, dict[int, str]] = {}
+        all_sheet_period_types: dict[str, str] = {}
+        all_sheet_total_cols: dict[str, set[int]] = {}
         sheet_meta: list[dict] = []
         _used_display_names2: set[str] = set()
 
@@ -1970,6 +2121,19 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             all_sheet_data_starts[excel_name] = data_start_col
             all_row_to_parent_names[excel_name] = row_to_parent_name
 
+            # Detect period type and total columns for cross-sheet substitution
+            _sp_fp2 = _detect_periods_from_headers(
+                wb_data[excel_name] if excel_name in wb_data.sheetnames else wb_formulas[excel_name],
+                min((wb_data[excel_name].max_column if excel_name in wb_data.sheetnames else wb_formulas[excel_name].max_column) or 1, 200),
+                base_year=_nmes_base_year)
+            all_sheet_period_types[excel_name] = _get_sheet_period_type(_sp_fp2)
+            _tc2 = set()
+            for _spp2 in _sp_fp2:
+                pk = _spp2.get("period_key", "")
+                if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                    _tc2.add(_spp2["col"])
+            all_sheet_total_cols[excel_name] = _tc2
+
             done_indicators += sheet_indicators
             sheet_meta.append({
                 "excel_name": excel_name,
@@ -2013,8 +2177,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     except (ValueError, TypeError):
                         pass
 
-            _base_year2 = date.fromisoformat(period_config.get("start", "2026-01-01")).year
-            sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_base_year2)
+            sheet_periods = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_nmes_base_year)
             col_to_period_rid = {}
             for sp in sheet_periods:
                 pkey = sp.get("period_key")
@@ -2075,6 +2238,11 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                 if total_cols2 and col_num not in total_cols2:
                                     excel_formula = _substitute_total_col_refs(
                                         excel_formula, ws_d, row_num, total_cols2, data_start_col)
+                                # Pre-substitute cross-sheet refs to different period types or total columns
+                                src_ptype = all_sheet_period_types.get(excel_name, "unknown")
+                                if src_ptype != "unknown":
+                                    excel_formula = _substitute_cross_period_refs(
+                                        excel_formula, src_ptype, all_sheet_period_types, wb_data, all_sheet_total_cols)
                                 parent_maps = dict(all_row_to_parent_names)
                                 parent_maps["__self__"] = row_to_parent_name
                                 formula_text = translate_excel_formula(
