@@ -1411,11 +1411,18 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     all_sheet_data_starts: dict[str, int] = {}  # {excel_sheet_name: data_start_col}
     all_row_to_parent_names: dict[str, dict[int, str]] = {}  # {excel_sheet_name_or___self__: {row: parent_name}}
     sheet_meta: list[dict] = []  # store per-sheet metadata for second pass
+    _used_display_names: set[str] = set()  # track used names to avoid duplicates
 
     for sheet_cfg in sheets_config:
         excel_name = sheet_cfg["excel_name"]
         display_name = sheet_cfg.get("display_name", excel_name)
         sheet_display = display_name if display_name != excel_name else excel_name
+        # Ensure unique display names (duplicate names break cross-sheet refs)
+        if sheet_display in _used_display_names:
+            sheet_display = excel_name  # fall back to Excel name
+            if sheet_display in _used_display_names:
+                sheet_display = f"{excel_name} (2)"
+        _used_display_names.add(sheet_display)
         indicators = sheet_cfg.get("indicators", [])
         data_start_col = sheet_cfg.get("data_start_col", 4)
 
@@ -1890,11 +1897,17 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         all_sheet_data_starts: dict[str, int] = {}
         all_row_to_parent_names: dict[str, dict[int, str]] = {}
         sheet_meta: list[dict] = []
+        _used_display_names2: set[str] = set()
 
         for sheet_cfg in sheets_config:
             excel_name = sheet_cfg["excel_name"]
             display_name = sheet_cfg.get("display_name", excel_name)
             sheet_display = display_name if display_name != excel_name else excel_name
+            if sheet_display in _used_display_names2:
+                sheet_display = excel_name
+                if sheet_display in _used_display_names2:
+                    sheet_display = f"{excel_name} (2)"
+            _used_display_names2.add(sheet_display)
             indicators = sheet_cfg.get("indicators", [])
             data_start_col = sheet_cfg.get("data_start_col", 4)
 
