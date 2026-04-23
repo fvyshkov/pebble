@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Box, TextField, Button, Typography, Alert, Chip } from '@mui/material'
+import { Box, TextField, Button, Typography, Alert, Select, MenuItem } from '@mui/material'
 import { LANGUAGES, changeLanguage, currentLang } from '../../i18n'
 
 interface Props {
@@ -44,18 +44,17 @@ export default function LoginPage({ onLogin }: Props) {
     <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', bgcolor: '#f5f5f5' }}>
       <Box component="form" onSubmit={handleSubmit} sx={{ width: 340, p: 4, bgcolor: '#fff', borderRadius: 2, boxShadow: 3 }}>
         <Typography variant="h5" sx={{ mb: 3, textAlign: 'center', fontWeight: 600 }}>Pebble</Typography>
-        <Box sx={{ display: 'flex', justifyContent: 'center', gap: 0.5, mb: 2 }}>
-          {LANGUAGES.map(l => (
-            <Chip
-              key={l.code}
-              label={l.label}
-              size="small"
-              variant={lang === l.code ? 'filled' : 'outlined'}
-              color={lang === l.code ? 'primary' : 'default'}
-              onClick={() => { changeLanguage(l.code); setLang(l.code) }}
-              sx={{ fontSize: 11, cursor: 'pointer' }}
-            />
-          ))}
+        <Box sx={{ display: 'flex', justifyContent: 'center', mb: 2 }}>
+          <Select
+            size="small"
+            value={lang}
+            onChange={e => { const v = e.target.value; changeLanguage(v); setLang(v) }}
+            sx={{ fontSize: 12, height: 32, minWidth: 100 }}
+          >
+            {LANGUAGES.map(l => (
+              <MenuItem key={l.code} value={l.code} sx={{ fontSize: 12 }}>{l.label} — {l.name}</MenuItem>
+            ))}
+          </Select>
         </Box>
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         <TextField
