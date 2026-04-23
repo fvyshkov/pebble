@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from backend.db import init_db, close_db
-from backend.routers import models, analytics, sheets, cells, excel_io, users, import_excel, auth, chat, indicator_rules
+from backend.routers import models, analytics, sheets, cells, excel_io, users, import_excel, auth, chat, indicator_rules, translations
 
 
 @asynccontextmanager
@@ -35,6 +35,7 @@ app.include_router(import_excel.router)
 app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(indicator_rules.router)
+app.include_router(translations.router)
 
 
 @app.get("/api/health")

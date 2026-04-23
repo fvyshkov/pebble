@@ -5,6 +5,7 @@ console.log(`%cPebble v${__APP_VERSION__} (${__BUILD_TIME__})`, 'color: #1976d2;
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material'
+import './i18n'
 import App from './App'
 
 const theme = createTheme({

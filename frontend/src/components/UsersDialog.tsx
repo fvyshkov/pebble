@@ -14,6 +14,7 @@ import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
 import FolderOutlined from '@mui/icons-material/FolderOutlined'
 import CategoryOutlined from '@mui/icons-material/CategoryOutlined'
 import KeyOutlined from '@mui/icons-material/KeyOutlined'
+import { useTranslation } from 'react-i18next'
 import * as api from '../api'
 
 interface Props {
@@ -28,6 +29,7 @@ interface PermModel {
 }
 
 export default function UsersDialog({ open, onClose }: Props) {
+  const { t } = useTranslation()
   const [users, setUsers] = useState<any[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [perms, setPerms] = useState<PermModel[]>([])
@@ -71,14 +73,14 @@ export default function UsersDialog({ open, onClose }: Props) {
   if (!open) return null
 
   const handleAdd = async () => {
-    const u = await api.createUser('Новый пользователь')
+    const u = await api.createUser(t('users.newUser'))
     await loadUsers()
     setSelectedId(u.id)
   }
 
   const handleDelete = async () => {
     if (!selectedId) return
-    if (!confirm('Удалить пользователя?')) return
+    if (!confirm(t('users.deleteConfirm'))) return
     await api.deleteUser(selectedId)
     setSelectedId(null)
     loadUsers()
@@ -163,7 +165,7 @@ export default function UsersDialog({ open, onClose }: Props) {
     <Box sx={{ position: 'fixed', inset: 0, zIndex: 1300, bgcolor: '#fff', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
       <Box sx={{ display: 'flex', alignItems: 'center', px: 2, py: 1, borderBottom: '1px solid #e0e0e0' }}>
-        <Typography variant="h6" sx={{ flex: 1 }}>Пользователи</Typography>
+        <Typography variant="h6" sx={{ flex: 1 }}>{t('users.title')}</Typography>
         <IconButton size="small" onClick={onClose}><CloseOutlined fontSize="small" /></IconButton>
       </Box>
 
@@ -171,7 +173,7 @@ export default function UsersDialog({ open, onClose }: Props) {
         {/* ─── Left: user list ─── */}
         <Box sx={{ width: 220, borderRight: '1px solid #e0e0e0', display: 'flex', flexDirection: 'column' }}>
           <Box sx={{ p: 1, borderBottom: '1px solid #f0f0f0', display: 'flex', gap: 0.5 }}>
-            <Tooltip title="Добавить пользователя">
+            <Tooltip title={t('users.addUser')}>
               <IconButton size="small" onClick={handleAdd}><PersonAddOutlined fontSize="small" /></IconButton>
             </Tooltip>
           </Box>
@@ -190,7 +192,7 @@ export default function UsersDialog({ open, onClose }: Props) {
               >
                 <PersonOutlined sx={{ fontSize: 18, opacity: 0.5 }} />
                 {u.username}
-                {!!u.can_admin && <Typography sx={{ fontSize: 10, color: '#1976d2', ml: 'auto' }}>админ</Typography>}
+                {!!u.can_admin && <Typography sx={{ fontSize: 10, color: '#1976d2', ml: 'auto' }}>{t('users.admin')}</Typography>}
               </Box>
             ))}
           </Box>
@@ -202,7 +204,7 @@ export default function UsersDialog({ open, onClose }: Props) {
             {/* User attributes */}
             <Box sx={{ display: 'flex', gap: 2, alignItems: 'flex-start', mb: 3 }}>
               <TextField
-                label="Имя" size="small" value={username}
+                label={t('users.name')} size="small" value={username}
                 onChange={e => setUsername(e.target.value)}
                 onBlur={handleSaveName}
                 onKeyDown={e => { if (e.key === 'Enter') handleSaveName() }}
@@ -210,33 +212,33 @@ export default function UsersDialog({ open, onClose }: Props) {
               />
               <FormControlLabel
                 control={<Switch checked={isAdmin} onChange={e => handleToggleAdmin(e.target.checked)} size="small" />}
-                label="Админ"
+                label={t('users.adminLabel')}
               />
-              <Tooltip title="Сменить пароль">
+              <Tooltip title={t('users.changePassword')}>
                 <IconButton size="small" onClick={() => { setNewPassword(''); setPwDialogOpen(true) }}>
                   <KeyOutlined fontSize="small" />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="Удалить пользователя">
+              <Tooltip title={t('users.deleteUser')}>
                 <IconButton size="small" color="error" onClick={handleDelete}>
                   <DeleteOutlineOutlined fontSize="small" />
                 </IconButton>
               </Tooltip>
             </Box>
             <Typography variant="caption" color="textSecondary" sx={{ mb: 3, display: 'block' }}>
-              Создан: {createdAt}
+              {t('users.created')} {createdAt}
             </Typography>
 
             <Divider sx={{ mb: 2 }} />
 
             {/* Unified permissions tree */}
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>Доступ</Typography>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>{t('users.access')}</Typography>
 
             <Box sx={{ fontSize: 13 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: '1px solid #e0e0e0', fontWeight: 600, color: '#666' }}>
-                <Box sx={{ flex: 1 }}>Модель / Лист / Аналитика</Box>
-                <Box sx={{ width: 80, textAlign: 'center' }}>Просмотр</Box>
-                <Box sx={{ width: 80, textAlign: 'center' }}>Ввод</Box>
+                <Box sx={{ flex: 1 }}>{t('users.modelSheetAnalytic')}</Box>
+                <Box sx={{ width: 80, textAlign: 'center' }}>{t('users.view')}</Box>
+                <Box sx={{ width: 80, textAlign: 'center' }}>{t('users.edit')}</Box>
               </Box>
 
               {perms.map((model: any) => {
@@ -335,7 +337,7 @@ export default function UsersDialog({ open, onClose }: Props) {
                             onClick={() => setExpanded(prev => { const n = new Set(prev); n.has(sfKey) ? n.delete(sfKey) : n.add(sfKey); return n })}>
                             {sfOpen ? <ExpandMoreOutlined sx={{ fontSize: 16, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 16, opacity: 0.4 }} />}
                             <FolderOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
-                            <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>Листы</Box>
+                            <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>{t('users.sheets')}</Box>
                             <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
                               <Checkbox size="small"
                                 checked={model.sheets.every((s: any) => s.can_view)}
@@ -377,7 +379,7 @@ export default function UsersDialog({ open, onClose }: Props) {
                             onClick={() => setExpanded(prev => { const n = new Set(prev); n.has(afKey) ? n.delete(afKey) : n.add(afKey); return n })}>
                             {afOpen ? <ExpandMoreOutlined sx={{ fontSize: 16, opacity: 0.4 }} /> : <ChevronRightOutlined sx={{ fontSize: 16, opacity: 0.4 }} />}
                             <FolderOutlined sx={{ fontSize: 14, opacity: 0.4 }} />
-                            <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>Аналитики</Box>
+                            <Box sx={{ flex: 1, fontWeight: 500, color: '#555' }}>{t('users.analytics')}</Box>
                             <Box sx={{ width: 80, textAlign: 'center' }} onClick={e => e.stopPropagation()}>
                               <Checkbox size="small"
                                 checked={analyticsFolderChecked('can_view')}
@@ -427,31 +429,31 @@ export default function UsersDialog({ open, onClose }: Props) {
               })}
 
               {perms.length === 0 && (
-                <Typography sx={{ py: 2, color: '#999', textAlign: 'center' }}>Нет моделей</Typography>
+                <Typography sx={{ py: 2, color: '#999', textAlign: 'center' }}>{t('users.noModels')}</Typography>
               )}
             </Box>
           </Box>
         ) : (
           <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
-            Выберите пользователя
+            {t('users.selectUser')}
           </Box>
         )}
       </Box>
     </Box>
 
     <Dialog open={pwDialogOpen} onClose={() => setPwDialogOpen(false)} maxWidth="xs" fullWidth>
-      <DialogTitle>Сменить пароль</DialogTitle>
+      <DialogTitle>{t('users.changePassword')}</DialogTitle>
       <DialogContent>
         <TextField
-          label="Новый пароль" fullWidth type="password"
+          label={t('users.newPassword')} fullWidth type="password"
           value={newPassword} onChange={e => setNewPassword(e.target.value)}
           autoComplete="new-password" name="new-password"
           sx={{ mt: 1 }} autoFocus
         />
       </DialogContent>
       <DialogActions>
-        <Button onClick={() => setPwDialogOpen(false)}>Отмена</Button>
-        <Button variant="contained" disabled={!newPassword} onClick={handleResetPassword}>Сохранить</Button>
+        <Button onClick={() => setPwDialogOpen(false)}>{t('common.cancel')}</Button>
+        <Button variant="contained" disabled={!newPassword} onClick={handleResetPassword}>{t('common.save')}</Button>
       </DialogActions>
     </Dialog>
   </>)

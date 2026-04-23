@@ -6,6 +6,7 @@ import {
 } from '@mui/material'
 import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
 import * as Icons from '@mui/icons-material'
+import { useTranslation } from 'react-i18next'
 import * as api from '../../api'
 import type { Analytic } from '../../types'
 import { transliterate } from '../../utils/transliterate'
@@ -18,13 +19,8 @@ interface Props {
   onRefresh: () => void
 }
 
-const PERIOD_TYPES = [
-  { key: 'year', label: 'Год' },
-  { key: 'quarter', label: 'Квартал' },
-  { key: 'month', label: 'Месяц' },
-]
-
 export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Props) {
+  const { t } = useTranslation()
   const [data, setData] = useState<Analytic | null>(null)
   const [iconOpen, setIconOpen] = useState(false)
   const [sheetStatus, setSheetStatus] = useState<string>('')
@@ -32,6 +28,12 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
   const [isMain, setIsMain] = useState(false)
   const { addOp, getOverrides } = usePending()
+
+  const PERIOD_TYPES = [
+    { key: 'year', label: t('analytic.year') },
+    { key: 'quarter', label: t('analytic.quarter') },
+    { key: 'month', label: t('analytic.month') },
+  ]
 
   useEffect(() => {
     api.getAnalytic(analyticId).then(a => {
@@ -136,7 +138,7 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
           {SelectedIcon ? <SelectedIcon fontSize="small" /> : <Icons.CategoryOutlined fontSize="small" />}
         </IconButton>
         <TextField
-          label="Название" fullWidth value={data.name}
+          label={t('analytic.name')} fullWidth value={data.name}
           onChange={e => {
             const name = e.target.value
             const code = transliterate(name)
@@ -146,7 +148,7 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
       </Box>
 
       <TextField
-        label="Код" fullWidth value={data.code}
+        label={t('analytic.code')} fullWidth value={data.code}
         onChange={e => change({ code: e.target.value } as any)}
         sx={{ mb: 2 }}
         InputProps={{ sx: { fontFamily: 'monospace' } }}
@@ -155,7 +157,7 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
       <Box sx={{ display: 'flex', gap: 3, mb: 2 }}>
         <FormControlLabel
           control={<Switch checked={isPeriods} onChange={e => change({ is_periods: e.target.checked ? 1 : 0 } as any)} />}
-          label="Периоды"
+          label={t('analytic.periods')}
         />
         <FormControlLabel
           control={<Switch checked={isMain} onChange={async e => {
@@ -173,27 +175,27 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
             }
             // Note: toggling off is not implemented — another analytic should be set as main instead
           }} />}
-          label="Показатели"
+          label={t('analytic.indicators')}
         />
       </Box>
 
       <FormControl fullWidth sx={{ mb: 2 }}>
-        <InputLabel>Тип данных</InputLabel>
+        <InputLabel>{t('analytic.dataType')}</InputLabel>
         <Select
           value={data.data_type || 'sum'}
-          label="Тип данных"
+          label={t('analytic.dataType')}
           onChange={e => change({ data_type: e.target.value } as any)}
         >
-          <MenuItem value="sum">Сумма (0.00)</MenuItem>
-          <MenuItem value="percent">% (процент)</MenuItem>
-          <MenuItem value="quantity">Количество</MenuItem>
-          <MenuItem value="string">Строка</MenuItem>
+          <MenuItem value="sum">{t('analytic.sum')}</MenuItem>
+          <MenuItem value="percent">{t('analytic.percent')}</MenuItem>
+          <MenuItem value="quantity">{t('analytic.quantity')}</MenuItem>
+          <MenuItem value="string">{t('analytic.string')}</MenuItem>
         </Select>
       </FormControl>
 
       {isPeriods && (
         <Box sx={{ ml: 1, mb: 2 }}>
-          <Typography variant="body2" sx={{ mb: 1 }}>Типы периодов:</Typography>
+          <Typography variant="body2" sx={{ mb: 1 }}>{t('analytic.periodTypes')}</Typography>
           <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
             {PERIOD_TYPES.map(pt => (
               <Chip
@@ -207,20 +209,20 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
           </Box>
           <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
             <TextField
-              label="Начало" type="date" fullWidth
+              label={t('analytic.start')} type="date" fullWidth
               value={data.period_start || ''}
               onChange={e => change({ period_start: e.target.value } as any)}
               InputLabelProps={{ shrink: true }}
             />
             <TextField
-              label="Окончание" type="date" fullWidth
+              label={t('analytic.end')} type="date" fullWidth
               value={data.period_end || ''}
               onChange={e => change({ period_end: e.target.value } as any)}
               InputLabelProps={{ shrink: true }}
             />
           </Box>
           <Button variant="outlined" onClick={handleGenerate} disabled={periodTypes.length === 0}>
-            Сгенерировать периоды
+            {t('analytic.generatePeriods')}
           </Button>
         </Box>
       )}
@@ -238,11 +240,11 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
             try {
               const result = await api.bulkAddAnalytic(modelId, analyticId)
               const msg = result.added > 0
-                ? `Добавлено в ${result.added} лист(ов)` + (result.formulas_suggested > 0 ? `, формул: ${result.formulas_suggested}` : '')
-                : 'Уже во всех листах'
+                ? t('analytic.addedToSheets', { count: result.added }) + (result.formulas_suggested > 0 ? t('analytic.formulasSuggested', { count: result.formulas_suggested }) : '')
+                : t('analytic.alreadyInAll')
               setSheetStatus(msg)
             } catch (e: any) {
-              setSheetStatus(`Ошибка: ${e.message || e}`)
+              setSheetStatus(`${t('common.error')}: ${e.message || e}`)
             } finally {
               setBulkBusy(null)
               setTimeout(() => setSheetStatus(''), 4000)
@@ -251,8 +253,8 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
           sx={{ textTransform: 'none', fontSize: 12 }}
         >
           {bulkBusy === 'add'
-            ? 'Добавляется…'
-            : 'Добавить во все листы'}
+            ? t('analytic.adding')
+            : t('analytic.addToAll')}
         </Button>
         <Button
           variant="outlined" size="small" color="warning"
@@ -264,9 +266,9 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
             setBulkBusy('remove')
             try {
               const result = await api.bulkRemoveAnalytic(modelId, analyticId)
-              setSheetStatus(result.removed > 0 ? `Удалено из ${result.removed} лист(ов)` : 'Нет ни в одном листе')
+              setSheetStatus(result.removed > 0 ? t('analytic.removedFromSheets', { count: result.removed }) : t('analytic.notInAny'))
             } catch (e: any) {
-              setSheetStatus(`Ошибка: ${e.message || e}`)
+              setSheetStatus(`${t('common.error')}: ${e.message || e}`)
             } finally {
               setBulkBusy(null)
               setTimeout(() => setSheetStatus(''), 4000)
@@ -275,8 +277,8 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
           sx={{ textTransform: 'none', fontSize: 12 }}
         >
           {bulkBusy === 'remove'
-            ? 'Удаляется…'
-            : 'Удалить со всех листов'}
+            ? t('analytic.removing')
+            : t('analytic.removeFromAll')}
         </Button>
       </Box>
       {sheetStatus && <Typography variant="caption" color="success.main">{sheetStatus}</Typography>}

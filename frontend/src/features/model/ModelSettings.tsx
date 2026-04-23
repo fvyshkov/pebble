@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { TextField, Typography, Box, Button } from '@mui/material'
 import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
+import { useTranslation } from 'react-i18next'
 import * as api from '../../api'
 import type { Model } from '../../types'
 import { usePending } from '../../store/PendingContext'
@@ -11,6 +12,7 @@ interface Props {
 }
 
 export default function ModelSettings({ modelId, onRefresh }: Props) {
+  const { t } = useTranslation()
   const [model, setModel] = useState<Model | null>(null)
   const { addOp, getOverrides } = usePending()
 
@@ -42,13 +44,13 @@ export default function ModelSettings({ modelId, onRefresh }: Props) {
 
   return (
     <Box sx={{ maxWidth: 500 }}>
-      <Typography variant="h6" sx={{ mb: 2 }}>Модель</Typography>
+      <Typography variant="h6" sx={{ mb: 2 }}>{t('model.title')}</Typography>
       <TextField
-        label="Название" fullWidth value={model.name}
+        label={t('model.name')} fullWidth value={model.name}
         onChange={e => change('name', e.target.value)} sx={{ mb: 2 }}
       />
       <TextField
-        label="Описание" fullWidth multiline rows={3} value={model.description}
+        label={t('model.description')} fullWidth multiline rows={3} value={model.description}
         onChange={e => change('description', e.target.value)}
       />
       <Button
@@ -56,7 +58,7 @@ export default function ModelSettings({ modelId, onRefresh }: Props) {
         sx={{ mt: 3 }}
         onClick={() => window.open(api.exportModel(modelId), '_blank')}
       >
-        Выгрузить в Excel
+        {t('model.exportExcel')}
       </Button>
     </Box>
   )
