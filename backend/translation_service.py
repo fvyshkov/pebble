@@ -1,18 +1,18 @@
 """Multilingual translation service for Pebble.
 
 Supports three languages: Russian (ru), English (en), Kyrgyz (ky).
-Uses Claude API to detect language and translate to the other two.
+Uses Google Translate (via deep-translator) for fast free translation.
 Translations are stored in the `translations` table.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from typing import Sequence
 
 import aiosqlite
-import anthropic
 
 from backend.db import get_db
 
@@ -57,21 +57,60 @@ FIELD_LABELS = {
 }
 
 
-def _get_client() -> anthropic.AsyncAnthropic:
-    return anthropic.AsyncAnthropic(
-        api_key=os.environ.get("ANTHROPIC_API_KEY", "")
-    )
+def _detect_source_lang(texts: str | list[str]) -> str:
+    """Detect dominant language from text(s) based on Cyrillic character frequency."""
+    if isinstance(texts, str):
+        texts = [texts]
+    # Count texts with Cyrillic vs Latin
+    cyrillic_count = sum(1 for t in texts if re.search(r'[а-яА-ЯёЁ]', t))
+    return "ru" if cyrillic_count > len(texts) // 2 else "en"
+
+
+def _build_local_dict() -> dict[str, dict[str, str]]:
+    """Build a dictionary of known period/field translations (no API needed)."""
+    d: dict[str, dict[str, str]] = {}
+    # Months: "Январь 2026" etc.
+    for i in range(12):
+        for lang_src in SUPPORTED_LANGS:
+            name = MONTH_NAMES[lang_src][i]
+            tr = {lang: MONTH_NAMES[lang][i] for lang in SUPPORTED_LANGS}
+            d[name] = tr
+            # With year suffix: "Январь 2026" → "January 2026"
+            for year in range(2020, 2041):
+                key = f"{name} {year}"
+                d[key] = {lang: f"{MONTH_NAMES[lang][i]} {year}" for lang in SUPPORTED_LANGS}
+    # Quarters (with and without year)
+    for i in range(4):
+        for lang_src in SUPPORTED_LANGS:
+            d[QUARTER_NAMES[lang_src][i]] = {lang: QUARTER_NAMES[lang][i] for lang in SUPPORTED_LANGS}
+            for year in range(2020, 2041):
+                key = f"{QUARTER_NAMES[lang_src][i]} {year}"
+                d[key] = {lang: f"{QUARTER_NAMES[lang][i]} {year}" for lang in SUPPORTED_LANGS}
+    # Half-years (with and without year)
+    for i in range(2):
+        for lang_src in SUPPORTED_LANGS:
+            d[HALFYEAR_NAMES[lang_src][i]] = {lang: HALFYEAR_NAMES[lang][i] for lang in SUPPORTED_LANGS}
+            for year in range(2020, 2041):
+                key = f"{HALFYEAR_NAMES[lang_src][i]} {year}"
+                d[key] = {lang: f"{HALFYEAR_NAMES[lang][i]} {year}" for lang in SUPPORTED_LANGS}
+    # Bare years
+    for year in range(2020, 2041):
+        d[str(year)] = {lang: str(year) for lang in SUPPORTED_LANGS}
+    # Field labels
+    for lang_src in SUPPORTED_LANGS:
+        for field, label in FIELD_LABELS[lang_src].items():
+            d[label] = {lang: FIELD_LABELS[lang][field] for lang in SUPPORTED_LANGS}
+    return d
+
+
+_LOCAL_DICT = _build_local_dict()
 
 
 async def batch_translate(texts: list[str], target_langs: list[str] | None = None) -> dict[str, dict[str, str]]:
     """Translate a batch of texts to all target languages.
 
-    Args:
-        texts: list of strings to translate
-        target_langs: if None, translates to all SUPPORTED_LANGS
-
-    Returns:
-        {original_text: {lang: translated_text, ...}, ...}
+    Uses local dictionary for known period/field names, Google Translate for the rest.
+    Free, fast (~2s for 600 names), supports ru/en/ky.
     """
     if not texts:
         return {}
@@ -79,54 +118,128 @@ async def batch_translate(texts: list[str], target_langs: list[str] | None = Non
     if target_langs is None:
         target_langs = list(SUPPORTED_LANGS)
 
-    # Deduplicate
     unique_texts = list(dict.fromkeys(texts))
     if not unique_texts:
         return {}
 
-    client = _get_client()
+    result: dict[str, dict[str, str]] = {}
+    needs_translate: list[str] = []
 
-    prompt = f"""You are a professional translator. Translate each text below into the requested languages.
-The texts are names of financial indicators, analytics categories, and similar business terms.
+    # Phase 1: resolve locally (periods, years, known labels)
+    for t in unique_texts:
+        if t in _LOCAL_DICT:
+            result[t] = _LOCAL_DICT[t]
+        elif t.isdigit() or t.replace(".", "", 1).replace("-", "", 1).isdigit():
+            result[t] = {lang: t for lang in target_langs}
+        else:
+            needs_translate.append(t)
 
-IMPORTANT RULES:
-- Detect the source language of each text automatically
-- If text is already in a target language, keep it as-is
-- Keep numbers, abbreviations, and proper nouns unchanged
-- Translations should be natural and professional
-- For Kyrgyz (ky): use standard Kyrgyz terminology for financial/business terms
-
-Target languages: {', '.join(f'{l} ({LANG_NAMES[l]})' for l in target_langs)}
-
-Texts to translate (one per line, numbered):
-{chr(10).join(f'{i+1}. {t}' for i, t in enumerate(unique_texts))}
-
-Respond with ONLY a JSON object. Keys are the original texts (exactly as given), values are objects mapping language code to translation.
-Example: {{"Выручка": {{"ru": "Выручка", "en": "Revenue", "ky": "Киреше"}}}}
-"""
-
-    try:
-        resp = await client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = resp.content[0].text.strip()
-        # Extract JSON from response (may be wrapped in ```json ... ```)
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1]
-            if text.endswith("```"):
-                text = text[: text.rfind("```")]
-        result = json.loads(text)
-        # Ensure all original texts are in result
-        for t in unique_texts:
-            if t not in result:
-                result[t] = {lang: t for lang in target_langs}
+    if not needs_translate:
         return result
-    except Exception as e:
-        print(f"[translation] batch_translate failed: {e}")
-        # Fallback: return originals for all langs
-        return {t: {lang: t for lang in target_langs} for t in unique_texts}
+
+    # Phase 2: check DB cache for previously translated texts
+    db = get_db()
+    still_need: list[str] = []
+    if needs_translate:
+        placeholders = ",".join("?" * len(needs_translate))
+        cached_rows = await db.execute_fetchall(
+            f"SELECT source_text, lang, translated FROM translation_cache WHERE source_text IN ({placeholders})",
+            needs_translate,
+        )
+        cache_map: dict[str, dict[str, str]] = {}
+        for row in cached_rows:
+            cache_map.setdefault(row["source_text"], {})[row["lang"]] = row["translated"]
+
+        for t in needs_translate:
+            cached = cache_map.get(t, {})
+            # Source lang doesn't need to be cached — it's the original text
+            non_src_langs = [lang for lang in target_langs if lang != _detect_source_lang(t)]
+            if all(lang in cached for lang in non_src_langs):
+                # Fill in source lang + cached translations
+                tr = {lang: t for lang in target_langs}  # default all to original
+                tr.update(cached)
+                result[t] = tr
+            else:
+                still_need.append(t)
+
+    if not still_need:
+        return result
+
+    # Phase 3: translate remaining via Google Translate (free, fast)
+    try:
+        from deep_translator import GoogleTranslator
+    except ImportError:
+        print("[translation] deep-translator not installed, keeping originals")
+        for t in still_need:
+            result[t] = {lang: t for lang in target_langs}
+        return result
+
+    src_lang = _detect_source_lang(still_need) if still_need else "ru"
+
+    # Split texts into chunks of ~1000 chars
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for t in still_need:
+        if current_len + len(t) + 1 > 1000 and current:
+            chunks.append(current)
+            current = [t]
+            current_len = len(t)
+        else:
+            current.append(t)
+            current_len += len(t) + 1
+    if current:
+        chunks.append(current)
+
+    api_result: dict[str, dict[str, str]] = {}
+    for lang in target_langs:
+        if lang == src_lang:
+            for t in still_need:
+                api_result.setdefault(t, {})[lang] = t
+            continue
+        try:
+            translator = GoogleTranslator(source="auto", target=lang)
+            for chunk in chunks:
+                combined = "\n".join(chunk)
+                translated_text = translator.translate(combined)
+                translated_parts = translated_text.split("\n") if translated_text else []
+                for i, orig in enumerate(chunk):
+                    tr = translated_parts[i].strip() if i < len(translated_parts) else orig
+                    api_result.setdefault(orig, {})[lang] = tr or orig
+        except Exception as e:
+            print(f"[translation] Google Translate {src_lang}→{lang} failed: {e}")
+            for t in still_need:
+                api_result.setdefault(t, {})[lang] = t
+
+    # Ensure all langs present
+    for t in still_need:
+        for lang in target_langs:
+            if lang not in api_result.get(t, {}):
+                api_result.setdefault(t, {})[lang] = t
+
+    result.update(api_result)
+
+    # Phase 4: save new translations to cache (only actually translated ones)
+    for t in still_need:
+        tr = api_result.get(t, {})
+        for lang, value in tr.items():
+            if not value or value == t:
+                continue  # don't cache untranslated
+            try:
+                await db.execute(
+                    "INSERT OR REPLACE INTO translation_cache (source_text, lang, translated) VALUES (?, ?, ?)",
+                    (t, lang, value),
+                )
+            except Exception:
+                pass
+    await db.commit()
+
+    # Ensure all texts covered
+    for t in unique_texts:
+        if t not in result:
+            result[t] = {lang: t for lang in target_langs}
+
+    return result
 
 
 async def save_translations(

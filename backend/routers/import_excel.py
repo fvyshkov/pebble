@@ -2457,7 +2457,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         "sheets": len(created_sheets),
         "sheet_list": created_sheets,
         "periods": len(period_record_ids),
-        "period_hierarchy": period_types,
+        "period_hierarchy": pt_list,
     }
 
 
@@ -3096,25 +3096,10 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             missing = set(sheet_names) - {sc["excel_name"] for sc in sheets_config}
             yield event(f"[WARN]Импортировано {actual_sheets}/{expected_sheets} листов. Пропущены: {', '.join(missing)}")
 
-        # Validate cell counts against Excel
+        # Log cell counts per sheet (informational, not a warning)
         for cs in created_sheets:
-            excel_name = None
-            for sc in sheets_config:
-                if sc.get("display_name", sc["excel_name"]) == cs["name"].split(". ", 1)[-1] or sc["excel_name"] in cs["name"]:
-                    excel_name = sc["excel_name"]
-                    break
-            if excel_name and excel_name in wb_data.sheetnames:
-                ws_check = wb_data[excel_name]
-                dsc = next((sc.get("data_start_col", 4) for sc in sheets_config if sc["excel_name"] == excel_name), 4)
-                # Count non-empty data cells in Excel
-                excel_cells = 0
-                for r in range(1, min(ws_check.max_row or 1, 500) + 1):
-                    for c in range(dsc, min((ws_check.max_column or 1) + 1, 50)):
-                        if ws_check.cell(r, c).value is not None:
-                            excel_cells += 1
-                ratio = cs["cells"] / excel_cells * 100 if excel_cells > 0 else 0
-                if ratio < 80:
-                    yield event(f"[WARN]«{cs['name']}»: импортировано {cs['cells']}/{excel_cells} ячеек ({ratio:.0f}%)")
+            if cs["cells"] == 0:
+                yield event(f"[WARN]«{cs['name']}»: 0 ячеек импортировано")
 
         # ── Post-import: detect period-consolidation formulas for ratios/averages ──
         # Ask Claude which indicators should NOT be summed across periods

@@ -177,6 +177,12 @@ MIGRATIONS = [
     "ALTER TABLE sheet_analytics ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE sheet_analytics ADD COLUMN min_period_level TEXT DEFAULT NULL",
     "ALTER TABLE sheet_analytics ADD COLUMN visible_record_ids TEXT DEFAULT NULL",
+    """CREATE TABLE IF NOT EXISTS translation_cache (
+        source_text TEXT NOT NULL,
+        lang        TEXT NOT NULL,
+        translated  TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (source_text, lang)
+    )""",
 ]
 
 
