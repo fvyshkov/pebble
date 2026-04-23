@@ -24,7 +24,7 @@ interface Props {
   onRulesChanged?: (leaf: string, consolidation: string) => void
 }
 
-type Mode = 'manual' | 'formula'
+type Mode = 'manual' | 'formula' | 'empty'
 
 interface ScopedRule {
   id?: string
@@ -126,6 +126,34 @@ function RecordTreePicker({
   }
   const roots = analytic.childrenOf['__root__'] || []
 
+  // Period-type shortcuts: group leaf records by period type (Q, H, Y)
+  const typeGroups = useMemo(() => {
+    if (!multi || !analytic.isPeriods) return []
+    const groups: { label: string; ids: string[] }[] = []
+    const byType: Record<string, string[]> = {}
+    for (const r of analytic.records) {
+      try {
+        const d = typeof r.data_json === 'string' ? JSON.parse(r.data_json) : r.data_json
+        const pk: string = d?.period_key || ''
+        let t = ''
+        if (/^\d{4}-Q\d$/.test(pk)) t = 'Q'
+        else if (/^\d{4}-H\d$/.test(pk)) t = 'H'
+        else if (/^\d{4}-Y$/.test(pk)) t = 'Y'
+        else if (/^\d{4}-M\d{2}$/.test(pk)) t = 'M'
+        if (t) (byType[t] ||= []).push(r.id)
+      } catch { /* skip */ }
+    }
+    const labels: Record<string, string> = { Q: 'Кварталы', H: 'Полугодия', Y: 'Годы', M: 'Месяцы' }
+    for (const t of ['Y', 'H', 'Q', 'M']) {
+      if (byType[t]?.length) groups.push({ label: labels[t], ids: byType[t] })
+    }
+    return groups
+  }, [multi, analytic])
+
+  const selectType = (ids: string[]) => {
+    onChange(ids.join(','))
+  }
+
   return (
     <>
       <Button
@@ -153,6 +181,24 @@ function RecordTreePicker({
           >
             <em>любое</em>
           </Button>
+          {typeGroups.length > 0 && (
+            <Stack direction="row" spacing={0.5} sx={{ mb: 1, flexWrap: 'wrap', gap: 0.5 }}>
+              {typeGroups.map(g => {
+                const allSelected = g.ids.every(id => selected.has(id)) && g.ids.length === selected.size
+                return (
+                  <Chip
+                    key={g.label}
+                    label={`${g.label} (${g.ids.length})`}
+                    size="small"
+                    variant={allSelected ? 'filled' : 'outlined'}
+                    color={allSelected ? 'primary' : 'default'}
+                    onClick={() => selectType(g.ids)}
+                    sx={{ cursor: 'pointer' }}
+                  />
+                )
+              })}
+            </Stack>
+          )}
           <SimpleTreeView
             defaultExpandedItems={roots}
             sx={{ '& .MuiTreeItem-content': { py: 0.25 } }}
@@ -200,10 +246,10 @@ export default function IndicatorFormulasPanel({
   // Auto-queue a pending op whenever edited state changes.
   useEffect(() => {
     if (!editedRef.current) return
-    const leafVal = leafMode === 'formula' ? leafFormula : ''
+    const leafVal = leafMode === 'formula' ? leafFormula : leafMode === 'empty' ? '__empty__' : ''
     const consolVal = consolMode === 'formula'
       ? (consolFormula === 'SUM' ? '' : consolFormula)
-      : ''
+      : consolMode === 'empty' ? '__empty__' : ''
     addOp({
       key: `indicatorRules:${sheetId}:${indicatorId}`,
       type: 'putIndicatorRules',
@@ -216,7 +262,7 @@ export default function IndicatorFormulasPanel({
           id: r.id,
           scope: r.scope,
           priority: r.priority,
-          formula: r.mode === 'formula' ? r.formula : '',
+          formula: r.mode === 'formula' ? r.formula : r.mode === 'empty' ? '__empty__' : '',
         })),
       },
     })
@@ -241,15 +287,15 @@ export default function IndicatorFormulasPanel({
               leaf: pending.leaf ?? apiRules.leaf,
               scoped: pending.scoped ?? apiRules.scoped }
           : apiRules
-        setConsolFormula(rules.consolidation || 'SUM')
-        setConsolMode('formula')
-        setLeafFormula(rules.leaf || '')
-        setLeafMode(rules.leaf ? 'formula' : 'manual')
+        setConsolFormula(rules.consolidation === '__empty__' ? '' : (rules.consolidation || 'SUM'))
+        setConsolMode(rules.consolidation === '__empty__' ? 'empty' : 'formula')
+        setLeafFormula(rules.leaf === '__empty__' ? '' : (rules.leaf || ''))
+        setLeafMode(rules.leaf === '__empty__' ? 'empty' : rules.leaf ? 'formula' : 'manual')
         // Top = highest priority
         const s = (rules.scoped || [])
           .slice()
           .sort((a: any, b: any) => b.priority - a.priority)
-          .map((r: any) => ({ ...r, mode: (r.formula ? 'formula' : 'manual') as Mode }))
+          .map((r: any) => ({ ...r, mode: (r.formula === '__empty__' ? 'empty' : r.formula ? 'formula' : 'manual') as Mode }))
         setScoped(s)
         setMainAid(main.analytic_id)
         const nonMain = bindings.filter((b: SheetAnalytic) => b.analytic_id !== main.analytic_id)
@@ -277,8 +323,17 @@ export default function IndicatorFormulasPanel({
   const recLabel = (aid: string, rid: string): string => {
     const a = analytics.find(x => x.id === aid)
     if (!a) return rid.slice(0, 4)
-    const r = a.byId[rid]
-    return r ? recName(r) : rid.slice(0, 4)
+    // Handle comma-separated multi-select
+    const ids = rid.split(',').filter(Boolean)
+    if (ids.length <= 1) {
+      const r = a.byId[rid]
+      return r ? recName(r) : rid.slice(0, 4)
+    }
+    const names = ids.map(id => {
+      const r = a.byId[id]
+      return r ? recName(r) : id.slice(0, 4)
+    })
+    return names.length <= 3 ? names.join(', ') : `${names.slice(0, 2).join(', ')} +${names.length - 2}`
   }
 
   const markDirty = () => { editedRef.current = true }
@@ -366,6 +421,9 @@ export default function IndicatorFormulasPanel({
         <ToggleButton value="formula" sx={{ textTransform: 'none', py: 0.25, px: 1 }}>
           Формула
         </ToggleButton>
+        <ToggleButton value="empty" sx={{ textTransform: 'none', py: 0.25, px: 1 }}>
+          Пусто
+        </ToggleButton>
       </ToggleButtonGroup>
       {mode === 'formula' ? (
         <>
@@ -389,6 +447,10 @@ export default function IndicatorFormulasPanel({
             <Typography variant="caption" color="text.secondary">{hint}</Typography>
           )}
         </>
+      ) : mode === 'empty' ? (
+        <Typography variant="caption" color="text.secondary">
+          Клетка всегда пуста — ввод невозможен.
+        </Typography>
       ) : null}
     </Box>
   )

@@ -172,13 +172,16 @@ async def _recalc_model(db, sheet_id: str) -> int:
     total = 0
     for sid, changes in result.items():
         for ck, val in changes.items():
+            # __empty__ cells: rule='empty', value=''
+            rule = 'empty' if val == '__empty__' else 'formula'
+            db_val = '' if val == '__empty__' else val
             # Never overwrite manually-entered values — only create/update formula cells
             await db.execute(
                 """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
-                   VALUES (?, ?, ?, ?, 'formula')
-                   ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule
                    WHERE rule != 'manual'""",
-                (str(__import__('uuid').uuid4()), sid, ck, val),
+                (str(__import__('uuid').uuid4()), sid, ck, db_val, rule),
             )
         total += len(changes)
     return total
@@ -256,11 +259,13 @@ async def calculate_model_stream(model_id: str):
         done_sheets = 0
         for sid, changes in result.items():
             for ck, val in changes.items():
+                rule = 'empty' if val == '__empty__' else 'formula'
+                db_val = '' if val == '__empty__' else val
                 await db.execute(
                     """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
-                       VALUES (?, ?, ?, ?, 'formula')
-                       ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value""",
-                    (str(__import__('uuid').uuid4()), sid, ck, val),
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule""",
+                    (str(__import__('uuid').uuid4()), sid, ck, db_val, rule),
                 )
             total += len(changes)
             done_sheets += 1

@@ -533,8 +533,9 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 scoped_hits,
                 key=lambda r: (-(r.get("priority") or 0), -len(r.get("scope") or {}), r["id"]),
             )[0]
-            if best.get("formula"):
-                return best["formula"], f"rule:{best['id']}"
+            f = best.get("formula") or ""
+            if f:
+                return f, f"rule:{best['id']}"
 
         # 3b. Base leaf/consolidation.
         is_consol = _is_consolidating(context, meta)
@@ -569,6 +570,14 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             resolved = _resolve_indicator_formula(sheet_id, context, meta)
             if resolved:
                 formula, formula_source = resolved
+
+        if formula == "__empty__":
+            # "Always empty" — scoped rule says this cell has no value.
+            global_cells[gk] = ""
+            computed_set.add(gk)
+            _computed_sources[gk] = formula_source or "rule"
+            _computed_formulas[gk] = "__empty__"
+            return 0.0
 
         if formula:
             # Special consolidation keywords: AVERAGE, LAST
@@ -1346,6 +1355,10 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         sid, ck = gk
         new_val = global_cells.get(gk, "")
         old_val = _original_values.get(gk, "")
+        # Mark __empty__ cells so the caller can store rule='empty'
+        if _computed_formulas.get(gk) == "__empty__":
+            result.setdefault(sid, {})[ck] = "__empty__"
+            continue
         # Skip if value didn't change.
         if _vals_equal(old_val, new_val):
             continue
