@@ -263,26 +263,13 @@ def _translate_ref(
     if name is None:
         return ref["original"]  # Can't resolve — keep original
 
-    # Check if name is duplicate in the row map — if so, disambiguate
+    # Check if name is duplicate in the row map — if so, disambiguate with #rowN
+    # Always use #row hint (not parent/child combo) because the engine resolves
+    # #row hints via excel_row matching, which is reliable and unambiguous.
     name_lower = name.lower()
     duplicates = sum(1 for r, n in rmap.items() if n.lower() == name_lower)
     if duplicates > 1:
-        target_sheet = sheet_name or "__self__"
-        parent_map = row_to_parent_names.get(target_sheet, {})
-        parent_name = parent_map.get(row)
-        if parent_name:
-            # Check if parent/child combo is unique
-            qual_dups = sum(
-                1 for r, n in rmap.items()
-                if n.lower() == name_lower
-                and parent_map.get(r, "").lower() == parent_name.lower()
-            )
-            if qual_dups <= 1:
-                name = f"{parent_name}/{name}"
-            else:
-                name = f"{name}#row{row}"
-        else:
-            name = f"{name}#row{row}"
+        name = f"{name}#row{row}"
 
     # Determine period modifier using period index alignment
     # Use col_to_period_idx mapping if available (skips total columns)

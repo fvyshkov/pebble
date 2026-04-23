@@ -10,7 +10,7 @@ import openpyxl
 API = os.environ.get("PEBBLE_API", "http://localhost:8000/api")
 EXCEL_PATH = Path("/Users/mac/pebble/XLS-MODELS/ANNEX 1 Simply Ecosystem FinModel 2025-2029_ENG Final.xlsx")
 DB_PATH = Path("/Users/mac/pebble/pebble.db")
-OLD_MODEL_ID = "11722305-e50a-4c40-bfd3-1a04977678ca"  # auto-updated on reimport
+OLD_MODEL_ID = "eb1300ea-6237-4027-b99d-677677ca3060"  # auto-updated on reimport
 
 # ── Step 1: Delete old model via API ──
 def delete_old():
