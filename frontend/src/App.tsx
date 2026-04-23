@@ -64,19 +64,16 @@ function SaveButton() {
 function LanguageSwitcher() {
   const [lang, setLang] = useState(currentLang())
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
+    <Select
+      size="small"
+      value={lang}
+      onChange={e => { const v = e.target.value; changeLanguage(v); setLang(v) }}
+      sx={{ fontSize: 12, height: 28, minWidth: 56, '& .MuiSelect-select': { py: 0.25, px: 1 } }}
+    >
       {LANGUAGES.map(l => (
-        <Chip
-          key={l.code}
-          label={l.label}
-          size="small"
-          variant={lang === l.code ? 'filled' : 'outlined'}
-          color={lang === l.code ? 'primary' : 'default'}
-          onClick={() => { changeLanguage(l.code); setLang(l.code) }}
-          sx={{ fontSize: 11, height: 22, cursor: 'pointer', minWidth: 32 }}
-        />
+        <MenuItem key={l.code} value={l.code} sx={{ fontSize: 12 }}>{l.label}</MenuItem>
       ))}
-    </Box>
+    </Select>
   )
 }
 
