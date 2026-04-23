@@ -1994,23 +1994,74 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             else:
                 _sheet_min_period_level[excel_name] = None
 
-    # All sheets use the same period analytic
+    # Build per-sheet visible period record IDs:
+    # - detected period_keys from Excel headers (exact match)
+    # - plus parent records (to complete the tree for consolidation)
     _all_period_record_ids: dict[str, dict[str, str]] = {}
-    _LEVEL_RANK = {"M": 0, "Q": 1, "H": 2, "Y": 3}
+    _sheet_visible_rids: dict[str, set[str]] = {}  # excel_name → set of visible record IDs
+
+    # Build parent_id map for the shared period analytic
+    _period_rid_to_parent: dict[str, str | None] = {}
+    _period_rid_to_pk: dict[str, str] = {}
+
     def _pk_rank(pk: str) -> int:
         if re.match(r'\d{4}-\d{2}$', pk): return 0
         if "-Q" in pk: return 1
         if "-H" in pk: return 2
         if pk.endswith("-Y"): return 3
         return -1
-    for excel_name in _prescan_sheet_ptypes:
-        min_lvl = _sheet_min_period_level.get(excel_name)
-        min_rank = _LEVEL_RANK.get(min_lvl or "M", 0)
-        # Filter period_record_ids to only include records at min_level or above
-        _all_period_record_ids[excel_name] = {
-            pk: rid for pk, rid in period_record_ids.items()
-            if _pk_rank(pk) >= min_rank
-        }
+
+    for excel_name, ptype in _prescan_sheet_ptypes.items():
+        if ptype == "monthly":
+            # Monthly sheets: all records are visible
+            _all_period_record_ids[excel_name] = dict(period_record_ids)
+            _sheet_visible_rids[excel_name] = set(period_record_ids.values())
+            continue
+
+        detected = _prescan_sheet_periods.get(excel_name, [])
+        detected_pks = {sp.get("period_key", "") for sp in detected if sp.get("period_key")}
+
+        # Map detected period_keys to record_ids
+        sheet_rids: dict[str, str] = {}
+        visible_rids: set[str] = set()
+        for pk in detected_pks:
+            if pk in period_record_ids:
+                sheet_rids[pk] = period_record_ids[pk]
+                visible_rids.add(period_record_ids[pk])
+
+        # Add parent records up to root (for tree completeness + consolidation)
+        # We need parent_id info from the DB — but records aren't loaded yet,
+        # so we infer parents from period_key structure.
+        for pk in list(detected_pks):
+            # Q → H parent → Y parent
+            if re.match(r'^\d{4}-Q\d$', pk):
+                year = pk[:4]
+                q_num = int(pk[-1])
+                h_num = 1 if q_num <= 2 else 2
+                h_pk = f"{year}-H{h_num}"
+                y_pk = f"{year}-Y"
+                for parent_pk in [h_pk, y_pk]:
+                    if parent_pk in period_record_ids and parent_pk not in sheet_rids:
+                        sheet_rids[parent_pk] = period_record_ids[parent_pk]
+                        visible_rids.add(period_record_ids[parent_pk])
+            elif re.match(r'^\d{4}-H\d$', pk):
+                year = pk[:4]
+                y_pk = f"{year}-Y"
+                if y_pk in period_record_ids and y_pk not in sheet_rids:
+                    sheet_rids[y_pk] = period_record_ids[y_pk]
+                    visible_rids.add(period_record_ids[y_pk])
+            elif re.match(r'^\d{4}-\d{2}$', pk):
+                year = pk[:4]
+                month = int(pk[5:7])
+                q_num = (month - 1) // 3 + 1
+                h_num = 1 if q_num <= 2 else 2
+                for parent_pk in [f"{year}-Q{q_num}", f"{year}-H{h_num}", f"{year}-Y"]:
+                    if parent_pk in period_record_ids and parent_pk not in sheet_rids:
+                        sheet_rids[parent_pk] = period_record_ids[parent_pk]
+                        visible_rids.add(period_record_ids[parent_pk])
+
+        _all_period_record_ids[excel_name] = sheet_rids
+        _sheet_visible_rids[excel_name] = visible_rids
 
     # ── Step 5: Process each sheet (two passes: 1. create structure, 2. import cells) ──
     from backend.excel_formula_translator import translate_excel_formula
@@ -2088,15 +2139,18 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         )
         sheet_sort += 1
 
-        # Bind the single shared period analytic with min_period_level
+        # Bind the single shared period analytic with visible_record_ids
         _min_lvl = _sheet_min_period_level.get(excel_name)
+        _vis_rids = _sheet_visible_rids.get(excel_name)
+        _vis_json = json.dumps(sorted(_vis_rids)) if _vis_rids and len(_vis_rids) < len(period_record_ids) else None
         for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
             sa_id = str(uuid.uuid4())
             is_main = 1 if aid == indicator_analytic_id else 0
             min_pl = _min_lvl if aid == period_analytic_id else None
+            vis = _vis_json if aid == period_analytic_id else None
             await db.execute(
-                "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_main, min_period_level) VALUES (?,?,?,?,?,?)",
-                (sa_id, pebble_sheet_id, aid, bind_idx, is_main, min_pl),
+                "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_main, min_period_level, visible_record_ids) VALUES (?,?,?,?,?,?,?)",
+                (sa_id, pebble_sheet_id, aid, bind_idx, is_main, min_pl, vis),
             )
 
         users = await db.execute_fetchall("SELECT id FROM users")
@@ -2624,20 +2678,48 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     _sheet_min_period_level[excel_name] = None
 
         _all_period_record_ids: dict[str, dict[str, str]] = {}
-        _LEVEL_RANK = {"M": 0, "Q": 1, "H": 2, "Y": 3}
-        def _pk_rank(pk: str) -> int:
-            if re.match(r'\d{4}-\d{2}$', pk): return 0
-            if "-Q" in pk: return 1
-            if "-H" in pk: return 2
-            if pk.endswith("-Y"): return 3
-            return -1
-        for excel_name in _prescan_sheet_ptypes:
-            min_lvl = _sheet_min_period_level.get(excel_name)
-            min_rank = _LEVEL_RANK.get(min_lvl or "M", 0)
-            _all_period_record_ids[excel_name] = {
-                pk: rid for pk, rid in period_record_ids.items()
-                if _pk_rank(pk) >= min_rank
-            }
+        _sheet_visible_rids: dict[str, set[str]] = {}
+
+        for excel_name, ptype in _prescan_sheet_ptypes.items():
+            if ptype == "monthly":
+                _all_period_record_ids[excel_name] = dict(period_record_ids)
+                _sheet_visible_rids[excel_name] = set(period_record_ids.values())
+                continue
+
+            detected = _prescan_sheet_periods.get(excel_name, [])
+            detected_pks = {sp.get("period_key", "") for sp in detected if sp.get("period_key")}
+            sheet_rids: dict[str, str] = {}
+            visible_rids: set[str] = set()
+            for pk in detected_pks:
+                if pk in period_record_ids:
+                    sheet_rids[pk] = period_record_ids[pk]
+                    visible_rids.add(period_record_ids[pk])
+            # Add parent records
+            for pk in list(detected_pks):
+                if re.match(r'^\d{4}-Q\d$', pk):
+                    year = pk[:4]
+                    q_num = int(pk[-1])
+                    h_num = 1 if q_num <= 2 else 2
+                    for parent_pk in [f"{year}-H{h_num}", f"{year}-Y"]:
+                        if parent_pk in period_record_ids and parent_pk not in sheet_rids:
+                            sheet_rids[parent_pk] = period_record_ids[parent_pk]
+                            visible_rids.add(period_record_ids[parent_pk])
+                elif re.match(r'^\d{4}-H\d$', pk):
+                    y_pk = f"{pk[:4]}-Y"
+                    if y_pk in period_record_ids and y_pk not in sheet_rids:
+                        sheet_rids[y_pk] = period_record_ids[y_pk]
+                        visible_rids.add(period_record_ids[y_pk])
+                elif re.match(r'^\d{4}-\d{2}$', pk):
+                    year = pk[:4]
+                    month = int(pk[5:7])
+                    q_num = (month - 1) // 3 + 1
+                    h_num = 1 if q_num <= 2 else 2
+                    for parent_pk in [f"{year}-Q{q_num}", f"{year}-H{h_num}", f"{year}-Y"]:
+                        if parent_pk in period_record_ids and parent_pk not in sheet_rids:
+                            sheet_rids[parent_pk] = period_record_ids[parent_pk]
+                            visible_rids.add(period_record_ids[parent_pk])
+            _all_period_record_ids[excel_name] = sheet_rids
+            _sheet_visible_rids[excel_name] = visible_rids
 
         total_period_count = len(period_record_ids)
         yield event(f"Создана иерархия периодов: {period_start} — {period_end} ({total_period_count} периодов)")
@@ -2719,14 +2801,17 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                              (pebble_sheet_id, model_id, sheet_display, sheet_sort, excel_name))
             sheet_sort += 1
 
-            # Bind the single shared period analytic with min_period_level
+            # Bind the single shared period analytic with visible_record_ids
             _min_lvl = _sheet_min_period_level.get(excel_name)
+            _vis_rids = _sheet_visible_rids.get(excel_name)
+            _vis_json = json.dumps(sorted(_vis_rids)) if _vis_rids and len(_vis_rids) < len(period_record_ids) else None
             for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
                 is_main = 1 if aid == indicator_analytic_id else 0
                 min_pl = _min_lvl if aid == period_analytic_id else None
+                vis = _vis_json if aid == period_analytic_id else None
                 await db.execute(
-                    "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_main, min_period_level) VALUES (?,?,?,?,?,?)",
-                    (str(uuid.uuid4()), pebble_sheet_id, aid, bind_idx, is_main, min_pl),
+                    "INSERT INTO sheet_analytics (id, sheet_id, analytic_id, sort_order, is_main, min_period_level, visible_record_ids) VALUES (?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), pebble_sheet_id, aid, bind_idx, is_main, min_pl, vis),
                 )
 
             users = await db.execute_fetchall("SELECT id FROM users")

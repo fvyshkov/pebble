@@ -187,18 +187,21 @@ async def update_sheet_analytic(sheet_id: str, sa_id: str, body: SheetAnalyticIn
 
 class PeriodLevelIn(BaseModel):
     min_period_level: str | None = None   # 'M', 'Q', 'H', 'Y' or null
+    visible_record_ids: list[str] | None = None
 
 
 @router.patch("/{sheet_id}/analytics/{sa_id}/period-level")
 async def set_period_level(sheet_id: str, sa_id: str, body: PeriodLevelIn):
-    """Set the minimum period level for a period-analytic binding."""
+    """Set the minimum period level and/or visible record IDs for a period-analytic binding."""
+    import json
     db = get_db()
     valid = {None, 'M', 'Q', 'H', 'Y'}
     if body.min_period_level not in valid:
         raise HTTPException(400, f"Invalid level: {body.min_period_level}")
+    vis_json = json.dumps(body.visible_record_ids) if body.visible_record_ids else None
     await db.execute(
-        "UPDATE sheet_analytics SET min_period_level = ? WHERE id = ? AND sheet_id = ?",
-        (body.min_period_level, sa_id, sheet_id),
+        "UPDATE sheet_analytics SET min_period_level = ?, visible_record_ids = ? WHERE id = ? AND sheet_id = ?",
+        (body.min_period_level, vis_json, sa_id, sheet_id),
     )
     await db.commit()
     row = await db.execute_fetchall("SELECT * FROM sheet_analytics WHERE id = ?", (sa_id,))

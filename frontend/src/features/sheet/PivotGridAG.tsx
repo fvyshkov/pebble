@@ -510,7 +510,18 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       const aMap: Record<string, Analytic> = {}
       const rMap: Record<string, RecordNode[]> = {}
       const recNameMap: Record<string, string> = {}
-      // Build min_period_level lookup from bindings
+      // Build visibility filters from bindings
+      const visibleSets: Record<string, Set<string> | null> = {}
+      for (const b of sa) {
+        if (b.visible_record_ids) {
+          try {
+            const ids: string[] = JSON.parse(b.visible_record_ids)
+            visibleSets[b.analytic_id] = new Set(ids)
+          } catch { visibleSets[b.analytic_id] = null }
+        } else if (b.min_period_level) {
+          visibleSets[b.analytic_id] = null // will use level filter
+        }
+      }
       const periodLevelByAid: Record<string, string | null> = {}
       for (const b of sa) periodLevelByAid[b.analytic_id] = b.min_period_level ?? null
       await Promise.all(sa.map(async b => {
@@ -519,8 +530,15 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           api.listRecords(b.analytic_id),
         ])
         aMap[b.analytic_id] = analytic
-        const minLvl = periodLevelByAid[b.analytic_id]
-        const filteredRecs = minLvl ? filterFlatRecordsByLevel(recs, minLvl) : recs
+        let filteredRecs = recs
+        const visSet = visibleSets[b.analytic_id]
+        if (visSet) {
+          // Filter by exact visible record IDs
+          filteredRecs = recs.filter(r => visSet.has(r.id))
+        } else {
+          const minLvl = periodLevelByAid[b.analytic_id]
+          if (minLvl) filteredRecs = filterFlatRecordsByLevel(recs, minLvl)
+        }
         rMap[b.analytic_id] = buildRecordTree(filteredRecs)
         for (const r of filteredRecs) {
           const d = typeof r.data_json === 'string' ? JSON.parse(r.data_json) : r.data_json

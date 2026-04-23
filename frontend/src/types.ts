@@ -54,6 +54,7 @@ export interface SheetAnalytic {
   fixed_record_id: string | null
   is_main: number
   min_period_level?: string | null  // 'M' | 'Q' | 'H' | 'Y' | null
+  visible_record_ids?: string | null  // JSON array of visible record IDs
   analytic_name?: string
   analytic_icon?: string
 }
