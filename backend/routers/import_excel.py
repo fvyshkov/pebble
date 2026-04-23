@@ -464,7 +464,7 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
             if isinstance(v, datetime) and not date_row:
                 date_row = r
 
-            if isinstance(v, (int, float)) and 2020 <= v <= 2040:
+            if isinstance(v, (int, float)) and 2020 <= v <= 2040 and v == int(v):
                 row_year_count += 1
 
             if isinstance(v, str):
@@ -497,13 +497,13 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
             year_count = 0
             for c in range(1, min(max_col + 1, 50)):
                 v = ws.cell(r, c).value
-                if isinstance(v, (int, float)) and 2020 <= v <= 2040:
+                if isinstance(v, (int, float)) and 2020 <= v <= 2040 and v == int(v):
                     year_count += 1
             if year_count >= 3:
                 year_row = r
                 for c in range(1, max_col + 1):
                     v = ws.cell(r, c).value
-                    if isinstance(v, (int, float)) and 2020 <= v <= 2040:
+                    if isinstance(v, (int, float)) and 2020 <= v <= 2040 and v == int(v):
                         year_row_values[c] = int(v)
                 break
 
@@ -512,10 +512,12 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
         return []
 
     # ── Phase 4: Build period list ──
-    # Prefer Q/H/Y over dates, then N мес, then bare years (least specific)
+    # Prefer exact dates over Q/H/Y (datetime row has month precision;
+    # Q/H/Y may coexist as aggregate columns and will be auto-generated
+    # as parents in the period hierarchy).
     periods = []
     seen_keys = set()
-    scan_row = qhy_row or date_row or text_date_row or nmes_row or bare_year_row
+    scan_row = date_row or text_date_row or qhy_row or nmes_row or bare_year_row
     month_counter = 0  # for "N мес" format
 
     for c in range(1, max_col + 1):
@@ -530,7 +532,7 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
             name = f"{MONTH_NAMES_RU[month - 1]} {year}"
             dt = datetime(year, month, 1)
 
-        elif isinstance(v, (int, float)) and 2020 <= v <= 2040 and scan_row == bare_year_row:
+        elif isinstance(v, (int, float)) and 2020 <= v <= 2040 and v == int(v) and scan_row == bare_year_row:
             # Bare year number (2024, 2025, ...) on a yearly sheet
             year = int(v)
             period_key = f"{year}-Y"
@@ -1902,7 +1904,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                         elif _nmes_re_scan.match(stripped):
                             detected_period_types.add("month")
                     # Detect year numbers in header rows (2024, 2025, etc.)
-                    if isinstance(v, (int, float)) and 2020 <= v <= 2040 and r <= 10:
+                    if isinstance(v, (int, float)) and 2020 <= v <= 2040 and r <= 10 and v == int(v):
                         all_dates.append(datetime(int(v), 1, 1))
                         all_dates.append(datetime(int(v), 12, 1))
 
@@ -2531,7 +2533,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                         _has_y0 = True
                             elif _nmes_re_scan2.match(stripped):
                                 detected_period_types.add("month")
-                        if isinstance(v, (int, float)) and 2020 <= v <= 2040 and r <= 10:
+                        if isinstance(v, (int, float)) and 2020 <= v <= 2040 and r <= 10 and v == int(v):
                             all_dates.append(datetime(int(v), 1, 1))
                             all_dates.append(datetime(int(v), 12, 1))
 
