@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from backend.db import get_db
 
@@ -183,6 +183,26 @@ async def update_sheet_analytic(sheet_id: str, sa_id: str, body: SheetAnalyticIn
     await db.commit()
     row = await db.execute_fetchall("SELECT * FROM sheet_analytics WHERE id = ?", (sa_id,))
     return dict(row[0])
+
+
+class PeriodLevelIn(BaseModel):
+    min_period_level: str | None = None   # 'M', 'Q', 'H', 'Y' or null
+
+
+@router.patch("/{sheet_id}/analytics/{sa_id}/period-level")
+async def set_period_level(sheet_id: str, sa_id: str, body: PeriodLevelIn):
+    """Set the minimum period level for a period-analytic binding."""
+    db = get_db()
+    valid = {None, 'M', 'Q', 'H', 'Y'}
+    if body.min_period_level not in valid:
+        raise HTTPException(400, f"Invalid level: {body.min_period_level}")
+    await db.execute(
+        "UPDATE sheet_analytics SET min_period_level = ? WHERE id = ? AND sheet_id = ?",
+        (body.min_period_level, sa_id, sheet_id),
+    )
+    await db.commit()
+    row = await db.execute_fetchall("SELECT * FROM sheet_analytics WHERE id = ?", (sa_id,))
+    return dict(row[0]) if row else {}
 
 
 @router.delete("/{sheet_id}/analytics/{sa_id}")

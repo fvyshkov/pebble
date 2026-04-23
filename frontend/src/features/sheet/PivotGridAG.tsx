@@ -77,6 +77,47 @@ function recordLabel(n: RecordNode): string {
   return (n.data && n.data.name) || n.record.id.slice(0, 8)
 }
 
+/** Period level rank: M=0, Q=1, H=2, Y=3. Returns -1 if unknown. */
+function periodLevelRank(pk: string): number {
+  if (/^\d{4}-M\d{2}$/.test(pk) || /^\d{4}-\d{2}$/.test(pk)) return 0  // M
+  if (/^\d{4}-Q\d$/.test(pk)) return 1  // Q
+  if (/^\d{4}-H\d$/.test(pk)) return 2  // H
+  if (/^\d{4}-Y$/.test(pk)) return 3    // Y
+  return -1
+}
+const LEVEL_RANK: Record<string, number> = { M: 0, Q: 1, H: 2, Y: 3 }
+
+/** Filter record tree: keep only records at minLevel or above (coarser). */
+function filterRecordsByLevel(nodes: RecordNode[], minLevel: string): RecordNode[] {
+  const minRank = LEVEL_RANK[minLevel] ?? 0
+  const walk = (ns: RecordNode[]): RecordNode[] => {
+    const out: RecordNode[] = []
+    for (const n of ns) {
+      const pk: string = n.data?.period_key || ''
+      const rank = periodLevelRank(pk)
+      if (rank >= 0 && rank < minRank) {
+        // This record is below min level — skip it entirely
+        continue
+      }
+      // Keep this node, but filter its children too
+      out.push({ ...n, children: walk(n.children) })
+    }
+    return out
+  }
+  return walk(nodes)
+}
+
+/** Filter flat records list by period level. */
+function filterFlatRecordsByLevel(recs: AnalyticRecord[], minLevel: string): AnalyticRecord[] {
+  const minRank = LEVEL_RANK[minLevel] ?? 0
+  return recs.filter(r => {
+    const d = typeof r.data_json === 'string' ? JSON.parse(r.data_json) : r.data_json
+    const pk: string = d?.period_key || ''
+    const rank = periodLevelRank(pk)
+    return rank < 0 || rank >= minRank
+  })
+}
+
 // ── Props ──────────────────────────────────────────────────────────────────
 interface CalcProgress {
   done: number
@@ -469,14 +510,19 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       const aMap: Record<string, Analytic> = {}
       const rMap: Record<string, RecordNode[]> = {}
       const recNameMap: Record<string, string> = {}
+      // Build min_period_level lookup from bindings
+      const periodLevelByAid: Record<string, string | null> = {}
+      for (const b of sa) periodLevelByAid[b.analytic_id] = b.min_period_level ?? null
       await Promise.all(sa.map(async b => {
         const [analytic, recs] = await Promise.all([
           api.getAnalytic(b.analytic_id),
           api.listRecords(b.analytic_id),
         ])
         aMap[b.analytic_id] = analytic
-        rMap[b.analytic_id] = buildRecordTree(recs)
-        for (const r of recs) {
+        const minLvl = periodLevelByAid[b.analytic_id]
+        const filteredRecs = minLvl ? filterFlatRecordsByLevel(recs, minLvl) : recs
+        rMap[b.analytic_id] = buildRecordTree(filteredRecs)
+        for (const r of filteredRecs) {
           const d = typeof r.data_json === 'string' ? JSON.parse(r.data_json) : r.data_json
           recNameMap[r.id] = (d && d.name) || r.id.slice(0, 6)
         }

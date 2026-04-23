@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   Box, Typography, TextField, List, ListItem, ListItemIcon, ListItemText,
   IconButton, Menu, MenuItem, Tooltip, Radio,
+  ToggleButton, ToggleButtonGroup,
 } from '@mui/material'
 import AddOutlined from '@mui/icons-material/AddOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
@@ -153,48 +154,76 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
 
       <List dense>
         {bindings.map((b, i) => (
-          <ListItem
-            key={b.id}
-            draggable
-            onDragStart={() => handleDragStart(i)}
-            onDragOver={e => handleDragOver(e, i)}
-            onDrop={() => handleDrop(i)}
-            onDragEnd={handleDragEnd}
-            sx={{
-              cursor: 'grab',
-              borderTop: dragOverIdx === i ? '2px solid #1976d2' : '2px solid transparent',
-              opacity: dragIdx.current === i ? 0.5 : 1,
-              '&:hover': { bgcolor: '#f5f5f5' },
-            }}
-            secondaryAction={
-              <IconButton size="small" onClick={() => handleRemove(b.id)}>
-                <DeleteOutlineOutlined sx={{ fontSize: 16 }} />
-              </IconButton>
-            }
-          >
-            <ListItemIcon sx={{ minWidth: 28 }}>
-              <DragIndicatorOutlined sx={{ fontSize: 16, color: '#bbb', cursor: 'grab' }} />
-            </ListItemIcon>
-            <ListItemIcon sx={{ minWidth: 32 }}>
-              {getIcon(b.analytic_icon)}
-            </ListItemIcon>
-            <ListItemText primary={b.analytic_name || 'Аналитика'} />
+          <Box key={b.id}>
+            <ListItem
+              draggable
+              onDragStart={() => handleDragStart(i)}
+              onDragOver={e => handleDragOver(e, i)}
+              onDrop={() => handleDrop(i)}
+              onDragEnd={handleDragEnd}
+              sx={{
+                cursor: 'grab',
+                borderTop: dragOverIdx === i ? '2px solid #1976d2' : '2px solid transparent',
+                opacity: dragIdx.current === i ? 0.5 : 1,
+                '&:hover': { bgcolor: '#f5f5f5' },
+              }}
+              secondaryAction={
+                <IconButton size="small" onClick={() => handleRemove(b.id)}>
+                  <DeleteOutlineOutlined sx={{ fontSize: 16 }} />
+                </IconButton>
+              }
+            >
+              <ListItemIcon sx={{ minWidth: 28 }}>
+                <DragIndicatorOutlined sx={{ fontSize: 16, color: '#bbb', cursor: 'grab' }} />
+              </ListItemIcon>
+              <ListItemIcon sx={{ minWidth: 32 }}>
+                {getIcon(b.analytic_icon)}
+              </ListItemIcon>
+              <ListItemText primary={b.analytic_name || 'Аналитика'} />
+              {(() => {
+                const a = analyticById(b.analytic_id)
+                if (a && a.is_periods) return null
+                const isMain = b.analytic_id === mainAnalyticId
+                return (
+                  <Tooltip title={isMain ? 'Главная аналитика (формулы индикаторов живут здесь)' : 'Сделать главной аналитикой'}>
+                    <Radio
+                      size="small"
+                      checked={isMain}
+                      onChange={() => handleSetMain(b.analytic_id)}
+                      sx={{ p: 0.5, mr: 4 }}
+                    />
+                  </Tooltip>
+                )
+              })()}
+            </ListItem>
+            {/* Period level selector for period analytics */}
             {(() => {
               const a = analyticById(b.analytic_id)
-              if (a && a.is_periods) return null
-              const isMain = b.analytic_id === mainAnalyticId
+              if (!a || !a.is_periods) return null
               return (
-                <Tooltip title={isMain ? 'Главная аналитика (формулы индикаторов живут здесь)' : 'Сделать главной аналитикой'}>
-                  <Radio
-                    size="small"
-                    checked={isMain}
-                    onChange={() => handleSetMain(b.analytic_id)}
-                    sx={{ p: 0.5, mr: 4 }}
-                  />
-                </Tooltip>
+                <Box sx={{ pl: 9, pb: 1 }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                    Минимальный уровень периодов:
+                  </Typography>
+                  <ToggleButtonGroup
+                    exclusive size="small"
+                    value={b.min_period_level || 'M'}
+                    onChange={async (_, v) => {
+                      if (!v) return
+                      const level = v === 'M' ? null : v
+                      await api.setPeriodLevel(sheetId, b.id, level)
+                      setBindings(prev => prev.map(x => x.id === b.id ? { ...x, min_period_level: level } : x))
+                    }}
+                  >
+                    <ToggleButton value="M" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>Месяцы</ToggleButton>
+                    <ToggleButton value="Q" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>Кварталы</ToggleButton>
+                    <ToggleButton value="H" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>Полугодия</ToggleButton>
+                    <ToggleButton value="Y" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>Годы</ToggleButton>
+                  </ToggleButtonGroup>
+                </Box>
               )
             })()}
-          </ListItem>
+          </Box>
         ))}
       </List>
 

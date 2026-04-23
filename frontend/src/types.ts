@@ -53,6 +53,7 @@ export interface SheetAnalytic {
   is_fixed: number
   fixed_record_id: string | null
   is_main: number
+  min_period_level?: string | null  // 'M' | 'Q' | 'H' | 'Y' | null
   analytic_name?: string
   analytic_icon?: string
 }

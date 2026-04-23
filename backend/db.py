@@ -160,6 +160,7 @@ MIGRATIONS = [
     "ALTER TABLE sheets ADD COLUMN sort_order INTEGER DEFAULT 0",
     "ALTER TABLE analytic_records ADD COLUMN excel_row INTEGER",
     "ALTER TABLE sheet_analytics ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE sheet_analytics ADD COLUMN min_period_level TEXT DEFAULT NULL",
 ]
 
 
