@@ -65,6 +65,8 @@ def translate_excel_formula(
     pre_data_values: dict[int, float] | None = None,
     col_to_period_idx: dict[int, int] | None = None,
     sheet_col_to_period_idx: dict[str, dict[int, int]] | None = None,
+    col_to_period_key: dict[int, str] | None = None,
+    sheet_col_to_period_key: dict[str, dict[int, str]] | None = None,
 ) -> str:
     """Translate an Excel formula to Pebble formula syntax.
 
@@ -105,6 +107,7 @@ def translate_excel_formula(
         sheet_row_maps, sheet_display_names, is_first_period,
         sheet_data_starts, row_to_parent_names, pre_data_values,
         col_to_period_idx, sheet_col_to_period_idx,
+        col_to_period_key, sheet_col_to_period_key,
     )
 
     return result
@@ -177,6 +180,8 @@ def _replace_cell_refs(
     pre_data_values: dict[int, float] | None = None,
     col_to_period_idx: dict[int, int] | None = None,
     sheet_col_to_period_idx: dict[str, dict[int, int]] | None = None,
+    col_to_period_key: dict[int, str] | None = None,
+    sheet_col_to_period_key: dict[str, dict[int, str]] | None = None,
 ) -> str:
     """Replace all cell references in formula with [name] or [Sheet::name] tokens."""
 
@@ -215,6 +220,7 @@ def _replace_cell_refs(
             sheet_row_maps, sheet_display_names, is_first_period,
             sheet_data_starts, row_to_parent_names, pre_data_values,
             col_to_period_idx, sheet_col_to_period_idx,
+            col_to_period_key, sheet_col_to_period_key,
         )
         result = result[:ref["start"]] + replacement + result[ref["end"]:]
 
@@ -234,6 +240,8 @@ def _translate_ref(
     pre_data_values: dict[int, float] | None = None,
     col_to_period_idx: dict[int, int] | None = None,
     sheet_col_to_period_idx: dict[str, dict[int, int]] | None = None,
+    col_to_period_key: dict[int, str] | None = None,
+    sheet_col_to_period_key: dict[str, dict[int, str]] | None = None,
 ) -> str:
     """Translate a single cell reference to Pebble [name] token."""
     sheet_name = ref["sheet"]
@@ -281,6 +289,44 @@ def _translate_ref(
     # Otherwise fall back to simple column arithmetic
     col_to_period_idx = col_to_period_idx or {}
     sheet_col_to_period_idx = sheet_col_to_period_idx or {}
+    col_to_period_key = col_to_period_key or {}
+    sheet_col_to_period_key = sheet_col_to_period_key or {}
+
+    # If the target column is NOT in the period_idx map (e.g., it's a total/aggregate column),
+    # use absolute period key directly — period_diff computation would be wrong
+    target_pidx_map = (sheet_col_to_period_idx.get(sheet_name) if sheet_name else None) or col_to_period_idx
+    target_pk_map = (sheet_col_to_period_key.get(sheet_name) if sheet_name else None) or col_to_period_key
+
+    if col not in target_pidx_map and col in target_pk_map:
+        # Target is a total/aggregate column — use absolute period key
+        ref_name = f"[{display}::{name}]" if display else f"[{name}]"
+        return f'{ref_name}(периоды="{target_pk_map[col]}")'
+
+    # Detect cross-level references (e.g. Y column referencing M column).
+    # назад(N)/вперед(N) only works within the same period level because
+    # the engine navigates the prev_period chain per level.
+    def _pk_level(pk: str) -> str:
+        if not pk:
+            return "?"
+        if re.match(r'\d{4}-\d{2}$', pk):
+            return "M"
+        if "-Q" in pk:
+            return "Q"
+        if "-H" in pk:
+            return "H"
+        if pk.endswith("-Y"):
+            return "Y"
+        return "?"
+
+    source_pk = col_to_period_key.get(base_col, "")
+    target_pk_val = target_pk_map.get(col, "")
+    source_level = _pk_level(source_pk)
+    target_level = _pk_level(target_pk_val)
+
+    # Cross-level reference → always use absolute period key
+    if source_level != target_level and target_pk_val and col != base_col:
+        ref_name = f"[{display}::{name}]" if display else f"[{name}]"
+        return f'{ref_name}(периоды="{target_pk_val}")'
 
     if base_col in col_to_period_idx:
         source_period_idx = col_to_period_idx[base_col]
@@ -318,8 +364,17 @@ def _translate_ref(
             return f'{ref_name}(периоды="предыдущий")'
         else:
             return f'{ref_name}(период=период.назад({n_back}))'
+    elif period_diff > 0:
+        # Forward reference — use absolute period key
+        target_pk = target_pk_map.get(col)
+        ref_name = f"[{display}::{name}]" if display else f"[{name}]"
+        if target_pk:
+            return f'{ref_name}(периоды="{target_pk}")'
+        else:
+            # Fallback: use вперед(N) syntax
+            return f'{ref_name}(период=период.вперед({period_diff}))'
     else:
-        # Same period or future (current period)
+        # Same period (period_diff == 0)
         if display:
             return f"[{display}::{name}]"
         return f"[{name}]"

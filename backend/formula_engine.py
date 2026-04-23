@@ -29,7 +29,7 @@ from typing import Any
 # ── Tokenizer ──────────────────────────────────────────────────────────────
 
 TOKEN_RE = re.compile(r"""
-    (\[(?:[^\[\]]+)\](?:\((?:[^()]*|\([^()]*\))*\))?)  |  # [ref](params) — one nesting level
+    (\[(?:[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)\](?:\((?:[^()]*|\([^()]*\))*\))?)  |  # [ref](params) — supports nested [] in name
     (SUM|AVERAGE|IF|MIN|MAX|ABS)\s*\(   |  # functions
     (\d+(?:\.\d+)?)                    |  # number
     ([+\-*/(),<>=!])                   |  # operators, parens, comparison
@@ -37,12 +37,13 @@ TOKEN_RE = re.compile(r"""
 """, re.VERBOSE)
 
 REF_RE = re.compile(r"""
-    \[([^\]]+)\]                          # indicator name
-    (?:\(((?:[^()]*|\([^()]*\))*)\))?     # optional params — one nesting level
+    \[((?:[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)+)\]  # indicator name (supports nested [])
+    (?:\(((?:[^()]*|\([^()]*\))*)\))?             # optional params — one nesting level
 """, re.VERBOSE)
 
-# For matching key.назад(N) function calls in param values
+# For matching key.назад(N) or key.вперед(N) function calls in param values
 _PERIOD_BACK_RE = re.compile(r'\w+\.назад\((\d+)\)')
+_PERIOD_FWD_RE = re.compile(r'\w+\.вперед\((\d+)\)')
 
 
 def parse_ref(token: str) -> dict:
@@ -77,6 +78,12 @@ def parse_ref(token: str) -> dict:
             back_m = _PERIOD_BACK_RE.fullmatch(val)
             if back_m:
                 params[key] = f"назад({back_m.group(1)})"
+                continue
+
+            # Period forward-reference: word.вперед(N)
+            fwd_m = _PERIOD_FWD_RE.fullmatch(val)
+            if fwd_m:
+                params[key] = f"вперед({fwd_m.group(1)})"
                 continue
 
             # Identity: key=key (same value, no-op)
@@ -260,6 +267,7 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     # ── Load entire model ──
     global_cells = {}       # {(sheet_id, coord_key): value_str}
     global_formulas = {}    # {(sheet_id, coord_key): formula_str}
+    _phantom_cells: set[tuple] = set()  # rule=formula, empty formula, val=0
     sheet_meta = {}         # sheet_id → metadata
     sheet_name_to_id = {}   # name → sheet_id (case-insensitive index)
 
@@ -324,12 +332,41 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
             if b["is_periods"]:
                 period_aid = aid
-                # Build prev_period chain for this period analytic
+                # Build prev_period chain for this period analytic.
+                # Include ALL period records (not just leaves) so that navigation
+                # works at any granularity level (M, Q, H, Y).
                 parent_ids = {r["parent_id"] for r in recs if r["parent_id"]}
                 _leaf_order = [r["id"] for r in recs if r["id"] not in parent_ids]
                 for i in range(1, len(_leaf_order)):
                     if _leaf_order[i] not in prev_period:
                         prev_period[_leaf_order[i]] = _leaf_order[i - 1]
+                # Also build prev_period for non-leaf periods grouped by level.
+                # Group by period_key pattern: M (YYYY-MM), Q (YYYY-QN), H (YYYY-HN), Y (YYYY-Y)
+                import re as _re
+                _level_groups: dict[str, list] = {}  # level → [(sort_order, rid)]
+                for r in recs:
+                    _d = r.get("_data") or {}
+                    pk = _d.get("period_key", "")
+                    if _re.match(r'\d{4}-\d{2}$', pk):
+                        lvl = "M"
+                    elif "-Q" in pk:
+                        lvl = "Q"
+                    elif "-H" in pk:
+                        lvl = "H"
+                    elif pk.endswith("-Y"):
+                        lvl = "Y"
+                    else:
+                        continue
+                    _level_groups.setdefault(lvl, []).append((r["sort_order"], r["id"]))
+                for lvl, items in _level_groups.items():
+                    if lvl == "M":
+                        continue  # leaves already handled above
+                    items.sort(key=lambda x: x[0])
+                    for j in range(1, len(items)):
+                        rid_cur = items[j][1]
+                        rid_prev = items[j - 1][1]
+                        if rid_cur not in prev_period:
+                            prev_period[rid_cur] = rid_prev
                 if not period_aid_global:
                     period_aid_global = aid
                     period_order = _leaf_order
@@ -384,12 +421,23 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 # Skip raw Excel formulas (starting with =) — they can't be evaluated
                 if not c["formula"].startswith("="):
                     global_formulas[gk] = c["formula"]
+            elif c["rule"] == "formula" and not c["formula"]:
+                val = c["value"] or ""
+                if not val or val == "0":
+                    _phantom_cells.add(gk)
 
     # Track manual cells — they must not be overwritten by consolidation
     _manual_cells: set[tuple] = set()
+    # Track "empty formula" cells — rule=formula but formula="" (phantom import cells).
+    # These should NOT be treated as real 0 values for AVERAGE calculations.
+    _empty_formula_cells: set[tuple] = set()
     for gk in global_cells:
         if gk not in global_formulas:
             _manual_cells.add(gk)
+    # _empty_formula_cells are already identified during the cell loading above:
+    # they have rule=formula, empty formula, and val=0/"". These are in global_cells
+    # but NOT in global_formulas and NOT truly manual (they're phantom import artifacts).
+    _empty_formula_cells = _phantom_cells
 
     # Track original DB cell keys (before computation adds synthetic ones)
     _original_cell_keys = set(global_cells.keys())
@@ -400,7 +448,7 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     # If a formula references [Sheet::indicator] and that indicator doesn't exist
     # on the target sheet, the formula would evaluate to 0 and destroy imported values.
     # Better to skip evaluation entirely and keep the imported value.
-    _CROSS_SHEET_REF_RE = re.compile(r'\[([^\]]*::([^\]]+))\]')
+    _CROSS_SHEET_REF_RE = re.compile(r'\[([^\]]*::(?:[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)+)\]')
     _skipped_formulas: set[tuple] = set()
     for gk, formula in list(global_formulas.items()):
         refs = _CROSS_SHEET_REF_RE.findall(formula)
@@ -644,6 +692,11 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                 # Check if cell exists (has value, formula, or is manual)
                 if target_gk not in global_cells and target_gk not in global_formulas and target_gk not in _manual_cells:
                     return None  # cell doesn't exist → missing (AVERAGE will skip)
+                # Phantom empty-formula cells (rule=formula, formula="", val=0)
+                # should be treated as missing — they were created by import for
+                # period/indicator combos with no Excel data
+                if target_gk in _empty_formula_cells and target_gk not in computed_set:
+                    return None
                 val = get_cell(sheet_id, rs)
                 # Propagate unresolved status from dependencies
                 if target_gk in _unresolved:
@@ -838,6 +891,25 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                         period_rid = prev_period.get(period_rid)
                         if not period_rid:
                             return 0.0
+                elif param_value.startswith("вперед("):
+                    try:
+                        fwd_n = int(param_value[7:-1])
+                    except ValueError:
+                        return 0.0
+                    # Build reverse prev_period map (next_period)
+                    next_period = {v: k for k, v in prev_period.items()}
+                    for _ in range(fwd_n):
+                        period_rid = next_period.get(period_rid)
+                        if not period_rid:
+                            return 0.0
+                else:
+                    # Absolute period key reference like "2025-Q4"
+                    pk_to_rid = src_meta.get("period_key_to_rid", {})
+                    resolved = pk_to_rid.get(param_value)
+                    if resolved:
+                        period_rid = resolved
+                    else:
+                        return 0.0
 
         # Build coord key in target sheet's analytic order.
         # If source and target use different period analytics, translate
@@ -1020,28 +1092,59 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
                         param_aid = aid; break
             if not param_aid: continue
 
-            # Handle period back-references
-            is_period_back = False
-            back_n = 0
+            # Handle period back/forward/absolute references
+            is_period_nav = False
+            nav_n = 0
+            nav_forward = False
+            is_absolute_pk = False
             if param_aid == period_aid:
                 if param_value == "предыдущий":
-                    is_period_back = True
-                    back_n = 1
+                    is_period_nav = True
+                    nav_n = 1
                 elif param_value.startswith("назад("):
-                    is_period_back = True
+                    is_period_nav = True
                     try:
-                        back_n = int(param_value[6:-1])
+                        nav_n = int(param_value[6:-1])
                     except ValueError:
                         return None
-
-            if is_period_back:
-                cur = parts.get(param_aid)
-                for _ in range(back_n):
-                    if cur and cur in prev_period:
-                        cur = prev_period[cur]
-                    else:
+                elif param_value.startswith("вперед("):
+                    is_period_nav = True
+                    nav_forward = True
+                    try:
+                        nav_n = int(param_value[7:-1])
+                    except ValueError:
                         return None
+                else:
+                    is_absolute_pk = True
+
+            if is_period_nav:
+                cur = parts.get(param_aid)
+                if nav_forward:
+                    next_period = {v: k for k, v in prev_period.items()}
+                    for _ in range(nav_n):
+                        if cur and cur in next_period:
+                            cur = next_period[cur]
+                        else:
+                            return None
+                else:
+                    for _ in range(nav_n):
+                        if cur and cur in prev_period:
+                            cur = prev_period[cur]
+                        else:
+                            return None
                 parts[param_aid] = cur
+            elif is_absolute_pk:
+                # Absolute period key like "2025-Q4" — scan period records
+                resolved_pk = None
+                for rid_check, rec_data in record_by_id.items():
+                    _d = rec_data.get("_data") or {}
+                    if _d.get("period_key") == param_value:
+                        resolved_pk = rid_check
+                        break
+                if resolved_pk:
+                    parts[param_aid] = resolved_pk
+                else:
+                    return None
             else:
                 nmap = name_to_rids.get(param_aid, {})
                 rids = nmap.get(param_value.lower(), [])
