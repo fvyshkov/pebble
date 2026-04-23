@@ -12,6 +12,7 @@ import ImageOutlined from '@mui/icons-material/ImageOutlined'
 import MicOutlined from '@mui/icons-material/MicOutlined'
 import MicOffOutlined from '@mui/icons-material/MicOffOutlined'
 import { Chip } from '@mui/material'
+import { useTranslation } from 'react-i18next'
 import * as api from '../../api'
 import type { ChatAction } from '../../api'
 
@@ -49,6 +50,7 @@ export default function ChatPanel({
   open, width, onClose, context,
   onOpenSheet, onSwitchMode, onImportExcel, onRefreshData, onShowChart, onShowPresentation,
 }: ChatPanelProps) {
+  const { t } = useTranslation()
   const [messages, setMessages] = useState<UIMessage[]>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY)
@@ -105,14 +107,14 @@ export default function ChatPanel({
       if (file && onImportExcel) {
         setMessages(prev => [...prev, {
           role: 'user',
-          text: `📎 ${file.name} (импорт)`,
-          raw: { role: 'user', content: `Импорт файла ${file.name}` },
+          text: `📎 ${file.name} (${t('chat.importFile')})`,
+          raw: { role: 'user', content: `${t('chat.importFile')} ${file.name}` },
         }])
         onImportExcel(file)
       }
     }
     input.click()
-  }, [onImportExcel])
+  }, [onImportExcel, t])
 
   const applyActions = useCallback((actions: ChatAction[]) => {
     let needReload = false
@@ -142,8 +144,8 @@ export default function ChatPanel({
         // Excel files → import flow
         setMessages(prev => [...prev, {
           role: 'user',
-          text: `📎 ${f.name} (импорт)`,
-          raw: { role: 'user', content: `Импорт файла ${f.name}` },
+          text: `📎 ${f.name} (${t('chat.importFile')})`,
+          raw: { role: 'user', content: `${t('chat.importFile')} ${f.name}` },
         }])
         onImportExcel(f)
         return
@@ -151,7 +153,7 @@ export default function ChatPanel({
     }
     // Non-Excel files → attach as chips
     setAttachments(prev => [...prev, ...arr])
-  }, [onImportExcel])
+  }, [onImportExcel, t])
 
   // Typewriter: gradually reveal full text
   const typewrite = useCallback((fullText: string, rawContent: any) => {
@@ -225,7 +227,7 @@ export default function ChatPanel({
         } else if (event.type === 'done') {
           setLoading(false)
           setThinkingSteps([])
-          const finalText = event.text || '(пусто)'
+          const finalText = event.text || t('chat.empty')
           typewrite(finalText, finalText)
           if (event.actions?.length) applyActions(event.actions)
         } else if (event.type === 'error') {
@@ -233,8 +235,8 @@ export default function ChatPanel({
           setThinkingSteps([])
           setMessages(prev => [...prev, {
             role: 'assistant',
-            text: `⚠️ Ошибка: ${event.text}`,
-            raw: { role: 'assistant', content: `Ошибка: ${event.text}` },
+            text: `⚠️ ${t('common.error')}: ${event.text}`,
+            raw: { role: 'assistant', content: `${t('common.error')}: ${event.text}` },
           }])
         }
       }, controller.signal)
@@ -247,13 +249,13 @@ export default function ChatPanel({
       }
       setMessages(prev => [...prev, {
         role: 'assistant',
-        text: `⚠️ Ошибка: ${e.message || e}`,
-        raw: { role: 'assistant', content: `Ошибка: ${e.message || e}` },
+        text: `⚠️ ${t('common.error')}: ${e.message || e}`,
+        raw: { role: 'assistant', content: `${t('common.error')}: ${e.message || e}` },
       }])
       setLoading(false)
       setThinkingSteps([])
     }
-  }, [messages, context, applyActions, typewrite, attachments])
+  }, [messages, context, applyActions, typewrite, attachments, t])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -452,11 +454,11 @@ export default function ChatPanel({
         display: 'flex', alignItems: 'center', px: 1.5, py: 1,
         borderBottom: '1px solid #e0e0e0', background: '#fff',
       }}>
-        <Typography sx={{ flex: 1, fontSize: 14, fontWeight: 600 }}>AI-помощник</Typography>
-        <Tooltip title="Очистить историю">
+        <Typography sx={{ flex: 1, fontSize: 14, fontWeight: 600 }}>{t('chat.title')}</Typography>
+        <Tooltip title={t('chat.clearHistory')}>
           <IconButton size="small" onClick={clear}><ClearAllOutlined fontSize="small" /></IconButton>
         </Tooltip>
-        <Tooltip title="Закрыть">
+        <Tooltip title={t('chat.close')}>
           <IconButton size="small" onClick={onClose}><CloseOutlined fontSize="small" /></IconButton>
         </Tooltip>
       </Box>
@@ -465,8 +467,7 @@ export default function ChatPanel({
       <Box ref={scrollRef} sx={{ flex: 1, overflowY: 'auto', p: 1.5, position: 'relative' }}>
         {messages.length === 0 && (
           <Typography sx={{ color: '#888', fontSize: 12, fontStyle: 'italic' }}>
-            Задавайте вопросы, просите создать модель, открыть лист, ввести значения.
-            Можно перетащить Excel-файл сюда для импорта.
+            {t('chat.hint')}
           </Typography>
         )}
         {messages.map((m, i) => (
@@ -528,7 +529,7 @@ export default function ChatPanel({
               ))
             ) : (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <CircularProgress size={14} /> думаю…
+                <CircularProgress size={14} /> {t('chat.thinking')}
               </Box>
             )}
           </Box>
@@ -539,7 +540,7 @@ export default function ChatPanel({
             background: 'rgba(25,118,210,0.08)', border: '2px dashed #1976d2',
             color: '#1976d2', fontSize: 14, fontWeight: 600, pointerEvents: 'none',
           }}>
-            Отпустите файл для прикрепления
+            {t('chat.dropFile')}
           </Box>
         )}
       </Box>
@@ -561,7 +562,7 @@ export default function ChatPanel({
           </Box>
         )}
         <Box sx={{ p: 1, display: 'flex', gap: 0.5, alignItems: 'flex-end' }}>
-          <Tooltip title="Прикрепить файл">
+          <Tooltip title={t('chat.attachFile')}>
             <IconButton
               size="small"
               sx={{ mb: 0.5, color: '#666' }}
@@ -582,7 +583,7 @@ export default function ChatPanel({
             value={input}
             onChange={e => setInput(e.target.value)}
             onPaste={handlePaste}
-            placeholder="Задайте вопрос или команду…"
+            placeholder={t('chat.placeholder')}
             multiline
             minRows={1}
             maxRows={4}
@@ -655,8 +656,8 @@ export default function ChatPanel({
         }}>
           <Tooltip title={
             voiceUnsupported
-              ? 'Голосовой ввод не поддерживается в этом браузере'
-              : listening ? 'Выключить голосовой ввод (⎵⎵)' : 'Голосовой ввод (⎵⎵ — двойной пробел)'
+              ? t('chat.voiceNotSupported')
+              : listening ? t('chat.voiceOff') : t('chat.voiceOn')
           }>
             <span>
               <IconButton
@@ -678,9 +679,9 @@ export default function ChatPanel({
             </span>
           </Tooltip>
           <span>
-            {voiceUnsupported ? 'голос недоступен'
-              : listening ? 'слушаю… (пауза → отправка)'
-              : 'голос выключен'}
+            {voiceUnsupported ? t('chat.voiceUnavailable')
+              : listening ? t('chat.listening')
+              : t('chat.voiceDisabled')}
           </span>
           {listening && (
             <Box sx={{

@@ -10,6 +10,7 @@ import ChevronRightOutlined from '@mui/icons-material/ChevronRightOutlined'
 import FileDownloadOutlined from '@mui/icons-material/FileDownloadOutlined'
 import FileUploadOutlined from '@mui/icons-material/FileUploadOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
+import { useTranslation } from 'react-i18next'
 import { usePending } from '../../store/PendingContext'
 import * as api from '../../api'
 import type { AnalyticField, AnalyticRecord } from '../../types'
@@ -47,6 +48,7 @@ interface TreeNode {
 }
 
 export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: Props) {
+  const { t } = useTranslation()
   const [fields, setFields] = useState<AnalyticField[]>([])
   const [records, setRecords] = useState<AnalyticRecord[]>([])
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
@@ -280,17 +282,17 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
     <Box sx={{ display: 'flex', minWidth: 0, width: '100%', height: '100%' }}>
       <Box sx={{ flex: 1, minWidth: 0, overflow: 'auto', p: 1 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-        <Typography variant="subtitle1">Записи</Typography>
-        <Tooltip title="Добавить запись">
+        <Typography variant="subtitle1">{t('records.title')}</Typography>
+        <Tooltip title={t('records.addRecord')}>
           <IconButton size="small" onClick={() => handleAdd(null)}><AddOutlined fontSize="small" /></IconButton>
         </Tooltip>
         <Box sx={{ flex: 1 }} />
-        <Tooltip title="Импорт из Excel">
+        <Tooltip title={t('records.importExcel')}>
           <IconButton size="small" onClick={() => fileRef.current?.click()}>
             <FileUploadOutlined fontSize="small" />
           </IconButton>
         </Tooltip>
-        <Tooltip title="Экспорт в Excel">
+        <Tooltip title={t('records.exportExcel')}>
           <IconButton size="small" onClick={handleExport}>
             <FileDownloadOutlined fontSize="small" />
           </IconButton>
@@ -322,7 +324,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
               )})}
               {mainSheets.length > 0 && (<>
                 <TableCell sx={{ position: 'relative', width: colWidths['formula'] || 200, userSelect: 'none' }}>
-                  Формула
+                  {t('records.formula')}
                   <Box
                     onMouseDown={e => handleResizeStart('formula', e)}
                     sx={{
@@ -332,7 +334,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   />
                 </TableCell>
                 <TableCell sx={{ position: 'relative', width: colWidths['consolidation'] || 200, userSelect: 'none' }}>
-                  Консолидация
+                  {t('records.consolidation')}
                   <Box
                     onMouseDown={e => handleResizeStart('consolidation', e)}
                     sx={{
@@ -367,12 +369,12 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                       {fi === 0 ? (
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0 }}>
                           <Box className="row-actions" sx={{ display: 'flex', gap: 0, transition: 'opacity 0.15s', flexShrink: 0 }}>
-                            <Tooltip title="Добавить дочерний">
+                            <Tooltip title={t('records.addChild')}>
                               <IconButton size="small" onClick={() => handleAdd(node.record.id)}>
                                 <AddOutlined sx={{ fontSize: 14 }} />
                               </IconButton>
                             </Tooltip>
-                            <Tooltip title="Удалить">
+                            <Tooltip title={t('records.delete')}>
                               <IconButton size="small" onClick={() => handleDelete(node.record.id)}>
                                 <DeleteOutlineOutlined sx={{ fontSize: 14 }} />
                               </IconButton>
@@ -416,9 +418,9 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                         data-testid={`formula-cell-${node.record.id}`}
                         onClick={e => { e.stopPropagation(); setSelectedRecordId(node.record.id) }}
                         sx={formulaCellSx(leaf)}
-                        title={leaf || 'Ручной ввод — нажмите для настройки'}
+                        title={leaf || t('records.manualInput')}
                       >
-                        {leaf || 'ручной ввод'}
+                        {leaf || t('records.manualInput')}
                       </TableCell>
                       <TableCell
                         data-testid={`consol-cell-${node.record.id}`}
@@ -439,7 +441,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
 
       {records.length === 0 && fields.length > 0 && (
         <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
-          Нет записей. Добавьте запись или импортируйте из Excel.
+          {t('records.noRecords')}
         </Typography>
       )}
       </Box>
@@ -451,9 +453,9 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.5, borderBottom: 1, borderColor: 'divider' }}>
               {mainSheets.length > 1 ? (
                 <FormControl size="small" sx={{ minWidth: 160 }}>
-                  <InputLabel>Лист</InputLabel>
+                  <InputLabel>{t('records.sheet')}</InputLabel>
                   <Select
-                    label="Лист" value={activeSheetId || ''}
+                    label={t('records.sheet')} value={activeSheetId || ''}
                     onChange={e => setActiveSheetId(String(e.target.value))}
                   >
                     {mainSheets.map(s => (
@@ -467,7 +469,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                 </Typography>
               )}
               <Box sx={{ flex: 1 }} />
-              <Tooltip title="Назад к настройкам">
+              <Tooltip title={t('records.backToSettings')}>
                 <IconButton size="small" onClick={() => setSelectedRecordId(null)}>
                   <CloseOutlined fontSize="small" />
                 </IconButton>

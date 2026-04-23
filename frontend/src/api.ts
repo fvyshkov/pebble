@@ -253,6 +253,12 @@ export const importExcel = (analyticId: string, file: File) => {
   return fetch(`${BASE}/excel/analytics/${analyticId}/import`, { method: 'POST', body: fd }).then(r => json<AnalyticRecord[]>(r))
 }
 
+// i18n / Translations
+export const getModelTranslations = (modelId: string, lang: string) =>
+  fetch(`${BASE}/i18n/model/${modelId}?lang=${lang}`).then(r => json<Record<string, string>>(r))
+export const getLanguages = () =>
+  fetch(`${BASE}/i18n/languages`).then(r => json<any>(r))
+
 // Chat
 export interface ChatAction {
   type: string

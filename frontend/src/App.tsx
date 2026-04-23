@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   IconButton, Tooltip, Badge, Select, MenuItem, FormControl,
   Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, CircularProgress,
@@ -20,6 +21,7 @@ import ErrorOutlineOutlined from '@mui/icons-material/ErrorOutlineOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import WarningAmberOutlined from '@mui/icons-material/WarningAmberOutlined'
 import DeleteSweepOutlined from '@mui/icons-material/DeleteSweepOutlined'
+import TranslateOutlined from '@mui/icons-material/TranslateOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
@@ -32,6 +34,7 @@ import ChatPanel from './features/chat/ChatPanel'
 import ChartPanel, { type ChartConfig } from './features/chart/ChartPanel'
 import PresentationPanel from './features/presentation/PresentationPanel'
 import { PendingProvider, usePending } from './store/PendingContext'
+import { LANGUAGES, changeLanguage, currentLang } from './i18n'
 import * as api from './api'
 import './App.css'
 
@@ -39,6 +42,7 @@ type AppMode = 'settings' | 'data' | 'formulas'
 
 function SaveButton() {
   const { isDirty, flush } = usePending()
+  const { t } = useTranslation()
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); if (isDirty) flush() }
@@ -47,7 +51,7 @@ function SaveButton() {
     return () => window.removeEventListener('keydown', handler)
   }, [isDirty, flush])
   return (
-    <Tooltip title={isDirty ? 'Сохранить (Ctrl+S)' : 'Нет изменений'}>
+    <Tooltip title={isDirty ? t('app.save') : t('app.noChanges')}>
       <span>
         <IconButton size="small" disabled={!isDirty} onClick={flush} sx={{ color: isDirty ? '#1976d2' : undefined }}>
           <Badge variant="dot" color="error" invisible={!isDirty}><SaveOutlined fontSize="small" /></Badge>
@@ -57,9 +61,29 @@ function SaveButton() {
   )
 }
 
+function LanguageSwitcher() {
+  const [lang, setLang] = useState(currentLang())
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
+      {LANGUAGES.map(l => (
+        <Chip
+          key={l.code}
+          label={l.label}
+          size="small"
+          variant={lang === l.code ? 'filled' : 'outlined'}
+          color={lang === l.code ? 'primary' : 'default'}
+          onClick={() => { changeLanguage(l.code); setLang(l.code) }}
+          sx={{ fontSize: 11, height: 22, cursor: 'pointer', minWidth: 32 }}
+        />
+      ))}
+    </Box>
+  )
+}
+
 function ImportDialog({ open, onClose, onImported, initialFile }: {
   open: boolean; onClose: () => void; onImported: (modelId: string) => void; initialFile?: File | null
 }) {
+  const { t } = useTranslation()
   const [file, setFile] = useState<File | null>(null)
   const [modelName, setModelName] = useState('')
 
@@ -108,7 +132,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
         }
       })
     } catch (err) {
-      setLog(prev => [...prev, `[ERR]Ошибка: ${(err as Error).message}`])
+      setLog(prev => [...prev, `[ERR]${t('import.error')}: ${(err as Error).message}`])
     } finally {
       setLoading(false)
       clearInterval(elapsedRef.current)
@@ -126,17 +150,17 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
 
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Импорт модели из Excel</DialogTitle>
+      <DialogTitle>{t('import.title')}</DialogTitle>
       <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
         <input
           ref={fileRef} type="file" accept=".xlsx,.xls"
           style={{ display: 'none' }} onChange={handleFileChange}
         />
         <Button variant="outlined" onClick={() => fileRef.current?.click()} disabled={loading}>
-          {file ? file.name : 'Выбрать файл (.xlsx)'}
+          {file ? file.name : t('import.selectFile')}
         </Button>
         <TextField
-          label="Название модели" value={modelName}
+          label={t('import.modelName')} value={modelName}
           onChange={e => setModelName(e.target.value)}
           fullWidth size="small" disabled={loading}
         />
@@ -145,7 +169,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
             {progress.total > 0 ? (
               <>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#666', mb: 0.5 }}>
-                  <span>Показатели: {progress.current} из {progress.total}</span>
+                  <span>{t('import.indicators')}: {progress.current} {t('import.of')} {progress.total}</span>
                   <span>{Math.round(progress.current / progress.total * 100)}%</span>
                 </Box>
                 <Box sx={{ width: '100%', height: 6, bgcolor: '#e0e0e0', borderRadius: 3 }}>
@@ -195,7 +219,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
               const secs = String(elapsed % 60).padStart(2, '0')
               return (
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5, color: '#1976d2' }}>
-                  <CircularProgress size={12} /> <span>работаю... {elapsed > 0 ? `${mins}:${secs}` : ''}</span>
+                  <CircularProgress size={12} /> <span>{t('app.working')} {elapsed > 0 ? `${mins}:${secs}` : ''}</span>
                 </Box>
               )
             })()}
@@ -204,7 +228,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading} startIcon={done ? <CloseOutlined /> : undefined}>
-          {done ? 'Закрыть' : 'Отмена'}
+          {done ? t('import.close') : t('app.cancel')}
         </Button>
         {!done && (
           <Button
@@ -213,7 +237,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
             onClick={handleImport}
             startIcon={loading ? <CircularProgress size={16} /> : undefined}
           >
-            {loading ? 'Импорт...' : 'Импортировать'}
+            {loading ? t('import.importing') : t('import.importBtn')}
           </Button>
         )}
       </DialogActions>
@@ -222,6 +246,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
 }
 
 function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: string; can_admin: boolean }; onLogout?: () => void }) {
+  const { t } = useTranslation()
   const [mode, setMode] = useState<AppMode>('data')
   const [selection, setSelection] = useState<TreeSelection | null>(null)
   const [leftWidth, setLeftWidth] = useState(280)
@@ -288,12 +313,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   }
 
   // ── Global shortcuts ──────────────────────────────────────────────────
-  // • Double-space (two spaces within 400ms) → toggle voice input in chat.
-  //   Opens chat panel if it's closed. Ignored when the user is typing in
-  //   an input/textarea so normal " " still works.
-  // • Cmd/Ctrl+Z → history-based undo (api.undoChanges on the latest entry).
-  //   Skipped when focus is inside an editable element, so text-editor undo
-  //   (including AG Grid cell editor) keeps working natively.
   const lastSpaceRef = useRef<number>(0)
   useEffect(() => {
     const isEditable = () => {
@@ -307,7 +326,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
     const stripTrailingSpace = () => {
       const el = document.activeElement as (HTMLElement & { value?: string }) | null
       if (!el) return
-      // INPUT / TEXTAREA — use native setter so React picks up the change.
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
         const v = (el as HTMLInputElement | HTMLTextAreaElement).value
         if (v && v.endsWith(' ')) {
@@ -319,7 +337,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
         }
         return
       }
-      // contenteditable — patch textContent if it ends with a space.
       if (el.isContentEditable) {
         const t = el.textContent || ''
         if (t.endsWith(' ')) {
@@ -329,10 +346,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
       }
     }
     const onKey = async (ev: KeyboardEvent) => {
-      // Double-space → toggle voice. Works everywhere in the app, including
-      // inside inputs, textareas and AG Grid cell editors. In editable
-      // targets we strip the just-typed trailing space so the field isn't
-      // polluted by the shortcut.
       if (ev.key === ' ' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
         const now = Date.now()
         if (now - lastSpaceRef.current < 400) {
@@ -340,7 +353,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
           lastSpaceRef.current = 0
           if (isEditable()) stripTrailingSpace()
           setChatOpen(true)
-          // Defer a tick so ChatPanel has mounted if it was closed.
           setTimeout(() => {
             window.dispatchEvent(new CustomEvent('pebble:toggleVoice'))
           }, 50)
@@ -374,9 +386,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
     return () => window.removeEventListener('keydown', onKey)
   }, [selection?.modelId])
 
-  // No auto-calculate on first sheet load — imported values from Excel are already correct.
-  // Recalculation only happens when user explicitly edits cells or clicks "Рассчитать".
-
   const onCreated = useCallback((info: { modelId: string; folder: 'sheets' | 'analytics'; id: string; type: 'sheet' | 'analytic' }) => {
     setExpandAfterCreate({ modelId: info.modelId, folder: info.folder, selectId: info.id, selectType: info.type })
     setSelection({ type: info.type, id: info.id, modelId: info.modelId })
@@ -386,7 +395,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const handleImported = useCallback((modelId: string) => {
     setSelection({ type: 'model', id: modelId, modelId })
     setRefreshKey(k => k + 1)
-    // Auto-recalc after import — consolidation formulas need computation
+    // Auto-recalc after import
     const startedAt = Date.now()
     setCalcRunning(true)
     setCalcProgress({ done: 0, total: 1, startedAt })
@@ -401,8 +410,6 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
     }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
   }, [])
 
-  // When switching to data/formulas mode, if a sheet is selected — keep it.
-  // When clicking a sheet in left panel — select it and switch to data mode if needed.
   const handleSelect = useCallback((sel: TreeSelection | null) => {
     setSelection(sel)
   }, [])
@@ -423,19 +430,19 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
     <PendingProvider onFlushed={onRefresh}>
       <div className="app-root">
         <div className="app-toolbar">
-          <Tooltip title={leftOpen ? "Скрыть панель" : "Показать панель"}>
+          <Tooltip title={leftOpen ? t('app.hidePanel') : t('app.showPanel')}>
             <IconButton size="small" onClick={() => setLeftOpen(v => !v)}>
               <MenuOutlined fontSize="small" />
             </IconButton>
           </Tooltip>
           {isAdmin && (
-            <Tooltip title="Импорт модели из Excel">
+            <Tooltip title={t('app.importExcel')}>
               <IconButton size="small" onClick={() => setShowImport(true)}>
                 <FileUploadOutlined fontSize="small" />
               </IconButton>
             </Tooltip>
           )}
-          <Tooltip title="Обновить">
+          <Tooltip title={t('app.refresh')}>
             <IconButton size="small" onClick={onRefresh}>
               <RefreshOutlined fontSize="small" />
             </IconButton>
@@ -450,26 +457,26 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             sx={{ '& .MuiToggleButton-root': { py: 0.25, px: 1, fontSize: 12, textTransform: 'none' } }}
           >
             <ToggleButton value="data">
-              <Tooltip title="Просмотр / ввод данных"><TableChartOutlined sx={{ fontSize: 16 }} /></Tooltip>
+              <Tooltip title={t('app.dataMode')}><TableChartOutlined sx={{ fontSize: 16 }} /></Tooltip>
             </ToggleButton>
             {isAdmin && (
               <ToggleButton value="formulas">
-                <Tooltip title="Формулы и правила"><FunctionsOutlined sx={{ fontSize: 16 }} /></Tooltip>
+                <Tooltip title={t('app.formulasMode')}><FunctionsOutlined sx={{ fontSize: 16 }} /></Tooltip>
               </ToggleButton>
             )}
             {isAdmin && (
               <ToggleButton value="settings">
-                <Tooltip title="Настройки модели"><SettingsOutlined sx={{ fontSize: 16 }} /></Tooltip>
+                <Tooltip title={t('app.settingsMode')}><SettingsOutlined sx={{ fontSize: 16 }} /></Tooltip>
               </ToggleButton>
             )}
           </ToggleButtonGroup>
 
 
           {/* Calc mode toggle + calculate button */}
-          <Tooltip title={calcMode === 'auto' ? 'Авто-расчёт (при каждом сохранении)' : 'Ручной расчёт (по кнопке)'}>
+          <Tooltip title={calcMode === 'auto' ? t('app.autoCalc') : t('app.manualCalc')}>
             <Chip
               size="small"
-              label={calcMode === 'auto' ? 'авто' : 'вручную'}
+              label={calcMode === 'auto' ? t('app.auto') : t('app.manual')}
               variant={calcMode === 'auto' ? 'filled' : 'outlined'}
               color={calcMode === 'auto' ? 'success' : 'default'}
               onClick={() => setCalcMode(prev => prev === 'auto' ? 'manual' : 'auto')}
@@ -477,7 +484,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             />
           </Tooltip>
           {calcMode === 'manual' && selection?.modelId && (
-            <Tooltip title="Рассчитать все формулы">
+            <Tooltip title={t('app.calculateAll')}>
               <Button
                 size="small"
                 variant="outlined"
@@ -503,33 +510,30 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                         startedAt,
                       })
                     } else if (data.phase === 'done') {
-                      // NB: no longer bump refreshKey — that would remount
-                      // PivotGridAG and lose the "pre-recalc" cellMap snapshot
-                      // needed to detect which cells changed (for the green
-                      // flash). PivotGridAG refetches + diffs internally when
-                      // calcProgress transitions from truthy to null.
                       setCalcProgress(null); setCalcRunning(false)
                     }
                   }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
                 }}
                 sx={{ fontSize: 11, textTransform: 'none', minWidth: 0, py: 0, px: 1 }}
               >
-                {calcRunning && calcProgress ? `${calcProgress.done}/${calcProgress.total}` : 'Рассчитать'}
+                {calcRunning && calcProgress ? `${calcProgress.done}/${calcProgress.total}` : t('app.calculate')}
               </Button>
             </Tooltip>
           )}
 
           <div style={{ flex: 1 }} />
 
+          <LanguageSwitcher />
+
           {isAdmin && (
-            <Tooltip title="Удалить все модели">
+            <Tooltip title={t('app.deleteAllModels')}>
               <IconButton size="small" onClick={() => setConfirmDeleteAll(true)} sx={{ color: '#d32f2f' }}>
                 <DeleteSweepOutlined fontSize="small" />
               </IconButton>
             </Tooltip>
           )}
           {isAdmin && (
-            <Tooltip title="Пользователи">
+            <Tooltip title={t('app.users')}>
               <IconButton size="small" onClick={() => setShowUsers(true)}>
                 <PeopleOutlined fontSize="small" />
               </IconButton>
@@ -537,7 +541,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
           )}
 
 
-          <Tooltip title={chatOpen ? 'Скрыть AI-чат (⌘J)' : 'AI-помощник (⌘J)'}>
+          <Tooltip title={chatOpen ? t('app.hideChat') : t('app.showChat')}>
             <IconButton
               size="small"
               onClick={() => setChatOpen(v => !v)}
@@ -551,7 +555,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
           {authUser && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 1 }}>
               <Typography sx={{ fontSize: 13, color: '#555' }}>{authUser.username}</Typography>
-              <Tooltip title="Выйти">
+              <Tooltip title={t('app.logout')}>
                 <IconButton size="small" onClick={onLogout}>
                   <LogoutOutlined fontSize="small" />
                 </IconButton>
@@ -591,7 +595,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               />
             ) : (
               <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
-                Выберите лист для просмотра данных
+                {t('app.selectSheet')}
               </div>
             )}
           </div>
@@ -623,21 +627,21 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               series: cfg.series || [],
               category_field: cfg.category_field || 'category',
             })}
-            onShowPresentation={(p: any) => { console.log('[PEBBLE] onShowPresentation called', p?.type, 'html length:', p?.html?.length); setPresentation({ html: p.html, title: p.title || 'Презентация' }) }}
+            onShowPresentation={(p: any) => { console.log('[PEBBLE] onShowPresentation called', p?.type, 'html length:', p?.html?.length); setPresentation({ html: p.html, title: p.title || t('app.presentation') }) }}
           />
         </div>
 
         <UsersDialog open={showUsers} onClose={() => setShowUsers(false)} />
 
         <Dialog open={confirmDeleteAll} onClose={() => setConfirmDeleteAll(false)}>
-          <DialogTitle>Удалить все модели?</DialogTitle>
+          <DialogTitle>{t('app.deleteAllTitle')}</DialogTitle>
           <DialogContent>
-            <Typography>Все модели, листы и данные будут удалены без возможности восстановления.</Typography>
+            <Typography>{t('app.deleteAllText')}</Typography>
           </DialogContent>
           <DialogActions>
-            <Button onClick={() => setConfirmDeleteAll(false)} disabled={deletingAll}>Отмена</Button>
+            <Button onClick={() => setConfirmDeleteAll(false)} disabled={deletingAll}>{t('app.cancel')}</Button>
             <Button onClick={handleDeleteAllModels} color="error" variant="contained" disabled={deletingAll}>
-              {deletingAll ? <CircularProgress size={20} /> : 'Удалить всё'}
+              {deletingAll ? <CircularProgress size={20} /> : t('app.deleteAll')}
             </Button>
           </DialogActions>
         </Dialog>

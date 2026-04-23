@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   Box, Typography, TextField, IconButton, Tooltip, Chip,
   Stack, Accordion, AccordionSummary, AccordionDetails, Button,
@@ -76,13 +77,14 @@ function RecordTreePicker({
   onChange: (rid: string) => void
   multi?: boolean
 }) {
+  const { t } = useTranslation()
   const [anchor, setAnchor] = useState<HTMLElement | null>(null)
   const selected = useMemo(
     () => new Set(value ? value.split(',').filter(Boolean) : []),
     [value],
   )
   const label = selected.size === 0
-    ? 'любое'
+    ? t('formulas.any')
     : [...selected].map(id => recName(analytic.byId[id]) || id.slice(0, 6)).join(', ')
 
   const toggle = (id: string) => {
@@ -143,12 +145,12 @@ function RecordTreePicker({
         if (t) (byType[t] ||= []).push(r.id)
       } catch { /* skip */ }
     }
-    const labels: Record<string, string> = { Q: 'Кварталы', H: 'Полугодия', Y: 'Годы', M: 'Месяцы' }
-    for (const t of ['Y', 'H', 'Q', 'M']) {
-      if (byType[t]?.length) groups.push({ label: labels[t], ids: byType[t] })
+    const labels: Record<string, string> = { Q: t('grid.quarters'), H: t('grid.halfyears'), Y: t('grid.years'), M: t('grid.months') }
+    for (const tp of ['Y', 'H', 'Q', 'M']) {
+      if (byType[tp]?.length) groups.push({ label: labels[tp], ids: byType[tp] })
     }
     return groups
-  }, [multi, analytic])
+  }, [multi, analytic, t])
 
   const selectType = (ids: string[]) => {
     onChange(ids.join(','))
@@ -179,7 +181,7 @@ function RecordTreePicker({
             sx={{ justifyContent: 'flex-start', textTransform: 'none', mb: 0.5 }}
             onClick={() => { onChange(''); if (!multi) setAnchor(null) }}
           >
-            <em>любое</em>
+            <em>{t('formulas.any')}</em>
           </Button>
           {typeGroups.length > 0 && (
             <Stack direction="row" spacing={0.5} sx={{ mb: 1, flexWrap: 'wrap', gap: 0.5 }}>
@@ -214,6 +216,7 @@ function RecordTreePicker({
 export default function IndicatorFormulasPanel({
   sheetId, modelId, indicatorId, indicatorName, onRulesChanged,
 }: Props) {
+  const { t } = useTranslation()
   const { addOp, getOverrides } = usePending()
   const [leafFormula, setLeafFormula] = useState('')
   const [leafMode, setLeafMode] = useState<Mode>('manual')
@@ -391,7 +394,7 @@ export default function IndicatorFormulasPanel({
   if (loading) {
     return (
       <Box sx={{ p: 2 }}>
-        <Typography variant="body2" color="text.secondary">Загрузка…</Typography>
+        <Typography variant="body2" color="text.secondary">{t('common.loading')}</Typography>
       </Box>
     )
   }
@@ -416,13 +419,13 @@ export default function IndicatorFormulasPanel({
         sx={{ mb: 1 }}
       >
         <ToggleButton value="manual" sx={{ textTransform: 'none', py: 0.25, px: 1 }}>
-          Ручной ввод
+          {t('formulas.manualInput')}
         </ToggleButton>
         <ToggleButton value="formula" sx={{ textTransform: 'none', py: 0.25, px: 1 }}>
-          Формула
+          {t('formulas.formula')}
         </ToggleButton>
         <ToggleButton value="empty" sx={{ textTransform: 'none', py: 0.25, px: 1 }}>
-          Пусто
+          {t('formulas.empty')}
         </ToggleButton>
       </ToggleButtonGroup>
       {mode === 'formula' ? (
@@ -449,7 +452,7 @@ export default function IndicatorFormulasPanel({
         </>
       ) : mode === 'empty' ? (
         <Typography variant="caption" color="text.secondary">
-          Клетка всегда пуста — ввод невозможен.
+          {t('formulas.emptyCellHint')}
         </Typography>
       ) : null}
     </Box>
@@ -459,9 +462,9 @@ export default function IndicatorFormulasPanel({
     <Box sx={{ p: 1 }} data-testid="indicator-formulas-panel">
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
         <Typography variant="subtitle2" noWrap sx={{ flex: 1, minWidth: 0 }}>
-          Формулы: {indicatorName}
+          {t('formulas.formulasFor', { name: indicatorName })}
         </Typography>
-        <Tooltip title="Добавить правило">
+        <Tooltip title={t('formulas.addRule')}>
           <IconButton size="small" onClick={handleAddScoped}>
             <AddOutlined fontSize="small" />
           </IconButton>
@@ -470,7 +473,7 @@ export default function IndicatorFormulasPanel({
 
       {mainAid == null && (
         <Typography variant="caption" color="warning.main" sx={{ display: 'block', mb: 1 }}>
-          Главная аналитика листа не задана — правила не применятся.
+          {t('formulas.noMainAnalytic')}
         </Typography>
       )}
 
@@ -482,7 +485,7 @@ export default function IndicatorFormulasPanel({
         data-testid="formula-slot-consol"
       >
         <AccordionSummary expandIcon={<ExpandMoreOutlined fontSize="small" />} sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5, minWidth: 0 } }}>
-          <Chip size="small" color="primary" variant="outlined" label="консолидация" />
+          <Chip size="small" color="primary" variant="outlined" label={t('formulas.consolidation')} />
         </AccordionSummary>
         <AccordionDetails sx={{ pt: 0 }}>
           <SlotBody
@@ -491,7 +494,7 @@ export default function IndicatorFormulasPanel({
             formula={consolFormula}
             onFormulaChange={v => { setConsolFormula(v); markDirty() }}
             onEdit={() => setEditorSlot({ kind: 'consol' })}
-            placeholder="SUM по умолчанию, или: [выдачи] / [партнёры]"
+            placeholder={t('formulas.consolidationHint')}
           />
         </AccordionDetails>
       </Accordion>
@@ -525,7 +528,7 @@ export default function IndicatorFormulasPanel({
             </AccordionSummary>
             <AccordionDetails sx={{ pt: 0 }}>
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1, flexWrap: 'wrap' }}>
-                <Typography variant="caption" sx={{ color: 'text.secondary' }}>Область:</Typography>
+                <Typography variant="caption" sx={{ color: 'text.secondary' }}>{t('formulas.scope')}</Typography>
                 {analytics.map(a => (
                   <RecordTreePicker
                     key={a.id}
@@ -536,7 +539,7 @@ export default function IndicatorFormulasPanel({
                   />
                 ))}
                 <Box sx={{ flex: 1 }} />
-                <Tooltip title="Удалить правило">
+                <Tooltip title={t('formulas.deleteRule')}>
                   <IconButton size="small" onClick={() => handleDeleteScoped(idx)}>
                     <DeleteOutlineOutlined fontSize="small" />
                   </IconButton>
@@ -563,7 +566,7 @@ export default function IndicatorFormulasPanel({
         data-testid="formula-slot-leaf"
       >
         <AccordionSummary expandIcon={<ExpandMoreOutlined fontSize="small" />} sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5, minWidth: 0 } }}>
-          <Chip size="small" variant="outlined" label="обычная клетка" />
+          <Chip size="small" variant="outlined" label={t('formulas.normalCell')} />
         </AccordionSummary>
         <AccordionDetails sx={{ pt: 0 }}>
           <SlotBody
@@ -573,7 +576,7 @@ export default function IndicatorFormulasPanel({
             onFormulaChange={v => { setLeafFormula(v); markDirty() }}
             onEdit={() => setEditorSlot({ kind: 'leaf' })}
             placeholder="например: [выдачи] * 0.1"
-            hint="База для листовой клетки (все не-главные оси — листья)."
+            hint={t('formulas.normalCellHint')}
           />
         </AccordionDetails>
       </Accordion>

@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { TreeSelection } from '../types'
 import EmptyState from '../components/EmptyState'
 import ModelSettings from '../features/model/ModelSettings'
@@ -11,6 +12,7 @@ interface Props {
 }
 
 export default function CenterPanel({ selection, onRefresh }: Props) {
+  const { t } = useTranslation()
   const [innerKey, setInnerKey] = useState(0)
   const onInnerRefresh = useCallback(() => {
     setInnerKey(k => k + 1)

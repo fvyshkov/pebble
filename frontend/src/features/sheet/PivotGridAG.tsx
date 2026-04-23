@@ -26,6 +26,8 @@ import {
   type GridReadyEvent,
   type CellKeyDownEvent,
 } from 'ag-grid-community'
+import { useTranslation } from 'react-i18next'
+import { currentLang } from '../../i18n'
 
 // Variant of themeAlpine with visible vertical + horizontal cell borders.
 // Explicit theme params override the default `none` for column/row borders.
@@ -73,7 +75,7 @@ function getLeaves(nodes: RecordNode[]): RecordNode[] {
   walk(nodes)
   return out
 }
-function recordLabel(n: RecordNode): string {
+function recordLabelDefault(n: RecordNode): string {
   return (n.data && n.data.name) || n.record.id.slice(0, 8)
 }
 
@@ -174,6 +176,7 @@ const recalcStore = {
 // Custom AG Grid status panel: flowing (indeterminate) progress bar shown
 // in place of the default "Rows" panel while a recalc is in flight.
 function RecalcStatusPanel() {
+  const { t } = useTranslation()
   const [, tick] = useState(0)
   useEffect(() => recalcStore.subscribe(() => tick(n => n + 1)), [])
   if (!recalcStore.running) {
@@ -182,7 +185,7 @@ function RecalcStatusPanel() {
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 180, px: 1 }}>
       <LinearProgress sx={{ flex: 1, height: 4, borderRadius: 2 }} />
-      <span style={{ fontSize: 12, color: '#1976d2' }}>пересчёт</span>
+      <span style={{ fontSize: 12, color: '#1976d2' }}>{t('grid.recalc')}</span>
     </Box>
   )
 }
@@ -204,6 +207,7 @@ const selectionStore = {
 }
 
 function SelectionStatusPanel() {
+  const { t } = useTranslation()
   const [, tick] = useState(0)
   useEffect(() => selectionStore.subscribe(() => tick(n => n + 1)), [])
   const s = selectionStore.stats
@@ -217,16 +221,16 @@ function SelectionStatusPanel() {
     }}>
       {hasSel ? (
         <>
-          <span>Выделено: <b>{s.count}</b></span>
-          <span>Чисел: <b>{s.numCount}</b></span>
-          <span>Сумма: <b>{hasNums ? fmt(s.sum) : '—'}</b></span>
-          <span>Среднее: <b>{hasNums ? fmt(s.avg) : '—'}</b></span>
-          <span>Мин: <b>{hasNums && s.min != null ? fmt(s.min) : '—'}</b></span>
-          <span>Макс: <b>{hasNums && s.max != null ? fmt(s.max) : '—'}</b></span>
+          <span>{t('grid.selected')}: <b>{s.count}</b></span>
+          <span>{t('grid.numbers')}: <b>{s.numCount}</b></span>
+          <span>{t('grid.sum')}: <b>{hasNums ? fmt(s.sum) : '—'}</b></span>
+          <span>{t('grid.avg')}: <b>{hasNums ? fmt(s.avg) : '—'}</b></span>
+          <span>{t('grid.min')}: <b>{hasNums && s.min != null ? fmt(s.min) : '—'}</b></span>
+          <span>{t('grid.max')}: <b>{hasNums && s.max != null ? fmt(s.max) : '—'}</b></span>
         </>
       ) : (
         <span style={{ color: '#999' }}>
-          Выделите ячейки — в статус-баре появятся сумма, среднее, мин и макс
+          {t('grid.selectCellsHint')}
         </span>
       )}
     </Box>
@@ -260,6 +264,7 @@ function CalcProgressChip({ calcProgress, localRunning }: {
   calcProgress?: CalcProgress | null
   localRunning: boolean
 }) {
+  const { t } = useTranslation()
   // Tick every second so the elapsed counter in the tooltip stays live.
   const [, forceTick] = useState(0)
   useEffect(() => {
@@ -272,23 +277,23 @@ function CalcProgressChip({ calcProgress, localRunning }: {
   const elapsedStr = (() => {
     const s = Math.floor(elapsedMs / 1000)
     const m = Math.floor(s / 60)
-    return m > 0 ? `${m} мин ${s % 60} с` : `${s} с`
+    return m > 0 ? `${m} ${t('grid.min_s')} ${s % 60} ${t('grid.sec_s')}` : `${s} ${t('grid.sec_s')}`
   })()
 
   const computed = calcProgress?.computed ?? 0
   const totalCells = calcProgress?.totalCells ?? 0
   const cellsLabel = totalCells > 0
-    ? `${computed} / ${totalCells} клеток`
-    : `${computed} клеток`
+    ? `${computed} / ${totalCells} ${t('grid.cells')}`
+    : `${computed} ${t('grid.cells')}`
   const sheetsLabel = calcProgress
-    ? `листов ${calcProgress.done} из ${calcProgress.total}`
+    ? `${t('grid.sheetsOf')} ${calcProgress.done} ${t('grid.of')} ${calcProgress.total}`
     : ''
 
   const tooltipLines = [
-    calcProgress ? `Идёт ${elapsedStr}` : 'Локальный пересчёт…',
+    calcProgress ? `${t('grid.recalcRunning')} ${elapsedStr}` : t('grid.localRecalc'),
     calcProgress ? cellsLabel : '',
     calcProgress ? sheetsLabel : '',
-    calcProgress?.sheet ? `Сейчас: ${calcProgress.sheet}` : '',
+    calcProgress?.sheet ? `${t('grid.currentSheet')}: ${calcProgress.sheet}` : '',
   ].filter(Boolean).join('\n')
 
   return (
@@ -305,10 +310,10 @@ function CalcProgressChip({ calcProgress, localRunning }: {
           </span>
         )}
         {calcProgress && totalCells === 0 && (
-          <span style={{ color: '#1976d2' }}>пересчёт…</span>
+          <span style={{ color: '#1976d2' }}>{t('grid.recalc')}...</span>
         )}
         {!calcProgress && localRunning && (
-          <span style={{ color: '#1976d2' }}>сохраняю…</span>
+          <span style={{ color: '#1976d2' }}>{t('grid.saving')}</span>
         )}
       </Box>
     </Tooltip>
@@ -317,6 +322,7 @@ function CalcProgressChip({ calcProgress, localRunning }: {
 
 // ── Component ──────────────────────────────────────────────────────────────
 export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgress, mode = 'data' }: Props) {
+  const { t } = useTranslation()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [rowData, setRowData] = useState<RowDatum[]>([])
@@ -349,6 +355,31 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   // here so the debounced save effect can depend on `columnStateVersion`.
   const savedColumnStateRef = useRef<any[] | null>(null)
   const [columnStateVersion, setColumnStateVersion] = useState(0)
+
+  // Translation map for analytic records (fetched from server per model/lang)
+  const [trMap, setTrMap] = useState<Record<string, string>>({})
+
+  // Fetch translations on mount and on language change
+  useEffect(() => {
+    if (!modelId) return
+    const fetchTr = () => {
+      const lang = currentLang()
+      api.getModelTranslations(modelId, lang)
+        .then(tr => setTrMap(tr))
+        .catch(() => {})
+    }
+    fetchTr()
+    const handler = () => { fetchTr() }
+    window.addEventListener('pebble:langChange', handler)
+    return () => window.removeEventListener('pebble:langChange', handler)
+  }, [modelId])
+
+  /** recordLabel: check trMap for translated name, then fallback to data.name */
+  const recordLabel = useCallback((n: RecordNode): string => {
+    const trKey = `analytic_record:${n.record.id}:name`
+    if (trMap[trKey]) return trMap[trKey]
+    return (n.data && n.data.name) || n.record.id.slice(0, 8)
+  }, [trMap])
 
   // Formula editor dialog state (opened from hover ⋮ button on a cell).
   const [formulaEditorOpen, setFormulaEditorOpen] = useState(false)
@@ -505,7 +536,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     setError(null)
     try {
       const sa: SheetAnalytic[] = await api.listSheetAnalytics(sheetId)
-      if (sa.length < 2) throw new Error('Нужно минимум 2 аналитики на листе (колонки + строки)')
+      if (sa.length < 2) throw new Error(t('grid.needMin2'))
 
       const aMap: Record<string, Analytic> = {}
       const rMap: Record<string, RecordNode[]> = {}
@@ -615,10 +646,11 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       const walkForLabel = (nodes: RecordNode[], lvl: number) => {
         if (!nodes.length || !nodes[0].children.length) return
         const firstName = (nodes[0].data && nodes[0].data.name) || ''
-        let label = `Уровень ${lvl + 1}`
-        if (/^\d{4}$/.test(firstName)) label = 'Годы'
-        else if (/квартал/i.test(firstName)) label = 'Кварталы'
-        else if (/^(янв|фев|мар|апр|май|июн|июл|авг|сен|окт|ноя|дек)/i.test(firstName)) label = 'Месяцы'
+        let label = `${t('grid.level')} ${lvl + 1}`
+        if (/^\d{4}$/.test(firstName)) label = t('grid.years')
+        else if (/квартал/i.test(firstName)) label = t('grid.quarters')
+        else if (/полугод/i.test(firstName)) label = t('grid.halfyears')
+        else if (/^(янв|фев|мар|апр|май|июн|июл|авг|сен|окт|ноя|дек)/i.test(firstName)) label = t('grid.months')
         detectedLevels.push({ level: lvl, label })
         walkForLabel(nodes[0].children, lvl + 1)
       }
@@ -760,7 +792,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         )
         const row: RowDatum = {
           path: ['__pinned_summary__'],
-          label: labelParts.join(' / ') || '(зафиксировано)',
+          label: labelParts.join(' / ') || t('grid.fixed'),
           isLeaf: true,
           recordIds: { ...effectivePinned },
         }
@@ -826,13 +858,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       const defs: (ColDef | ColGroupDef)[] = buildColDefs(colTree, 0)
       setColumnDefs(defs)
       setRowData(rows)
-      setSheetName(`${rowAIds.length} аналитик × ${colLeaves.length} периодов`)
+      setSheetName(`${rowAIds.length} ${t('grid.analyticsCount')} \u00d7 ${colLeaves.length} ${t('grid.periodsCount')}`)
       setLoading(false)
     } catch (e: any) {
       setError(e?.message || String(e))
       setLoading(false)
     }
-  }, [sheetId, currentUserId, lookupCell, pinned])
+  }, [sheetId, currentUserId, lookupCell, pinned, recordLabel, t])
 
   useEffect(() => { load() }, [load])
 
@@ -905,7 +937,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       return first ? [first, ...newCols] : newCols
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [togglesSig])
+  }, [togglesSig, recordLabel])
 
   // Persist view settings (pinned analytics + column state: widths, order,
   // pinned cols, hidden cols). Debounced, only after first load.
@@ -1134,13 +1166,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           .then(() => {
             for (const c of toSave) cellMapRef.current[c.coord_key] = c.value
           })
-          .catch((err: any) => setError(`Не удалось сохранить вставку: ${err?.message || err}`))
+          .catch((err: any) => setError(`${t('grid.pasteFailed')}: ${err?.message || err}`))
           .finally(() => setRecalcRunning(false))
       }
     }
     el.addEventListener('paste', h)
     return () => { el.removeEventListener('paste', h) }
-  }, [sheetId, currentUserId])
+  }, [sheetId, currentUserId, t])
 
   // ── Column def factory (kept outside to stay stable) ──────────────────
   function makePeriodColDef(label: string, periodRecId: string): ColDef {
@@ -1185,11 +1217,11 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           if (resolved?.formula) {
             return resolved.formula
           }
-          if (rule === 'formula') return 'ƒ формула'
-          if (rule === 'sum_children') return 'ƒ SUM'
-          if (rule === 'empty') return '∅'
-          if (!p.data?.isLeaf) return 'ƒ SUM'
-          return '✎ ввод'
+          if (rule === 'formula') return t('grid.formulaLabel')
+          if (rule === 'sum_children') return t('grid.sumLabel')
+          if (rule === 'empty') return t('grid.emptyLabel')
+          if (!p.data?.isLeaf) return t('grid.sumLabel')
+          return t('grid.manualLabel')
         }
         if (rule === 'empty') return ''
         const v = p.value
@@ -1285,9 +1317,9 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         const isLeaf = !!p.data?.isLeaf
         // Resolved indicator rule formula (single source of truth)
         const resolved = resolvedFormulaMapRef.current[coordKey]
-        if (resolved?.formula) return `ƒ ${resolved.formula}`
+        if (resolved?.formula) return `\u0192 ${resolved.formula}`
         // Consolidating cells (group indicator or period parent)
-        if (!isLeaf || rule === 'sum_children') return 'ƒ SUM'
+        if (!isLeaf || rule === 'sum_children') return t('grid.sumLabel')
         return null
       },
       tooltipComponent: FormulaTooltip,
@@ -1313,7 +1345,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             <button
               type="button"
               className="cell-menu-btn"
-              title="Формула клетки"
+              title={t('grid.formulaCell')}
               onClick={ev => {
                 ev.stopPropagation()
                 setFormulaEditorKey(coordKey)
@@ -1397,7 +1429,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             const resolved = resolvedFormulaMapRef.current[key]
             if (resolved?.formula) return resolved.formula
           }
-          return 'ƒ SUM'
+          return t('grid.sumLabel')
         }
         const v = p.value
         if (v === '' || v == null) return ''
@@ -1416,8 +1448,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         const key = buildSumKey(p.data?.recordIds)
         if (!key) return null
         const resolved = resolvedFormulaMapRef.current[key]
-        if (resolved?.formula) return `ƒ ${resolved.formula}`
-        return 'ƒ SUM'
+        if (resolved?.formula) return `\u0192 ${resolved.formula}`
+        return t('grid.sumLabel')
       },
       tooltipComponent: FormulaTooltip,
     }
@@ -1426,7 +1458,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   const getDataPath = useCallback((data: RowDatum) => data.path, [])
 
   const autoGroupColumnDef = useMemo<ColDef>(() => ({
-    headerName: 'Аналитика',
+    headerName: t('grid.analytic'),
     minWidth: 280,
     pinned: 'left',
     wrapText: true,
@@ -1456,7 +1488,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
               cursor: canDrag ? 'grab' : 'default',
               userSelect: 'none',
             }}
-            title={canDrag ? 'Перетащите на панель сверху, чтобы зафиксировать аналитику' : undefined}
+            title={canDrag ? t('grid.dragToFix') : undefined}
           >
             {label}{unit}
           </span>
@@ -1470,7 +1502,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         fontWeight: isGroup ? 600 : 400,
       }
     },
-  }), [])
+  }), [t])
 
   const onGridReady = useCallback((e: GridReadyEvent) => {
     gridApiRef.current = e.api
@@ -1842,11 +1874,11 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       // derived (formula/sum_children) cells that changed light up green.
       refreshAndFlashParents()
     }).catch(err => {
-      setError(`Не удалось сохранить: ${err?.message || err}`)
+      setError(`${t('grid.saveFailed')}: ${err?.message || err}`)
     }).finally(() => {
       setRecalcRunning(false)
     })
-  }, [sheetId, currentUserId, recomputeParentsForField, refreshAndFlashParents])
+  }, [sheetId, currentUserId, recomputeParentsForField, refreshAndFlashParents, t])
 
   // ── Context menu: chart + history ───────────────────────────────────
   const buildChartFromSelection = useCallback((chartType: string) => {
@@ -1967,33 +1999,33 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       'copy', 'copyWithHeaders', 'paste', 'separator', 'export',
       'separator',
       {
-        name: 'История изменений',
+        name: t('grid.history'),
         disabled: !coordKey,
         action: () => { if (coordKey) showHistory(coordKey) },
       },
       'separator',
       {
-        name: 'График',
+        name: t('grid.chart'),
         subMenu: [
-          { name: 'Столбчатая', action: () => buildChartFromSelection('bar') },
-          { name: 'Линейная', action: () => buildChartFromSelection('line') },
-          { name: 'Круговая', action: () => buildChartFromSelection('pie') },
+          { name: t('grid.barChart'), action: () => buildChartFromSelection('bar') },
+          { name: t('grid.lineChart'), action: () => buildChartFromSelection('line') },
+          { name: t('grid.pieChart'), action: () => buildChartFromSelection('pie') },
         ],
       },
     ]
-  }, [showHistory, buildChartFromSelection])
+  }, [showHistory, buildChartFromSelection, t])
 
   // ── Render ─────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, minHeight: 200 }}>
         <CircularProgress size={48} thickness={3} sx={{ color: 'primary.main' }} />
-        <Typography variant="body2" color="text.secondary">Загрузка…</Typography>
+        <Typography variant="body2" color="text.secondary">{t('grid.loading')}</Typography>
       </Box>
     )
   }
   if (error) {
-    return <Box sx={{ p: 2, color: 'error.main' }}>Ошибка: {error}</Box>
+    return <Box sx={{ p: 2, color: 'error.main' }}>{t('grid.error')}: {error}</Box>
   }
 
   const pinnedEntries = Object.keys(pinned).filter(aId => !!pinned[aId])
@@ -2019,7 +2051,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       >
         {pinnedEntries.length === 0 && (
           <Typography sx={{ fontSize: 11, color: '#999' }}>
-            Перетащите строку сюда, чтобы зафиксировать аналитику
+            {t('grid.dragRowToFix')}
           </Typography>
         )}
         {pinnedEntries.map(aId => {
@@ -2044,12 +2076,12 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
               const state = colLevelToggles[level] || 'hidden'
               const nextState = (s: ColLevelState): ColLevelState =>
                 s === 'end' ? 'start' : s === 'start' ? 'hidden' : 'end'
-              const icon = state === 'start' ? '◀' : state === 'end' ? '▶' : ''
+              const icon = state === 'start' ? '\u25C0' : state === 'end' ? '\u25B6' : ''
               return (
                 <Chip
                   key={`lvl-${level}`}
                   size="small"
-                  label={`Σ ${label}${icon ? ' ' + icon : ''}`}
+                  label={`\u03A3 ${label}${icon ? ' ' + icon : ''}`}
                   color={state !== 'hidden' ? 'primary' : 'default'}
                   variant={state !== 'hidden' ? 'filled' : 'outlined'}
                   onClick={() => setColLevelToggles(prev => ({ ...prev, [level]: nextState(state) }))}
@@ -2171,7 +2203,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
               })
             }
           } catch (err: any) {
-            setError(`Не удалось сохранить формулу: ${err?.message || err}`)
+            setError(`${t('grid.saveFailed')}: ${err?.message || err}`)
           }
         }}
       />
@@ -2197,27 +2229,27 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
 
       {/* History dialog */}
       <Dialog open={historyOpen} onClose={() => setHistoryOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle sx={{ py: 1 }}>История изменений</DialogTitle>
+        <DialogTitle sx={{ py: 1 }}>{t('grid.history')}</DialogTitle>
         <DialogContent>
           {historyData.length === 0 ? (
-            <Typography variant="body2" color="textSecondary">Нет изменений</Typography>
+            <Typography variant="body2" color="textSecondary">{t('grid.noHistory')}</Typography>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <thead>
                 <tr>
-                  <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>Дата/время</th>
-                  <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>Пользователь</th>
-                  <th style={{ textAlign: 'right', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>Было</th>
-                  <th style={{ textAlign: 'right', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>Стало</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>{t('grid.dateTime')}</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>{t('grid.user')}</th>
+                  <th style={{ textAlign: 'right', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>{t('grid.oldValue')}</th>
+                  <th style={{ textAlign: 'right', padding: '4px 8px', borderBottom: '1px solid #e0e0e0' }}>{t('grid.newValue')}</th>
                 </tr>
               </thead>
               <tbody>
                 {historyData.map((h: any, i: number) => (
                   <tr key={i}>
                     <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0' }}>{h.created_at?.replace('T', ' ').slice(0, 19)}</td>
-                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0' }}>{h.username || '—'}</td>
-                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0', textAlign: 'right', color: '#999' }}>{h.old_value ?? '—'}</td>
-                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>{h.new_value ?? '—'}</td>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0' }}>{h.username || '\u2014'}</td>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0', textAlign: 'right', color: '#999' }}>{h.old_value ?? '\u2014'}</td>
+                    <td style={{ padding: '4px 8px', borderBottom: '1px solid #f0f0f0', textAlign: 'right' }}>{h.new_value ?? '\u2014'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -2231,7 +2263,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
         autoHideDuration={8000}
         onClose={() => setPromoteSnack(null)}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-        message="Формула сохранена на клетку"
+        message={t('grid.formulaSaved')}
         action={
           <>
             <MUIButton
@@ -2249,14 +2281,14 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
                   setPromoteSnack(null)
                   load()
                 } catch (err: any) {
-                  setError(`Не удалось сделать правилом: ${err?.message || err}`)
+                  setError(`${t('grid.makeRuleFailed')}: ${err?.message || err}`)
                 }
               }}
             >
-              Сделать правилом показателя
+              {t('grid.makeRule')}
             </MUIButton>
             <MUIButton color="inherit" size="small" onClick={() => setPromoteSnack(null)}>
-              Закрыть
+              {t('grid.close')}
             </MUIButton>
           </>
         }

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { SimpleTreeView } from '@mui/x-tree-view/SimpleTreeView'
 import { TreeItem } from '@mui/x-tree-view/TreeItem'
 import { IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button } from '@mui/material'
@@ -10,6 +11,7 @@ import CategoryOutlined from '@mui/icons-material/CategoryOutlined'
 import LockOutlined from '@mui/icons-material/LockOutlined'
 import * as Icons from '@mui/icons-material'
 import * as api from '../api'
+import { currentLang } from '../i18n'
 import type { Model, Sheet, Analytic, TreeSelection } from '../types'
 
 interface Props {
@@ -30,16 +32,18 @@ interface ModelTree {
 }
 
 export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId, isAdmin }: Props) {
+  const { t } = useTranslation()
   const [trees, setTrees] = useState<ModelTree[]>([])
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string[]>([])
   const [dragSheet, setDragSheet] = useState<{ modelId: string; sheetId: string } | null>(null)
   const [dragOverSheet, setDragOverSheet] = useState<string | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null)
+  // Translation map: "entity_type:entity_id:field" → translated value
+  const [trMap, setTrMap] = useState<Record<string, string>>({})
 
   const load = useCallback(async () => {
     if (sheetsOnly && currentUserId) {
-      // Load only accessible sheets grouped by model
       const accessible = await api.getAccessibleSheets(currentUserId)
       const treesData: ModelTree[] = accessible.map((m: any) => ({
         model: { id: m.id, name: m.name } as Model,
@@ -47,12 +51,19 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
         analytics: [],
       }))
       setTrees(treesData)
-      // Auto-expand all models in sheets-only mode
       setExpanded(prev => {
         const modelIds = treesData.map(t => `model:${t.model.id}`)
         const next = [...new Set([...prev, ...modelIds])]
         return next
       })
+      // Load translations for all models
+      const lang = currentLang()
+      for (const td of treesData) {
+        try {
+          const tr = await api.getModelTranslations(td.model.id, lang)
+          setTrMap(prev => ({ ...prev, ...tr }))
+        } catch { /* ignore */ }
+      }
     } else {
       const models = await api.listModels()
       const treesData: ModelTree[] = await Promise.all(
@@ -62,10 +73,25 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
         })
       )
       setTrees(treesData)
+      // Load translations
+      const lang = currentLang()
+      for (const td of treesData) {
+        try {
+          const tr = await api.getModelTranslations(td.model.id, lang)
+          setTrMap(prev => ({ ...prev, ...tr }))
+        } catch { /* ignore */ }
+      }
     }
   }, [sheetsOnly, currentUserId])
 
   useEffect(() => { load() }, [load, refreshKey])
+
+  // Reload translations on language change
+  useEffect(() => {
+    const handler = () => { load() }
+    window.addEventListener('pebble:langChange', handler)
+    return () => window.removeEventListener('pebble:langChange', handler)
+  }, [load])
 
   // Auto-expand after create
   useEffect(() => {
@@ -82,8 +108,14 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
     }
   }, [expandAfterCreate])
 
+  /** Get translated name or fallback to original */
+  const tr = (entityType: string, entityId: string, fallback: string) => {
+    const key = `${entityType}:${entityId}:name`
+    return trMap[key] || fallback
+  }
+
   const handleAdd = async () => {
-    const m = await api.createModel('Новая модель')
+    const m = await api.createModel(t('left.newModel'))
     await load()
     setExpanded(prev => [...prev, `model:${m.id}`])
     onSelect({ type: 'model', id: m.id, modelId: m.id })
@@ -91,7 +123,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
 
   const handleDeleteModel = async (e: React.MouseEvent, id: string, name?: string) => {
     e.stopPropagation()
-    setDeleteConfirm({ id, name: name || 'Без названия' })
+    setDeleteConfirm({ id, name: name || t('left.noName') })
   }
 
   const confirmDeleteModel = async () => {
@@ -105,14 +137,14 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
 
   const handleAddSheet = async (e: React.MouseEvent, modelId: string) => {
     e.stopPropagation()
-    const s = await api.createSheet({ model_id: modelId, name: 'Новый лист' })
+    const s = await api.createSheet({ model_id: modelId, name: t('left.newSheet') })
     await load()
     onCreated?.({ modelId, folder: 'sheets', id: s.id, type: 'sheet' })
   }
 
   const handleAddAnalytic = async (e: React.MouseEvent, modelId: string) => {
     e.stopPropagation()
-    const a = await api.createAnalytic({ model_id: modelId, name: 'Новая аналитика' })
+    const a = await api.createAnalytic({ model_id: modelId, name: t('left.newAnalytic') })
     await load()
     onCreated?.({ modelId, folder: 'analytics', id: a.id, type: 'analytic' })
   }
@@ -171,7 +203,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
     return (
       <div className="panel-left">
         <div className="panel-left-toolbar">
-          <input placeholder="Поиск..." value={search} onChange={e => setSearch(e.target.value)} />
+          <input placeholder={t('left.search')} value={search} onChange={e => setSearch(e.target.value)} />
         </div>
         <div className="panel-left-tree">
           <SimpleTreeView
@@ -181,8 +213,12 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
             onExpandedItemsChange={handleExpandChange}
           >
             {trees.map(({ model, sheets }) => {
-              const mMatch = !q || model.name.toLowerCase().includes(q)
-              const filteredSheets = sheets.filter(s => !q || mMatch || s.name.toLowerCase().includes(q))
+              const modelName = tr('model', model.id, model.name) || t('left.noName')
+              const mMatch = !q || modelName.toLowerCase().includes(q)
+              const filteredSheets = sheets.filter(s => {
+                const sName = tr('sheet', s.id, s.name)
+                return !q || mMatch || sName.toLowerCase().includes(q)
+              })
               if (!mMatch && filteredSheets.length === 0) return null
 
               return (
@@ -191,11 +227,11 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                   itemId={`model:${model.id}`}
                   label={
                     <div className="tree-item-label">
-                      <span style={{ fontWeight: 600 }}>{model.name || 'Без названия'}</span>
+                      <span style={{ fontWeight: 600 }}>{modelName}</span>
                       {isAdmin && (
                         <span className="actions">
-                          <Tooltip title="Удалить модель">
-                            <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, model.name)}>
+                          <Tooltip title={t('left.deleteModel')}>
+                            <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, modelName)}>
                               <DeleteOutlineOutlined sx={{ fontSize: 16 }} />
                             </IconButton>
                           </Tooltip>
@@ -204,39 +240,42 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                     </div>
                   }
                 >
-                  {filteredSheets.map(s => (
-                    <TreeItem
-                      key={s.id}
-                      itemId={`sheet:${s.id}:${model.id}`}
-                      label={
-                        <div className="tree-item-label">
-                          <DescriptionOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
-                          {(s as any).excel_code && (
-                            <span style={{ fontSize: 10, background: '#e3f2fd', color: '#1565c0', padding: '1px 4px', borderRadius: 3, fontWeight: 600, flexShrink: 0 }}>
-                              {(s as any).excel_code}
-                            </span>
-                          )}
-                          <span style={{ color: s.can_edit === false ? '#999' : undefined }}>{s.name || 'Без названия'}</span>
-                          {s.can_edit === false && <LockOutlined sx={{ fontSize: 12, color: '#ccc', ml: 'auto' }} />}
-                        </div>
-                      }
-                    />
-                  ))}
+                  {filteredSheets.map(s => {
+                    const sheetName = tr('sheet', s.id, s.name) || t('left.noName')
+                    return (
+                      <TreeItem
+                        key={s.id}
+                        itemId={`sheet:${s.id}:${model.id}`}
+                        label={
+                          <div className="tree-item-label">
+                            <DescriptionOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
+                            {(s as any).excel_code && (
+                              <span style={{ fontSize: 10, background: '#e3f2fd', color: '#1565c0', padding: '1px 4px', borderRadius: 3, fontWeight: 600, flexShrink: 0 }}>
+                                {(s as any).excel_code}
+                              </span>
+                            )}
+                            <span style={{ color: s.can_edit === false ? '#999' : undefined }}>{sheetName}</span>
+                            {s.can_edit === false && <LockOutlined sx={{ fontSize: 12, color: '#ccc', ml: 'auto' }} />}
+                          </div>
+                        }
+                      />
+                    )
+                  })}
                 </TreeItem>
               )
             })}
           </SimpleTreeView>
         </div>
         <Dialog open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)}>
-          <DialogTitle>Удалить модель</DialogTitle>
+          <DialogTitle>{t('left.deleteModelTitle')}</DialogTitle>
           <DialogContent>
             <DialogContentText>
-              Удалить модель «{deleteConfirm?.name}»? Все листы, данные и формулы будут удалены безвозвратно.
+              {t('left.deleteModelText', { name: deleteConfirm?.name })}
             </DialogContentText>
           </DialogContent>
           <DialogActions>
-            <Button onClick={() => setDeleteConfirm(null)}>Отмена</Button>
-            <Button onClick={confirmDeleteModel} color="error" variant="contained">Удалить</Button>
+            <Button onClick={() => setDeleteConfirm(null)}>{t('common.cancel')}</Button>
+            <Button onClick={confirmDeleteModel} color="error" variant="contained">{t('common.delete')}</Button>
           </DialogActions>
         </Dialog>
       </div>
@@ -246,8 +285,8 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
   return (
     <div className="panel-left">
       <div className="panel-left-toolbar">
-        <input placeholder="Поиск..." value={search} onChange={e => setSearch(e.target.value)} />
-        <Tooltip title="Добавить модель">
+        <input placeholder={t('left.search')} value={search} onChange={e => setSearch(e.target.value)} />
+        <Tooltip title={t('left.addModel')}>
           <IconButton size="small" onClick={handleAdd}><AddOutlined fontSize="small" /></IconButton>
         </Tooltip>
       </div>
@@ -259,9 +298,16 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
           onExpandedItemsChange={handleExpandChange}
         >
           {trees.map(({ model, sheets, analytics }) => {
-            const mMatch = !q || model.name.toLowerCase().includes(q)
-            const filteredSheets = sheets.filter(s => !q || mMatch || s.name.toLowerCase().includes(q))
-            const filteredAnalytics = analytics.filter(a => !q || mMatch || a.name.toLowerCase().includes(q))
+            const modelName = tr('model', model.id, model.name) || t('left.noName')
+            const mMatch = !q || modelName.toLowerCase().includes(q)
+            const filteredSheets = sheets.filter(s => {
+              const sName = tr('sheet', s.id, s.name)
+              return !q || mMatch || sName.toLowerCase().includes(q)
+            })
+            const filteredAnalytics = analytics.filter(a => {
+              const aName = tr('analytic', a.id, a.name)
+              return !q || mMatch || aName.toLowerCase().includes(q)
+            })
             if (!mMatch && filteredSheets.length === 0 && filteredAnalytics.length === 0) return null
 
             return (
@@ -270,10 +316,10 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                 itemId={`model:${model.id}`}
                 label={
                   <div className="tree-item-label">
-                    <span>{model.name || 'Без названия'}</span>
+                    <span>{modelName}</span>
                     <span className="actions">
-                      <Tooltip title="Удалить модель">
-                        <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, model.name)}>
+                      <Tooltip title={t('left.deleteModel')}>
+                        <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, modelName)}>
                           <DeleteOutlineOutlined sx={{ fontSize: 16 }} />
                         </IconButton>
                       </Tooltip>
@@ -286,7 +332,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                   label={
                     <div className="tree-item-label">
                       <FolderOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
-                      <span>Листы</span>
+                      <span>{t('left.sheets')}</span>
                       <span className="actions">
                         <IconButton size="small" onClick={e => handleAddSheet(e, model.id)}>
                           <AddOutlined sx={{ fontSize: 16 }} />
@@ -295,40 +341,43 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                     </div>
                   }
                 >
-                  {filteredSheets.map(s => (
-                    <TreeItem
-                      key={s.id}
-                      itemId={`sheet:${s.id}:${model.id}`}
-                      label={
-                        <div
-                          className="tree-item-label"
-                          draggable
-                          onDragStart={e => { e.stopPropagation(); setDragSheet({ modelId: model.id, sheetId: s.id }) }}
-                          onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDragOverSheet(s.id) }}
-                          onDragLeave={() => setDragOverSheet(null)}
-                          onDrop={e => { e.preventDefault(); e.stopPropagation(); handleSheetDrop(model.id, s.id); setDragSheet(null); setDragOverSheet(null) }}
-                          onDragEnd={() => { setDragSheet(null); setDragOverSheet(null) }}
-                          style={{
-                            opacity: dragSheet?.sheetId === s.id ? 0.4 : 1,
-                            borderTop: dragOverSheet === s.id && dragSheet?.sheetId !== s.id ? '2px solid #1976d2' : '2px solid transparent',
-                          }}
-                        >
-                          <DescriptionOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
-                          {(s as any).excel_code && (
-                            <span style={{ fontSize: 10, background: '#e3f2fd', color: '#1565c0', padding: '1px 4px', borderRadius: 3, fontWeight: 600, flexShrink: 0 }}>
-                              {(s as any).excel_code}
+                  {filteredSheets.map(s => {
+                    const sheetName = tr('sheet', s.id, s.name) || t('left.noName')
+                    return (
+                      <TreeItem
+                        key={s.id}
+                        itemId={`sheet:${s.id}:${model.id}`}
+                        label={
+                          <div
+                            className="tree-item-label"
+                            draggable
+                            onDragStart={e => { e.stopPropagation(); setDragSheet({ modelId: model.id, sheetId: s.id }) }}
+                            onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDragOverSheet(s.id) }}
+                            onDragLeave={() => setDragOverSheet(null)}
+                            onDrop={e => { e.preventDefault(); e.stopPropagation(); handleSheetDrop(model.id, s.id); setDragSheet(null); setDragOverSheet(null) }}
+                            onDragEnd={() => { setDragSheet(null); setDragOverSheet(null) }}
+                            style={{
+                              opacity: dragSheet?.sheetId === s.id ? 0.4 : 1,
+                              borderTop: dragOverSheet === s.id && dragSheet?.sheetId !== s.id ? '2px solid #1976d2' : '2px solid transparent',
+                            }}
+                          >
+                            <DescriptionOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
+                            {(s as any).excel_code && (
+                              <span style={{ fontSize: 10, background: '#e3f2fd', color: '#1565c0', padding: '1px 4px', borderRadius: 3, fontWeight: 600, flexShrink: 0 }}>
+                                {(s as any).excel_code}
+                              </span>
+                            )}
+                            <span>{sheetName}</span>
+                            <span className="actions">
+                              <IconButton size="small" onClick={e => handleDeleteSheet(e, s.id)}>
+                                <DeleteOutlineOutlined sx={{ fontSize: 14 }} />
+                              </IconButton>
                             </span>
-                          )}
-                          <span>{s.name || 'Без названия'}</span>
-                          <span className="actions">
-                            <IconButton size="small" onClick={e => handleDeleteSheet(e, s.id)}>
-                              <DeleteOutlineOutlined sx={{ fontSize: 14 }} />
-                            </IconButton>
-                          </span>
-                        </div>
-                      }
-                    />
-                  ))}
+                          </div>
+                        }
+                      />
+                    )
+                  })}
                 </TreeItem>
 
                 <TreeItem
@@ -336,7 +385,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                   label={
                     <div className="tree-item-label">
                       <FolderOutlined sx={{ fontSize: 16, opacity: 0.5 }} />
-                      <span>Аналитики</span>
+                      <span>{t('left.analytics')}</span>
                       <span className="actions">
                         <IconButton size="small" onClick={e => handleAddAnalytic(e, model.id)}>
                           <AddOutlined sx={{ fontSize: 16 }} />
@@ -345,23 +394,26 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                     </div>
                   }
                 >
-                  {filteredAnalytics.map(a => (
-                    <TreeItem
-                      key={a.id}
-                      itemId={`analytic:${a.id}:${model.id}`}
-                      label={
-                        <div className="tree-item-label">
-                          {getIcon(a.icon)}
-                          <span>{a.name || 'Без названия'}</span>
-                          <span className="actions">
-                            <IconButton size="small" onClick={e => handleDeleteAnalytic(e, a.id)}>
-                              <DeleteOutlineOutlined sx={{ fontSize: 14 }} />
-                            </IconButton>
-                          </span>
-                        </div>
-                      }
-                    />
-                  ))}
+                  {filteredAnalytics.map(a => {
+                    const aName = tr('analytic', a.id, a.name) || t('left.noName')
+                    return (
+                      <TreeItem
+                        key={a.id}
+                        itemId={`analytic:${a.id}:${model.id}`}
+                        label={
+                          <div className="tree-item-label">
+                            {getIcon(a.icon)}
+                            <span>{aName}</span>
+                            <span className="actions">
+                              <IconButton size="small" onClick={e => handleDeleteAnalytic(e, a.id)}>
+                                <DeleteOutlineOutlined sx={{ fontSize: 14 }} />
+                              </IconButton>
+                            </span>
+                          </div>
+                        }
+                      />
+                    )
+                  })}
                 </TreeItem>
               </TreeItem>
             )
@@ -369,15 +421,15 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
         </SimpleTreeView>
       </div>
       <Dialog open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)}>
-        <DialogTitle>Удалить модель</DialogTitle>
+        <DialogTitle>{t('left.deleteModelTitle')}</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            Удалить модель «{deleteConfirm?.name}»? Все листы, данные и формулы будут удалены безвозвратно.
+            {t('left.deleteModelText', { name: deleteConfirm?.name })}
           </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDeleteConfirm(null)}>Отмена</Button>
-          <Button onClick={confirmDeleteModel} color="error" variant="contained">Удалить</Button>
+          <Button onClick={() => setDeleteConfirm(null)}>{t('common.cancel')}</Button>
+          <Button onClick={confirmDeleteModel} color="error" variant="contained">{t('common.delete')}</Button>
         </DialogActions>
       </Dialog>
     </div>

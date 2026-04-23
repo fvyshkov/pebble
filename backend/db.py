@@ -148,6 +148,21 @@ CREATE TABLE IF NOT EXISTS analytic_record_permissions (
     can_edit    INTEGER DEFAULT 0,
     UNIQUE(user_id, analytic_id, record_id)
 );
+
+-- ── Translations ────────────────────────────────────────────
+-- Multilingual names for any entity (model, analytic, sheet, analytic_record).
+-- entity_type + entity_id + field + lang is unique.
+CREATE TABLE IF NOT EXISTS translations (
+    id          TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,  -- 'model' | 'analytic' | 'sheet' | 'analytic_record'
+    entity_id   TEXT NOT NULL,
+    field       TEXT NOT NULL DEFAULT 'name',  -- which field is translated
+    lang        TEXT NOT NULL,  -- 'ru' | 'en' | 'ky'
+    value       TEXT NOT NULL DEFAULT '',
+    UNIQUE(entity_type, entity_id, field, lang)
+);
+CREATE INDEX IF NOT EXISTS idx_translations_entity
+    ON translations(entity_type, entity_id);
 """
 
 

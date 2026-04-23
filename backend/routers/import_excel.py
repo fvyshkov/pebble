@@ -638,17 +638,69 @@ def _has_external_refs(formula: str) -> bool:
     return bool(_EXTERNAL_REF_RE.search(formula))
 
 
+def _classify_total_leaf_cols(sheet_periods: list[dict]) -> tuple[set[int], set[int]]:
+    """Classify period columns as 'total' or 'leaf' per year.
+
+    A column is 'total' for year X if there exist finer-granularity columns
+    for the same year. E.g., if 2025 has Q1-Q4, then H1 2025 and Y 2025 are totals.
+    But if 2026 only has H1-H2, those H columns are leaves for 2026.
+    """
+    year_finest: dict[str, str] = {}
+    rank = {"M": 0, "Q": 1, "H": 2, "Y": 3}
+    for sp in sheet_periods:
+        pk = sp.get("period_key", "")
+        if not pk or "-" not in pk:
+            continue
+        year = pk[:4]
+        if re.match(r'\d{4}-\d{2}$', pk):
+            ptype = "M"
+        elif "-Q" in pk:
+            ptype = "Q"
+        elif "-H" in pk:
+            ptype = "H"
+        elif pk.endswith("-Y"):
+            ptype = "Y"
+        else:
+            continue
+        if year not in year_finest or rank[ptype] < rank[year_finest[year]]:
+            year_finest[year] = ptype
+
+    total_cols: set[int] = set()
+    leaf_cols: set[int] = set()
+    for sp in sheet_periods:
+        pk = sp.get("period_key", "")
+        if not pk:
+            leaf_cols.add(sp["col"])
+            continue
+        year = pk[:4]
+        finest = year_finest.get(year, "Y")
+        if re.match(r'\d{4}-\d{2}$', pk):
+            ptype = "M"
+        elif "-Q" in pk:
+            ptype = "Q"
+        elif "-H" in pk:
+            ptype = "H"
+        elif pk.endswith("-Y"):
+            ptype = "Y"
+        else:
+            leaf_cols.add(sp["col"])
+            continue
+        if rank[ptype] > rank[finest]:
+            total_cols.add(sp["col"])
+        else:
+            leaf_cols.add(sp["col"])
+    return total_cols, leaf_cols
+
+
 def _substitute_non_indicator_refs(
     formula: str, ws_data, row_to_name: dict[int, str], data_start_col: int,
     base_col: int = 0,
 ) -> str:
     """Replace same-sheet cell refs with Excel values when they can't be translated.
 
-    Two categories get substituted:
-    1. Refs to rows NOT in row_to_name (header rows, date rows, rate constants)
-    2. Refs to indicator rows with ABSOLUTE column ($X) pointing to a DIFFERENT
-       column than base_col — these are interpolation anchors (e.g. $D8, $H8 in
-       =$D8+(E3-$D3)/($H3-$D3)*($H8-$D8)) that reference fixed period values.
+    Only substitutes refs to rows NOT in row_to_name (header rows, date rows,
+    rate constants). Indicator refs (including anchored $D8, $H8 to different
+    periods) are left for the formula translator to handle as period references.
     """
     from openpyxl.utils import column_index_from_string
     from datetime import datetime, date
@@ -663,16 +715,8 @@ def _substitute_non_indicator_refs(
         except (ValueError, KeyError):
             return m.group(0)
 
-        should_substitute = False
-        if row_num not in row_to_name:
-            # Non-indicator row — always substitute
-            should_substitute = True
-        elif col_str.startswith("$") and base_col > 0 and col_num != base_col:
-            # Absolute column ref to a different column on an indicator row
-            # (interpolation anchor like $D8 or $H8)
-            should_substitute = True
-
-        if not should_substitute:
+        if row_num in row_to_name:
+            # Indicator row — let the translator handle it (including anchored refs)
             return m.group(0)
 
         v = ws_data.cell(row_num, col_num).value
@@ -704,12 +748,13 @@ def _substitute_non_indicator_refs(
 
 def _substitute_total_col_refs(
     formula: str, ws_data, current_row: int, total_cols: set[int],
-    data_start_col: int,
+    data_start_col: int, row_to_name: dict[int, str] | None = None,
 ) -> str:
     """Replace same-sheet cell refs pointing to total columns with their Excel values.
 
     E.g. =P8 where col P (16) is a year-total → substituted with the actual value.
     Only substitutes SAME-SHEET bare refs (not 'Sheet'!XX cross-sheet refs).
+    Skips indicator rows — those are handled by the formula translator as period refs.
     """
     from openpyxl.utils import column_index_from_string
 
@@ -723,6 +768,9 @@ def _substitute_total_col_refs(
         if col_num not in total_cols:
             return m.group(0)
         row_num = int(row_str)
+        # Skip indicator rows — let the translator handle them as period refs
+        if row_to_name and row_num in row_to_name:
+            return m.group(0)
         v = ws_data.cell(row_num, col_num).value
         if v is None:
             return "0"
@@ -780,57 +828,42 @@ def _substitute_cross_period_refs(
     sheet_period_types: dict[str, str],
     wb_data,
     all_sheet_total_cols: dict[str, set[int]] | None = None,
+    all_sheet_row_maps: dict[str, dict[int, str]] | None = None,
 ) -> str:
-    """Replace cross-sheet refs with Excel values when period alignment can't work.
+    """Replace cross-sheet refs with Excel values when they reference non-indicator rows.
 
-    Substitutes when:
-    1. Target sheet has a different period type (monthly→qhy, etc.)
-    2. Target column is a total column (year/quarter/half) in another sheet —
-       even if both sheets share the same period type, because the formula engine
-       can't correctly consolidate cross-sheet year-total values.
+    Indicator refs are preserved for the formula translator to handle (it uses
+    absolute period keys for cross-period-type refs).
+    Only substitutes non-indicator row refs with actual Excel values.
     """
     from openpyxl.utils import column_index_from_string
+    all_sheet_row_maps = all_sheet_row_maps or {}
 
     def replace_match(m):
         if m.group(1):
-            # Quoted: 'Sheet Name'!E19
             sheet_name = m.group(1)
             col_str = m.group(2).replace("$", "")
             row_str = m.group(3).replace("$", "")
         elif m.group(4):
-            # Unquoted: Sheet!E19
             sheet_name = m.group(4)
             col_str = m.group(5).replace("$", "")
             row_str = m.group(6).replace("$", "")
         else:
             return m.group(0)
 
-        target_type = sheet_period_types.get(sheet_name)
-        should_substitute = False
+        row_num = int(row_str)
+        target_row_map = all_sheet_row_maps.get(sheet_name, {})
 
-        if target_type is not None and target_type != source_period_type:
-            # Different period type — always substitute
-            should_substitute = True
-        elif all_sheet_total_cols:
-            # Same period type — check if target column is a total column
-            try:
-                col_num = column_index_from_string(col_str)
-                target_totals = all_sheet_total_cols.get(sheet_name)
-                if target_totals and col_num in target_totals:
-                    should_substitute = True
-            except (ValueError, KeyError):
-                pass
-
-        if not should_substitute:
+        # If the target row is an indicator, let the translator handle it
+        if row_num in target_row_map:
             return m.group(0)
 
-        # Substitute with actual Excel value
+        # Non-indicator row — substitute with actual Excel value
         try:
             if sheet_name not in wb_data.sheetnames:
                 return m.group(0)
             ws = wb_data[sheet_name]
             col_num = column_index_from_string(col_str)
-            row_num = int(row_str)
             v = ws.cell(row_num, col_num).value
             if v is None:
                 return "0"
@@ -2078,6 +2111,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
     all_sheet_period_types: dict[str, str] = {}  # {excel_sheet_name: "monthly"|"qhy"|"yearly"}
     all_sheet_total_cols: dict[str, set[int]] = {}  # {excel_sheet_name: set of total column numbers}
     _all_col_to_pidx: dict[str, dict[int, int]] = {}  # {excel_sheet_name: {col: period_idx}}
+    _all_col_to_pk: dict[str, dict[int, str]] = {}  # {excel_sheet_name: {col: period_key}}
     sheet_meta: list[dict] = []  # store per-sheet metadata for second pass
     _used_display_names: set[str] = set()  # track used names to avoid duplicates
 
@@ -2173,11 +2207,8 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         # Detect period type and total columns for cross-sheet substitution
         _sp_fp = _detect_periods_from_headers(ws_d, min(ws_d.max_column or 1, 200), base_year=_nmes_base_year)
         all_sheet_period_types[excel_name] = _get_sheet_period_type(_sp_fp)
-        _tc = set()
-        for _spp in _sp_fp:
-            pk = _spp.get("period_key", "")
-            if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
-                _tc.add(_spp["col"])
+
+        _tc, _ = _classify_total_leaf_cols(_sp_fp)
         all_sheet_total_cols[excel_name] = _tc
 
         # Build col→period_idx for cross-sheet refs (leaf columns only)
@@ -2185,12 +2216,19 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         _all_col_to_pidx_sheet: dict[int, int] = {}
         _leaf_idx_fp = 0
         for _spp in _sorted_sp_fp:
-            pk = _spp.get("period_key", "")
-            if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+            if _spp["col"] in _tc:
                 continue
             _all_col_to_pidx_sheet[_spp["col"]] = _leaf_idx_fp
             _leaf_idx_fp += 1
         _all_col_to_pidx[excel_name] = _all_col_to_pidx_sheet
+
+        # Build col→period_key for cross-sheet absolute period refs
+        _pk_map_fp: dict[int, str] = {}
+        for _spp in _sp_fp:
+            pk = _spp.get("period_key", "")
+            if pk:
+                _pk_map_fp[_spp["col"]] = pk
+        _all_col_to_pk[excel_name] = _pk_map_fp
 
         sheet_meta.append({
             "excel_name": excel_name,
@@ -2253,29 +2291,26 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         sorted_period_cols = sorted(col_to_period_rid.keys())
         first_period_rid = col_to_period_rid[sorted_period_cols[0]] if sorted_period_cols else None
 
-        # Identify "total" columns (year/quarter/half) vs "leaf" columns (month)
-        # When a leaf cell formula references a total column, substitute with value
-        total_cols = set()
-        leaf_cols = set()
-        for sp in sheet_periods:
-            pk = sp.get("period_key", "")
-            if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
-                total_cols.add(sp["col"])
-            else:
-                leaf_cols.add(sp["col"])
+        total_cols, leaf_cols = _classify_total_leaf_cols(sheet_periods)
 
         # Build col→period_idx mapping: sequential indices for LEAF columns only,
-        # skipping total columns (year/quarter/half). This ensures cross-year-boundary
+        # skipping total columns. This ensures cross-year-boundary
         # refs get correct period_diff (col 17→col 15 = 1 period, not 2).
         _sorted_sp = sorted(sheet_periods, key=lambda x: x["col"])
         _col_to_pidx: dict[int, int] = {}
         _leaf_idx = 0
         for _sp in _sorted_sp:
-            pk = _sp.get("period_key", "")
-            if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+            if _sp["col"] in total_cols:
                 continue  # skip total columns
             _col_to_pidx[_sp["col"]] = _leaf_idx
             _leaf_idx += 1
+
+        # Build col→period_key mapping for formula translator (absolute period refs)
+        _col_to_pk: dict[int, str] = {}
+        for sp in sheet_periods:
+            pk = sp.get("period_key", "")
+            if pk:
+                _col_to_pk[sp["col"]] = pk
 
         cell_count = 0
         for row_num, indicator_rid in row_to_rid.items():
@@ -2329,21 +2364,16 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                                 rule = "manual"
                                 formula_text = ""
                                 raise _ExternalRefSkip()
-                            # Pre-substitute: for total columns (year/quarter/half),
-                            # substitute ALL same-sheet refs with values — the column
-                            # position translation doesn't work across section boundaries
-                            if total_cols and col_num in total_cols:
-                                excel_formula = _substitute_non_indicator_refs(
-                                    excel_formula, ws_d, {}, data_start_col, base_col=col_num)
                             # Pre-substitute: replace same-sheet refs to total columns with Excel values
                             if total_cols and col_num not in total_cols:
                                 excel_formula = _substitute_total_col_refs(
-                                    excel_formula, ws_d, row_num, total_cols, data_start_col)
+                                    excel_formula, ws_d, row_num, total_cols, data_start_col, row_to_name)
                             # Pre-substitute: replace cross-sheet refs to different period types or total columns
                             src_ptype = all_sheet_period_types.get(excel_name, "unknown")
                             if src_ptype != "unknown":
                                 excel_formula = _substitute_cross_period_refs(
-                                    excel_formula, src_ptype, all_sheet_period_types, wb_data, all_sheet_total_cols)
+                                    excel_formula, src_ptype, all_sheet_period_types, wb_data,
+                                    all_sheet_total_cols, all_sheet_row_maps)
                             # Pre-substitute: replace refs to non-indicator rows with values
                             excel_formula = _substitute_non_indicator_refs(
                                 excel_formula, ws_d, row_to_name, data_start_col, base_col=col_num)
@@ -2363,6 +2393,8 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                                 pre_data_values=pre_data_values,
                                 col_to_period_idx=_col_to_pidx,
                                 sheet_col_to_period_idx=_all_col_to_pidx,
+                                col_to_period_key=_col_to_pk,
+                                sheet_col_to_period_key=_all_col_to_pk,
                             )
                         except _ExternalRefSkip:
                             pass  # rule/formula_text already set to manual/""
@@ -2747,6 +2779,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         all_sheet_period_types: dict[str, str] = {}
         all_sheet_total_cols: dict[str, set[int]] = {}
         _all_col_to_pidx2: dict[str, dict[int, int]] = {}
+        _all_col_to_pk2: dict[str, dict[int, str]] = {}
         sheet_meta: list[dict] = []
         _used_display_names2: set[str] = set()
 
@@ -2835,11 +2868,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 min((wb_data[excel_name].max_column if excel_name in wb_data.sheetnames else wb_formulas[excel_name].max_column) or 1, 200),
                 base_year=_nmes_base_year)
             all_sheet_period_types[excel_name] = _get_sheet_period_type(_sp_fp2)
-            _tc2 = set()
-            for _spp2 in _sp_fp2:
-                pk = _spp2.get("period_key", "")
-                if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
-                    _tc2.add(_spp2["col"])
+
+            _tc2, _ = _classify_total_leaf_cols(_sp_fp2)
             all_sheet_total_cols[excel_name] = _tc2
 
             # Build col→period_idx for cross-sheet refs (leaf columns only)
@@ -2847,12 +2877,19 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             _pidx_map2: dict[int, int] = {}
             _leaf_idx_fp2 = 0
             for _spp2x in _sorted_sp_fp2:
-                pk = _spp2x.get("period_key", "")
-                if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                if _spp2x["col"] in _tc2:
                     continue
                 _pidx_map2[_spp2x["col"]] = _leaf_idx_fp2
                 _leaf_idx_fp2 += 1
             _all_col_to_pidx2[excel_name] = _pidx_map2
+
+            # Build col→period_key for cross-sheet absolute period refs
+            _pk_map_fp2: dict[int, str] = {}
+            for _spp2 in _sp_fp2:
+                pk = _spp2.get("period_key", "")
+                if pk:
+                    _pk_map_fp2[_spp2["col"]] = pk
+            _all_col_to_pk2[excel_name] = _pk_map_fp2
 
             done_indicators += sheet_indicators
             sheet_meta.append({
@@ -2915,23 +2952,24 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             sorted_period_cols = sorted(col_to_period_rid.keys())
             first_period_rid = col_to_period_rid[sorted_period_cols[0]] if sorted_period_cols else None
 
-            # Identify total vs leaf columns for value substitution
-            total_cols2 = set()
-            for sp in sheet_periods:
-                pk = sp.get("period_key", "")
-                if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
-                    total_cols2.add(sp["col"])
+            total_cols2, _ = _classify_total_leaf_cols(sheet_periods)
 
             # Build col→period_idx for this sheet (leaf columns only)
             _sorted_sp2 = sorted(sheet_periods, key=lambda x: x["col"])
             _col_to_pidx2: dict[int, int] = {}
             _leaf_idx2 = 0
             for _sp2 in _sorted_sp2:
-                pk = _sp2.get("period_key", "")
-                if pk.endswith("-Y") or "-Q" in pk or "-H" in pk:
+                if _sp2["col"] in total_cols2:
                     continue
                 _col_to_pidx2[_sp2["col"]] = _leaf_idx2
                 _leaf_idx2 += 1
+
+            # Build col→period_key for this sheet
+            _col_to_pk2: dict[int, str] = {}
+            for sp in sheet_periods:
+                pk = sp.get("period_key", "")
+                if pk:
+                    _col_to_pk2[sp["col"]] = pk
 
             cell_count = 0
             for row_num, indicator_rid in row_to_rid.items():
@@ -2973,19 +3011,16 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                     rule = "manual"
                                     formula_text = ""
                                     raise _ExternalRefSkip()
-                                # For total columns, substitute ALL same-sheet refs with values
-                                if total_cols2 and col_num in total_cols2:
-                                    excel_formula = _substitute_non_indicator_refs(
-                                        excel_formula, ws_d, {}, data_start_col, base_col=col_num)
                                 # Pre-substitute total-column refs with values
                                 if total_cols2 and col_num not in total_cols2:
                                     excel_formula = _substitute_total_col_refs(
-                                        excel_formula, ws_d, row_num, total_cols2, data_start_col)
+                                        excel_formula, ws_d, row_num, total_cols2, data_start_col, row_to_name)
                                 # Pre-substitute cross-sheet refs to different period types or total columns
                                 src_ptype = all_sheet_period_types.get(excel_name, "unknown")
                                 if src_ptype != "unknown":
                                     excel_formula = _substitute_cross_period_refs(
-                                        excel_formula, src_ptype, all_sheet_period_types, wb_data, all_sheet_total_cols)
+                                        excel_formula, src_ptype, all_sheet_period_types, wb_data,
+                                        all_sheet_total_cols, all_sheet_row_maps)
                                 # Pre-substitute: replace refs to non-indicator rows with values
                                 excel_formula = _substitute_non_indicator_refs(
                                     excel_formula, ws_d, row_to_name, data_start_col, base_col=col_num)
@@ -3004,6 +3039,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                     pre_data_values=pre_data_values,
                                     col_to_period_idx=_col_to_pidx2,
                                     sheet_col_to_period_idx=_all_col_to_pidx2,
+                                    col_to_period_key=_col_to_pk2,
+                                    sheet_col_to_period_key=_all_col_to_pk2,
                                 )
                             except _ExternalRefSkip:
                                 pass  # rule/formula_text already set
@@ -3113,6 +3150,70 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     print(f"[import] propagate_consolidations failed: {e}")
             if total_rules:
                 yield event(f"   [OK]Claude подобрал {total_rules} формул консолидации по периодам")
+
+        # ── Post-import: translate all names to ru/en/ky ──
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            yield event("Перевод названий (ru/en/ky)...")
+            try:
+                from backend.translation_service import batch_translate, save_translations, SUPPORTED_LANGS
+
+                # Collect all names that need translation
+                names_to_translate: list[str] = []
+                entity_map: list[tuple[str, str, str]] = []  # (entity_type, entity_id, name)
+
+                # Model name
+                names_to_translate.append(model_name_final)
+                entity_map.append(("model", model_id, model_name_final))
+
+                # Sheet names
+                sheets_rows = await db.execute_fetchall(
+                    "SELECT id, name FROM sheets WHERE model_id = ?", (model_id,))
+                for sr in sheets_rows:
+                    if sr["name"]:
+                        names_to_translate.append(sr["name"])
+                        entity_map.append(("sheet", sr["id"], sr["name"]))
+
+                # Analytic names
+                analytics_rows = await db.execute_fetchall(
+                    "SELECT id, name FROM analytics WHERE model_id = ?", (model_id,))
+                for ar in analytics_rows:
+                    if ar["name"]:
+                        names_to_translate.append(ar["name"])
+                        entity_map.append(("analytic", ar["id"], ar["name"]))
+
+                # Analytic record names (indicator names, period names)
+                record_rows = await db.execute_fetchall(
+                    """SELECT r.id, r.data_json FROM analytic_records r
+                       JOIN analytics a ON r.analytic_id = a.id
+                       WHERE a.model_id = ?""", (model_id,))
+                for rr in record_rows:
+                    try:
+                        dj = json.loads(rr["data_json"]) if isinstance(rr["data_json"], str) else rr["data_json"]
+                        name = dj.get("name", "")
+                        if name:
+                            names_to_translate.append(name)
+                            entity_map.append(("analytic_record", rr["id"], name))
+                    except Exception:
+                        pass
+
+                # Batch translate (deduplicated inside)
+                unique_names = list(dict.fromkeys(names_to_translate))
+                # Translate in chunks of 50 to avoid token limits
+                all_translations: dict[str, dict[str, str]] = {}
+                for i in range(0, len(unique_names), 50):
+                    chunk = unique_names[i:i+50]
+                    chunk_result = await batch_translate(chunk)
+                    all_translations.update(chunk_result)
+
+                # Save translations
+                for etype, eid, name in entity_map:
+                    tr = all_translations.get(name, {lang: name for lang in SUPPORTED_LANGS})
+                    await save_translations(etype, eid, "name", tr, db=db)
+
+                await db.commit()
+                yield event(f"   [OK]Переведено {len(unique_names)} названий на {len(SUPPORTED_LANGS)} языка")
+            except Exception as e:
+                yield event(f"[WARN]Перевод не удался: {e}")
 
         yield event(f"[DONE]Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
                      {"done": True, "model_id": model_id, "model_name": model_name_final})

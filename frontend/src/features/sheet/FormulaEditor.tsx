@@ -6,6 +6,7 @@ import {
 import ExpandMoreOutlined from '@mui/icons-material/ExpandMoreOutlined'
 import ChevronRightOutlined from '@mui/icons-material/ChevronRightOutlined'
 import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
+import { useTranslation } from 'react-i18next'
 import * as api from '../../api'
 import type { Sheet, Analytic, AnalyticRecord } from '../../types'
 
@@ -38,13 +39,13 @@ interface SheetTree {
 }
 
 // ─── Expression templates ───
-const TEMPLATES = [
+const TEMPLATE_KEYS = [
   {
-    label: 'если...то...иначе',
+    labelKey: 'formulas.ifThenElse',
     code: 'если [условие] то\n  [значение]\nиначе\n  [значение]\nконец_если',
   },
   {
-    label: 'если...то...иначе_если...иначе',
+    labelKey: 'formulas.ifThenElseIfElse',
     code: 'если [условие] то\n  [значение]\nиначе_если [условие] то\n  [значение]\nиначе\n  [значение]\nконец_если',
   },
 ]
@@ -60,6 +61,7 @@ interface Props {
 }
 
 export default function FormulaEditor({ open, formula, rule: initialRule, onSave, onClose, modelId, currentSheetId }: Props) {
+  const { t } = useTranslation()
   const [text, setText] = useState(formula)
   const [rule, setRule] = useState<string>(initialRule || (formula ? 'formula' : 'manual'))
   const [sheets, setSheets] = useState<SheetTree[]>([])
@@ -239,12 +241,12 @@ export default function FormulaEditor({ open, formula, rule: initialRule, onSave
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle sx={{ py: 1 }}>Редактор формул</DialogTitle>
+      <DialogTitle sx={{ py: 1 }}>{t('formulas.editor')}</DialogTitle>
       <DialogContent sx={{ display: 'flex', gap: 2, height: 450, p: 2 }}>
         {/* Left: sheets & indicators tree */}
         <Box sx={{ width: 240, flexShrink: 0, overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
           <Typography variant="caption" sx={{ px: 1, pt: 0.5, display: 'block', color: '#999' }}>
-            Листы и показатели
+            {t('formulas.sheetsAndIndicators')}
           </Typography>
           {sheets.map(st => {
             const sKey = `sheet:${st.sheet.id}`
@@ -304,18 +306,18 @@ export default function FormulaEditor({ open, formula, rule: initialRule, onSave
               size="small"
               sx={{ '& .MuiToggleButton-root': { py: 0.3, px: 1.5, fontSize: 12, textTransform: 'none' } }}
             >
-              <ToggleButton value="formula">Формула</ToggleButton>
-              <ToggleButton value="manual">Ручной ввод</ToggleButton>
-              <ToggleButton value="sum_children">Σ Сумма</ToggleButton>
+              <ToggleButton value="formula">{t('formulas.formula')}</ToggleButton>
+              <ToggleButton value="manual">{t('formulas.manualInput')}</ToggleButton>
+              <ToggleButton value="sum_children">{t('formulas.sumChildren')}</ToggleButton>
             </ToggleButtonGroup>
           </Box>
           {rule === 'manual' ? (
             <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
-              <Typography variant="body2">Значение вводится вручную</Typography>
+              <Typography variant="body2">{t('formulas.manualHint')}</Typography>
             </Box>
           ) : rule === 'sum_children' ? (
             <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
-              <Typography variant="body2">Автосумма дочерних элементов</Typography>
+              <Typography variant="body2">{t('formulas.sumChildrenHint')}</Typography>
             </Box>
           ) : (
           <textarea
@@ -327,7 +329,7 @@ export default function FormulaEditor({ open, formula, rule: initialRule, onSave
               border: '1px solid #e0e0e0', borderRadius: 4, outline: 'none',
               resize: 'none', lineHeight: 1.6,
             }}
-            placeholder={'Пример:\nесли [Выручка] > 0 то\n  [Выручка] * 0.2\nиначе\n  0\nконец_если'}
+            placeholder={t('formulas.exampleFormula')}
           />
           )}
         </Box>
@@ -335,27 +337,27 @@ export default function FormulaEditor({ open, formula, rule: initialRule, onSave
         {/* Right: expression templates */}
         <Box sx={{ width: 200, flexShrink: 0, overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 1, p: 1 }}>
           <Typography variant="caption" sx={{ color: '#999', display: 'block', mb: 1 }}>
-            Выражения
+            {t('formulas.expressions')}
           </Typography>
-          {TEMPLATES.map((t, i) => (
+          {TEMPLATE_KEYS.map((tmpl, i) => (
             <Box key={i} sx={{ mb: 1 }}>
               <Chip
-                label={t.label}
+                label={t(tmpl.labelKey)}
                 size="small"
-                onClick={() => insertTemplate(t.code)}
+                onClick={() => insertTemplate(tmpl.code)}
                 sx={{ fontSize: 11, cursor: 'pointer' }}
               />
               <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: '#999', fontFamily: 'monospace', fontSize: 10, whiteSpace: 'pre-wrap' }}>
-                {t.code}
+                {tmpl.code}
               </Typography>
-              {i < TEMPLATES.length - 1 && <Divider sx={{ mt: 1 }} />}
+              {i < TEMPLATE_KEYS.length - 1 && <Divider sx={{ mt: 1 }} />}
             </Box>
           ))}
         </Box>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>Отмена</Button>
-        <Button variant="contained" onClick={() => { onSave(rule === 'manual' || rule === 'sum_children' ? '' : text, rule); onClose() }}>Сохранить</Button>
+        <Button onClick={onClose}>{t('common.cancel')}</Button>
+        <Button variant="contained" onClick={() => { onSave(rule === 'manual' || rule === 'sum_children' ? '' : text, rule); onClose() }}>{t('formulas.save')}</Button>
       </DialogActions>
     </Dialog>
   )

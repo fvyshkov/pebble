@@ -8,6 +8,7 @@ import AddOutlined from '@mui/icons-material/AddOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
 import DragIndicatorOutlined from '@mui/icons-material/DragIndicatorOutlined'
 import * as Icons from '@mui/icons-material'
+import { useTranslation } from 'react-i18next'
 import * as api from '../../api'
 import type { Sheet, SheetAnalytic, Analytic } from '../../types'
 import { usePending } from '../../store/PendingContext'
@@ -18,6 +19,7 @@ interface Props {
 }
 
 export default function SheetSettings({ sheetId, modelId }: Props) {
+  const { t } = useTranslation()
   const [sheet, setSheet] = useState<Sheet | null>(null)
   const [bindings, setBindings] = useState<SheetAnalytic[]>([])
   const [allAnalytics, setAllAnalytics] = useState<Analytic[]>([])
@@ -123,15 +125,15 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
 
   return (
     <Box sx={{ maxWidth: 500 }}>
-      <Typography variant="h6" sx={{ mb: 2 }}>Лист</Typography>
+      <Typography variant="h6" sx={{ mb: 2 }}>{t('sheet.title')}</Typography>
       <TextField
-        label="Название" fullWidth value={sheet.name}
+        label={t('fields.name')} fullWidth value={sheet.name}
         onChange={e => changeName(e.target.value)} sx={{ mb: 3 }}
       />
 
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-        <Typography variant="subtitle1">Привязанные аналитики</Typography>
-        <Tooltip title="Добавить аналитику">
+        <Typography variant="subtitle1">{t('sheet.linkedAnalytics')}</Typography>
+        <Tooltip title={t('sheet.addAnalytic')}>
           <span>
             <IconButton
               size="small"
@@ -179,13 +181,13 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
               <ListItemIcon sx={{ minWidth: 32 }}>
                 {getIcon(b.analytic_icon)}
               </ListItemIcon>
-              <ListItemText primary={b.analytic_name || 'Аналитика'} />
+              <ListItemText primary={b.analytic_name || t('sheet.analyticLabel')} />
               {(() => {
                 const a = analyticById(b.analytic_id)
                 if (a && a.is_periods) return null
                 const isMain = b.analytic_id === mainAnalyticId
                 return (
-                  <Tooltip title={isMain ? 'Главная аналитика (формулы индикаторов живут здесь)' : 'Сделать главной аналитикой'}>
+                  <Tooltip title={isMain ? t('sheet.mainAnalytic') : t('sheet.makeMain')}>
                     <Radio
                       size="small"
                       checked={isMain}
@@ -203,7 +205,7 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
               return (
                 <Box sx={{ pl: 9, pb: 1 }}>
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-                    Минимальный уровень периодов:
+                    {t('sheet.minPeriodLevel')}
                   </Typography>
                   <ToggleButtonGroup
                     exclusive size="small"
@@ -215,10 +217,10 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
                       setBindings(prev => prev.map(x => x.id === b.id ? { ...x, min_period_level: level } : x))
                     }}
                   >
-                    <ToggleButton value="M" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>Месяцы</ToggleButton>
-                    <ToggleButton value="Q" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>Кварталы</ToggleButton>
-                    <ToggleButton value="H" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>Полугодия</ToggleButton>
-                    <ToggleButton value="Y" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>Годы</ToggleButton>
+                    <ToggleButton value="M" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>{t('grid.months')}</ToggleButton>
+                    <ToggleButton value="Q" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>{t('grid.quarters')}</ToggleButton>
+                    <ToggleButton value="H" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>{t('grid.halfyears')}</ToggleButton>
+                    <ToggleButton value="Y" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>{t('grid.years')}</ToggleButton>
                   </ToggleButtonGroup>
                 </Box>
               )
@@ -229,7 +231,7 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
 
       {bindings.length === 0 && (
         <Typography variant="body2" color="textSecondary">
-          Нет привязанных аналитик. Добавьте аналитику к листу.
+          {t('sheet.noAnalytics')}
         </Typography>
       )}
 
