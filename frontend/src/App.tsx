@@ -19,6 +19,7 @@ import CheckCircleOutlined from '@mui/icons-material/CheckCircleOutlined'
 import ErrorOutlineOutlined from '@mui/icons-material/ErrorOutlineOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import WarningAmberOutlined from '@mui/icons-material/WarningAmberOutlined'
+import DeleteSweepOutlined from '@mui/icons-material/DeleteSweepOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
@@ -228,6 +229,8 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const [refreshKey, setRefreshKey] = useState(0)
   const [showUsers, setShowUsers] = useState(false)
   const [showImport, setShowImport] = useState(false)
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false)
+  const [deletingAll, setDeletingAll] = useState(false)
   const [expandAfterCreate, setExpandAfterCreate] = useState<any>(null)
   const [users, setUsers] = useState<any[]>([])
   const [currentUserId, setCurrentUserId] = useState(authUser?.id || '')
@@ -268,6 +271,21 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   useEffect(() => { localStorage.setItem('pebble_calcMode', calcMode) }, [calcMode])
 
   const onRefresh = useCallback(() => setRefreshKey(k => k + 1), [])
+
+  const handleDeleteAllModels = async () => {
+    setDeletingAll(true)
+    try {
+      const models = await api.listModels()
+      for (const m of models) {
+        await api.deleteModel(m.id)
+      }
+      setConfirmDeleteAll(false)
+      setSelection(null)
+      onRefresh()
+    } finally {
+      setDeletingAll(false)
+    }
+  }
 
   // ── Global shortcuts ──────────────────────────────────────────────────
   // • Double-space (two spaces within 400ms) → toggle voice input in chat.
@@ -504,6 +522,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
           <div style={{ flex: 1 }} />
 
           {isAdmin && (
+            <Tooltip title="Удалить все модели">
+              <IconButton size="small" onClick={() => setConfirmDeleteAll(true)} sx={{ color: '#d32f2f' }}>
+                <DeleteSweepOutlined fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
+          {isAdmin && (
             <Tooltip title="Пользователи">
               <IconButton size="small" onClick={() => setShowUsers(true)}>
                 <PeopleOutlined fontSize="small" />
@@ -603,6 +628,19 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
         </div>
 
         <UsersDialog open={showUsers} onClose={() => setShowUsers(false)} />
+
+        <Dialog open={confirmDeleteAll} onClose={() => setConfirmDeleteAll(false)}>
+          <DialogTitle>Удалить все модели?</DialogTitle>
+          <DialogContent>
+            <Typography>Все модели, листы и данные будут удалены без возможности восстановления.</Typography>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirmDeleteAll(false)} disabled={deletingAll}>Отмена</Button>
+            <Button onClick={handleDeleteAllModels} color="error" variant="contained" disabled={deletingAll}>
+              {deletingAll ? <CircularProgress size={20} /> : 'Удалить всё'}
+            </Button>
+          </DialogActions>
+        </Dialog>
         <ImportDialog open={showImport} onClose={() => setShowImport(false)} onImported={handleImported} />
         {/* Excel dropped into chat — open the import dialog pre-filled */}
         {chatImportFile && (
