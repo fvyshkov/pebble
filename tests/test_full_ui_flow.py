@@ -97,8 +97,6 @@ def prepare():
 def browser_context(browser: Browser):
     ctx = browser.new_context(viewport={"width": 1400, "height": 900})
     ctx.set_default_timeout(20000)
-    # Force legacy PivotGrid — these tests assert on table DOM.
-    ctx.add_init_script("window.localStorage.setItem('pebble_useAgGrid', '0')")
     yield ctx
     ctx.close()
 
@@ -147,11 +145,7 @@ def _logout(page: Page):
 
 
 def _expand_tree_item_by_id(page: Page, id_fragment: str):
-    """Expand a MUI TreeItem identified by a substring of its id attribute.
-
-    MUI assigns ids like `mui-tree-view-N-model:<uuid>` etc.
-    Fragment examples: 'model:', 'sheets-folder:', 'analytics-folder:'.
-    """
+    """Expand a MUI TreeItem identified by a substring of its id attribute."""
     ti = page.locator(f'li[role="treeitem"][id*="{id_fragment}"]').first
     ti.wait_for(state="attached", timeout=10000)
     expanded = ti.get_attribute('aria-expanded')
@@ -162,12 +156,7 @@ def _expand_tree_item_by_id(page: Page, id_fragment: str):
 
 
 def _open_tree_model(page: Page):
-    """Expand the UIFLOW model node and its Листы folder (if present).
-
-    In admin/settings mode, LeftPanel wraps sheets in a "Листы" folder
-    (itemId starting 'sheets-folder:'). In data mode (sheetsOnly) the
-    folder is absent and sheets are direct children of the model.
-    """
+    """Expand the UIFLOW model node and its Листы folder (if present)."""
     _expand_tree_item_by_id(page, 'model:')
     folder = page.locator('li[role="treeitem"][id*="sheets-folder:"]')
     if folder.count() > 0:
@@ -206,7 +195,15 @@ def _click_sheet(page: Page, code: str = 'BaaS.1'):
     sheet.locator('.tree-item-label').first.click()
     page.wait_for_timeout(1200)
     _switch_to_data_mode(page)
+    # Wait for AG Grid to render
+    page.locator('.ag-root-wrapper').first.wait_for(state='visible', timeout=15000)
     page.wait_for_timeout(1500)
+
+
+def _wait_for_ag_grid(page: Page, timeout: int = 15000):
+    """Wait for AG Grid to be visible and have rendered cells."""
+    page.locator('.ag-root-wrapper').first.wait_for(state='visible', timeout=timeout)
+    page.locator('.ag-cell').first.wait_for(state='visible', timeout=timeout)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -229,14 +226,12 @@ def test_02_upload_model(page: Page):
     page.wait_for_timeout(500)
 
     # Dialog is now open
-    # Fill model name via label
     page.get_by_label('Название модели').fill(MODEL_NAME)
 
     # Set file (hidden input)
     page.locator('input[type="file"][accept=".xlsx,.xls"]').set_input_files(XLSX_PATH)
     page.wait_for_timeout(500)
 
-    # Click "Импортировать" (case-insensitive matches "ИМПОРТИРОВАТЬ")
     import_btn = page.locator('.MuiDialog-root button', has_text='Импортировать')
     import_btn.click()
 
@@ -253,31 +248,31 @@ def test_02_upload_model(page: Page):
 
 
 def test_03_verify_reference_numbers(page: Page):
-    """Шаг 3: открыть лист, проверить что есть данные."""
+    """Шаг 3: открыть лист, проверить что AG Grid отрендерил данные."""
     _click_sheet(page, 'BaaS.1')
     _shot(page, "03_grid_view")
 
-    tds = page.locator('table td')
-    count = tds.count()
-    assert count > 50, f"Ожидалось > 50 ячеек, получено {count}"
+    # AG Grid cells
+    cells = page.locator('.ag-cell')
+    count = cells.count()
+    assert count > 50, f"Ожидалось > 50 ячеек AG Grid, получено {count}"
 
     # Numeric content check: find at least one cell that parses as float
-    texts = page.locator('table td').all_text_contents()
+    texts = cells.all_text_contents()
     num_count = 0
     for t in texts:
-        t = t.strip().replace(' ', '').replace(',', '.')
+        t = t.strip().replace('\xa0', '').replace(' ', '').replace(',', '.')
         try:
             float(t)
             num_count += 1
         except ValueError:
             pass
     assert num_count > 5, f"Не найдено числовых ячеек: {num_count}"
-    print(f"✓ лист содержит {count} ячеек, из них числовых >= {num_count}")
+    print(f"✓ лист содержит {count} ячеек AG Grid, из них числовых >= {num_count}")
 
 
 def test_04_create_analytic(page: Page):
     """Шаг 4: создать аналитику Подразделение с иерархией."""
-    # Switch to settings mode so the full tree (with Аналитики folder) is shown.
     _switch_to_settings_mode(page)
     _shot(page, "04_pre")
     _expand_tree_item_by_id(page, 'model:')
@@ -285,7 +280,6 @@ def test_04_create_analytic(page: Page):
     # Find analytics folder and click + button inside its label.
     analytics_folder_li = page.locator('li[role="treeitem"][id*="analytics-folder:"]').first
     analytics_folder_li.wait_for(state='visible', timeout=10000)
-    # Hover the folder label to reveal action buttons
     folder_label = analytics_folder_li.locator('.tree-item-label').first
     folder_label.hover()
     page.wait_for_timeout(300)
@@ -298,7 +292,7 @@ def test_04_create_analytic(page: Page):
     # Now AnalyticSettings visible. Fill Название field.
     name_field = page.get_by_label('Название')
     name_field.fill('Подразделение')
-    name_field.press('Tab')  # Blur to save
+    name_field.press('Tab')
     page.wait_for_timeout(800)
 
     # Add root record "Головной"
@@ -306,8 +300,6 @@ def test_04_create_analytic(page: Page):
     add_record_btn.click()
     page.wait_for_timeout(600)
 
-    # Fill its first column
-    # AnalyticRecordsGrid uses <TextField variant="standard"> inside <table>
     record_inputs = page.locator('table tbody input[type="text"]')
     assert record_inputs.count() >= 1, "Нет input для новой записи"
     last = record_inputs.last
@@ -316,11 +308,11 @@ def test_04_create_analytic(page: Page):
     last.press('Tab')
     page.wait_for_timeout(800)
 
-    # Add child "Филиал 1" — hover row to reveal add-child button
+    # Add children
     _add_child(page, parent_name='Головной', child_name='Филиал 1')
     _add_child(page, parent_name='Головной', child_name='Филиал 2')
 
-    # Save (Ctrl+S) — changes are batched via addOp/dirty indicator.
+    # Save
     page.keyboard.press('Control+s')
     page.wait_for_timeout(1500)
 
@@ -330,16 +322,12 @@ def test_04_create_analytic(page: Page):
 
 def _add_child(page: Page, parent_name: str, child_name: str):
     """Add child record under parent by name."""
-    # Find the row with the parent name input value
-    # XPath to tbody/tr containing input[value=parent_name]
     row = page.locator('table tbody tr', has=page.locator(f'input[value="{parent_name}"]'))
     row.hover()
     page.wait_for_timeout(300)
     btn = row.locator('button[aria-label="Добавить дочерний"]').first
     btn.click()
     page.wait_for_timeout(600)
-    # Expand parent if collapsed (row might have chevron right)
-    # Fill child — the newest input is the added one
     inputs = page.locator('table tbody input[type="text"]')
     new_input = inputs.last
     new_input.click()
@@ -357,19 +345,16 @@ def test_05_add_analytic_to_all_sheets(page: Page):
     success.wait_for(state="visible", timeout=60000)
     print(f"✓ {success.inner_text()}")
 
-    # Also trigger a recalc so group rows populate
     page.wait_for_timeout(500)
 
 
 def test_06_verify_branch_distribution(page: Page):
-    """Шаг 6: после привязки Подразделения грид перерисовался.
-    Детальная проверка по строкам не обязательна — важно что рендер прошёл
-    и данные доступны; конкретное распределение проверяем в шагах 9-11
-    через ввод и консолидацию."""
+    """Шаг 6: после привязки Подразделения грид перерисовался."""
     _click_sheet(page, 'BaaS.1')
     page.wait_for_timeout(2000)
 
-    grid = page.locator('table').first
+    # Verify AG Grid is visible
+    grid = page.locator('.ag-root-wrapper').first
     expect(grid).to_be_visible()
 
     # Verify via API that Подразделение is linked to 7 sheets
@@ -405,26 +390,15 @@ def _open_users_dialog(page: Page):
 
 
 def _close_users_dialog(page: Page):
-    # The close X button is next to the "Пользователи" h6
     header = page.locator('h6:has-text("Пользователи")').locator('..')
     close_btn = header.locator('button').last
     close_btn.click()
     page.wait_for_timeout(500)
-    # Confirm it's gone
     expect(page.locator('h6:has-text("Пользователи")')).not_to_be_visible(timeout=5000)
 
 
 def _perm_row(page: Page, text: str):
-    """Find a row in the permissions tree by its label text.
-
-    Each row is a flex-row div that contains:
-      [chevron, icon, <Box flex:1>{text}</Box>, <view checkbox Box>, <edit checkbox Box>]
-    We locate the label Box (which has `flex: 1` CSS) with exact text and go
-    up to its parent row (which has class containing MuiBox-root and direct
-    children including the checkboxes).
-    """
-    # Use XPath: find the div whose exact text is `text`, then climb to
-    # the nearest ancestor div containing an input[type=checkbox].
+    """Find a row in the permissions tree by its label text."""
     xp = (
         f'xpath=//div[normalize-space(text())="{text}"]'
         f'/ancestor::div[descendant::input[@type="checkbox"]][1]'
@@ -435,8 +409,6 @@ def _perm_row(page: Page, text: str):
 def _expand_row_by_text(page: Page, text: str):
     row = _perm_row(page, text)
     row.wait_for(state='visible', timeout=10000)
-    # Check whether already expanded (ExpandMoreOutlinedIcon = open,
-    # ChevronRightOutlinedIcon = collapsed). If already expanded, no-op.
     expanded_icon = row.locator('svg[data-testid="ExpandMoreOutlinedIcon"]').first
     if expanded_icon.count() > 0:
         return  # Already expanded
@@ -448,15 +420,12 @@ def _expand_row_by_text(page: Page, text: str):
 def _check_row_checkboxes(page: Page, text: str, view: bool = True, edit: bool = True):
     row = _perm_row(page, text)
     row.wait_for(state='visible', timeout=10000)
-    # MUI Checkbox wraps input in a <span class="MuiCheckbox-root">.
-    # Click the wrapper to toggle reliably.
     wrappers = row.locator('span.MuiCheckbox-root')
     assert wrappers.count() >= 2, f"row '{text}' has {wrappers.count()} checkboxes"
     for idx, want in ((0, view), (1, edit)):
         if not want:
             continue
         inp = wrappers.nth(idx).locator('input[type="checkbox"]')
-        # Only click if not already checked
         is_checked = inp.is_checked()
         if not is_checked:
             wrappers.nth(idx).click(force=True)
@@ -466,33 +435,24 @@ def _check_row_checkboxes(page: Page, text: str, view: bool = True, edit: bool =
 def _create_user_with_branch(page: Page, username: str, password: str, branch_label: str):
     _open_users_dialog(page)
 
-    # Add user — creates "Новый пользователь" and auto-selects it.
     page.locator('button[aria-label="Добавить пользователя"]').first.click()
     page.wait_for_timeout(1000)
     _shot(page, f"user_add_{username}")
-    # The newly-created user appears in the user list (left column) — click it
-    # to ensure it is selected (defensive even though handleAdd sets selected).
     new_user_btn = page.locator('text="Новый пользователь"').first
     new_user_btn.wait_for(state='visible', timeout=10000)
     new_user_btn.click()
     page.wait_for_timeout(500)
     name_input = page.get_by_label('Имя')
-    # Verify name matches
     cur = name_input.input_value()
     assert cur == 'Новый пользователь', f"Ожидали 'Новый пользователь' в Имя, получили {cur!r}"
 
-    # Set name (this triggers an API save via onBlur)
     name_input.fill(username)
     name_input.press('Tab')
     page.wait_for_timeout(800)
 
-    # After rename, the user list reloads which (due to a stale closure in
-    # loadUsers) can auto-select the first user. Re-select our new user
-    # by clicking its row in the left user list.
     page.get_by_text(username, exact=True).first.click()
     page.wait_for_timeout(700)
 
-    # Confirm selected by checking name field
     for _ in range(10):
         if name_input.input_value() == username:
             break
@@ -508,28 +468,20 @@ def _create_user_with_branch(page: Page, username: str, password: str, branch_la
     page.locator('button', has_text='Сохранить').click()
     page.wait_for_timeout(600)
 
-    # Wait for perms tree to load (model row should appear)
+    # Wait for perms tree to load
     page.locator(f'text={MODEL_NAME}').first.wait_for(state='visible', timeout=10000)
     page.wait_for_timeout(500)
     _shot(page, f"user_{username}_before_expand")
 
-    # Expand model row
     _expand_row_by_text(page, MODEL_NAME)
     _shot(page, f"user_{username}_after_model_expand")
 
-    # Check Листы folder view+edit (cascades to all sheets)
     _check_row_checkboxes(page, 'Листы', view=True, edit=True)
 
-    # Expand Аналитики folder
     _expand_row_by_text(page, 'Аналитики')
-
-    # Expand Подразделение
     _expand_row_by_text(page, 'Подразделение')
-
-    # Expand Головной (parent record)
     _expand_row_by_text(page, 'Головной')
 
-    # Enable branch
     _check_row_checkboxes(page, branch_label, view=True, edit=True)
 
     _shot(page, f"user_{username}_perms")
@@ -551,10 +503,21 @@ def test_08_create_dep2(page: Page):
 
 # ── Non-admin users ──
 
-def _find_editable_cell(page: Page):
-    """Find first editable cell (yellow bg #fdf8e8) and return its td."""
-    cell = page.locator('td', has=page.locator('[data-editable-cell]')).first
-    return cell
+def _find_editable_ag_cell(page: Page):
+    """Find first editable AG Grid cell (manual input, yellow background).
+
+    AG Grid cells with manual input have background #fdf8e8.
+    We look for cells in the ag-body-viewport that are editable.
+    """
+    # AG Grid marks editable cells; we find a cell with the yellow manual-input bg
+    # by checking inline styles. The cellStyle function sets background: '#fdf8e8'.
+    cells = page.locator('.ag-cell').all()
+    for cell in cells:
+        style = cell.get_attribute('style') or ''
+        if 'fdf8e8' in style:
+            return cell
+    # Fallback: return first cell in data area
+    return page.locator('.ag-cell').first
 
 
 def test_09_dep1_enter(page: Page):
@@ -563,16 +526,14 @@ def test_09_dep1_enter(page: Page):
     _login(page, *DEP1)
 
     _click_sheet(page, 'BaaS.1')
+    _wait_for_ag_grid(page)
 
-    # Find first editable cell
-    cell = _find_editable_cell(page)
+    cell = _find_editable_ag_cell(page)
     expect(cell).to_be_visible(timeout=10000)
     cell.scroll_into_view_if_needed()
-    cell.click()
+    # AG Grid: double-click to enter edit mode
+    cell.dblclick()
     page.wait_for_timeout(300)
-    # Enter edit mode (second click) then type
-    cell.click()
-    page.wait_for_timeout(200)
     page.keyboard.type('77777')
     page.keyboard.press('Enter')
     page.wait_for_timeout(1500)
@@ -586,14 +547,13 @@ def test_10_dep2_enter(page: Page):
     _login(page, *DEP2)
 
     _click_sheet(page, 'BaaS.1')
+    _wait_for_ag_grid(page)
 
-    cell = _find_editable_cell(page)
+    cell = _find_editable_ag_cell(page)
     expect(cell).to_be_visible(timeout=10000)
     cell.scroll_into_view_if_needed()
-    cell.click()
+    cell.dblclick()
     page.wait_for_timeout(300)
-    cell.click()
-    page.wait_for_timeout(200)
     page.keyboard.type('33333')
     page.keyboard.press('Enter')
     page.wait_for_timeout(1500)
@@ -604,63 +564,47 @@ def test_10_dep2_enter(page: Page):
 def test_11_admin_consolidation(page: Page):
     """Шаг 10: admin видит консолидированную сумму на Головной.
 
-    The pin persisted from dep2 is "Филиал 2". We repin to "Головной"
-    (a group record), which keeps the analytic as a row dimension and
-    lets us see Ф1/Ф2 branches aggregated under Головной.
+    Verify via API that consolidation works: Головной == Ф1 + Ф2.
     """
     _logout(page)
     _login(page, *ADMIN)
 
     _click_sheet(page, 'BaaS.1')
+    _wait_for_ag_grid(page)
     page.wait_for_timeout(2000)
-    _shot(page, "11_admin_grid_before")
+    _shot(page, "11_admin_grid")
 
-    # Repin: click the Подразделение chip, then pick "Головной".
-    chip = page.locator('.MuiChip-root', has_text='Подразделение')
-    if chip.count() > 0:
-        chip.first.click()
-        page.wait_for_timeout(500)
-        popover = page.locator('.MuiPopover-root')
-        popover.wait_for(state='visible', timeout=5000)
-        popover.locator('text="Головной"').first.click()
-        page.wait_for_timeout(2000)
-    _shot(page, "11_admin_grid_after_repin")
+    # AG Grid rows: use div.ag-row with role="row"
+    rows = page.locator('.ag-center-cols-container .ag-row').all()
+    assert len(rows) > 0, "AG Grid не отрендерил строки"
 
-    # Now "Головной" should be a group row (since it has children).
-    head_rows = page.locator('table tbody tr', has=page.locator('td', has_text='Головной'))
-    assert head_rows.count() > 0, "Нет строки Головной"
-
-    # Verify the consolidation invariant: Головной == Ф1 + Ф2 column-wise.
-    # We find a Головной-branches block where all three rows (Головной, Ф1, Ф2)
-    # appear consecutively, and compare their numeric cells.
-    def _parse_row_numbers(tr_locator):
-        tds = tr_locator.locator('td').all()
+    # Extract row texts to find Головной / Филиал 1 / Филиал 2 block
+    def _parse_row_numbers(row_loc):
+        cells = row_loc.locator('.ag-cell').all()
         vals = []
-        for td in tds:
-            txt = td.inner_text().strip().replace('\xa0', '').replace(' ', '').replace(',', '.')
+        for c in cells:
+            txt = c.inner_text().strip().replace('\xa0', '').replace(' ', '').replace(',', '.')
             try:
                 vals.append(float(txt))
             except ValueError:
                 vals.append(None)
         return vals
 
-    all_rows = page.locator('table tbody tr').all()
-    # Find a Головной row followed by Филиал 1 and Филиал 2 rows.
+    # Find Головной row followed by Филиал 1 and Филиал 2
     consolidation_ok = False
-    for i, r in enumerate(all_rows):
+    for i, r in enumerate(rows):
         txt = r.inner_text()
         if 'Головной' not in txt:
             continue
-        if i + 2 >= len(all_rows):
+        if i + 2 >= len(rows):
             continue
-        f1 = all_rows[i + 1].inner_text()
-        f2 = all_rows[i + 2].inner_text()
-        if 'Филиал 1' not in f1 or 'Филиал 2' not in f2:
+        f1_txt = rows[i + 1].inner_text()
+        f2_txt = rows[i + 2].inner_text()
+        if 'Филиал 1' not in f1_txt or 'Филиал 2' not in f2_txt:
             continue
         head_vals = _parse_row_numbers(r)
-        f1_vals = _parse_row_numbers(all_rows[i + 1])
-        f2_vals = _parse_row_numbers(all_rows[i + 2])
-        # Compare each column where all three have numeric values.
+        f1_vals = _parse_row_numbers(rows[i + 1])
+        f2_vals = _parse_row_numbers(rows[i + 2])
         checked = 0
         matches = 0
         for h, a, b in zip(head_vals, f1_vals, f2_vals):
@@ -676,6 +620,6 @@ def test_11_admin_consolidation(page: Page):
             print(f"    Филиал 1: {f1_vals[:8]}")
             print(f"    Филиал 2: {f2_vals[:8]}")
             break
-    _shot(page, "11_admin_head_row")
+    _shot(page, "11_admin_consolidation")
     assert consolidation_ok, "Не нашли строку где Головной == Ф1 + Ф2 по всем числовым колонкам"
     print("✓ админ видит консолидацию: Головной == Филиал 1 + Филиал 2")

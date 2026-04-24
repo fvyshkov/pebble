@@ -103,7 +103,7 @@ jobs:
       - name: Install & build frontend
         working-directory: frontend
         run: |
-          npm ci || npm install
+          npm install
           npm run build
 
       - name: Start backend
