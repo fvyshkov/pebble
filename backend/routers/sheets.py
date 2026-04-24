@@ -119,6 +119,20 @@ async def update_sheet(sheet_id: str, body: SheetIn):
     return dict(row[0])
 
 
+@router.patch("/{sheet_id}/lock")
+async def toggle_lock(sheet_id: str):
+    """Toggle the locked state of a sheet. Only admins should call this."""
+    db = get_db()
+    row = await db.execute_fetchall("SELECT locked FROM sheets WHERE id = ?", (sheet_id,))
+    if not row:
+        raise HTTPException(404, "Sheet not found")
+    new_val = 0 if row[0]["locked"] else 1
+    await db.execute("UPDATE sheets SET locked = ?, updated_at = datetime('now') WHERE id = ?", (new_val, sheet_id))
+    await db.commit()
+    row2 = await db.execute_fetchall("SELECT * FROM sheets WHERE id = ?", (sheet_id,))
+    return dict(row2[0])
+
+
 @router.delete("/{sheet_id}")
 async def delete_sheet(sheet_id: str):
     db = get_db()

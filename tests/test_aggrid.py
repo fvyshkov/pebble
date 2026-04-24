@@ -318,51 +318,57 @@ def test_aggrid_column_resize_persists_in_dom(sheet_page: Page):
     assert ok, "applyColumnState did not set width=300 for the period column"
 
 
-# ── Period-level totals chips ──────────────────────────────────────────────
+# ── Period-level totals toggles ──────────────────────────────────────────────
 
 def test_aggrid_period_totals_toggle_adds_sum_column(sheet_page: Page):
-    """Clicking a period-level chip (Годы / Кварталы) should toggle a
-    Σ-column in the grid. Smoke-tests the chip + columnDefs rebuild.
+    """Switching a period-level toggle (Годы / Кварталы) from 'Выкл' to ▶
+    should add Σ-column(s) in the grid. Smoke-tests the 3-state toggle
+    + columnDefs rebuild.
 
-    Chips default to ON (expanded), so we first turn all OFF, then verify
-    that turning one back ON increases the column count."""
+    Toggles default to 'end' (▶), so we first switch all to 'Выкл', then
+    verify that switching one to ▶ increases the column count."""
     page = sheet_page
     _enable_aggrid(page)
     page.wait_for_timeout(600)
-    chips = page.locator("[data-testid^='col-level-chip-']")
-    n_chips = chips.count()
-    if n_chips == 0:
-        pytest.skip("No period-level chips — column hierarchy too flat for this sheet")
-    # Turn all chips OFF first (they default to ON).
-    for i in range(n_chips):
-        chips.nth(i).click()
-        page.wait_for_timeout(400)
+    toggles = page.locator("[data-testid^='col-level-toggle-']")
+    n_toggles = toggles.count()
+    if n_toggles == 0:
+        pytest.skip("No period-level toggles — column hierarchy too flat for this sheet")
+    # Turn all toggles OFF by clicking the "Выкл" button in each group.
+    for i in range(n_toggles):
+        group = toggles.nth(i)
+        off_btn = group.locator("button[value='hidden']")
+        if off_btn.count() > 0:
+            off_btn.click()
+            page.wait_for_timeout(400)
     cols_all_off = page.evaluate(
         "() => window.__pebbleGridApi ? window.__pebbleGridApi.getColumns().length : 0"
     )
-    # Now turn one chip ON and verify columns grow.
+    # Now turn one toggle to 'end' (▶) and verify columns grow.
     grew = False
-    clicked = []
-    for i in range(n_chips):
-        chip = chips.nth(i)
-        testid = chip.get_attribute("data-testid")
-        clicked.append(testid)
-        chip.click()
+    for i in range(n_toggles):
+        group = toggles.nth(i)
+        end_btn = group.locator("button[value='end']")
+        if end_btn.count() == 0:
+            continue
+        end_btn.click()
         page.wait_for_timeout(800)
         cols_now = page.evaluate(
             "() => window.__pebbleGridApi.getColumns().length"
         )
         if cols_now > cols_all_off:
             grew = True
-            # Toggle off to leave state clean.
-            chip.click()
+            # Switch back to off to leave state clean.
+            off_btn = group.locator("button[value='hidden']")
+            off_btn.click()
             page.wait_for_timeout(400)
             break
-        # Toggle off and try next chip.
-        chip.click()
+        # Switch off and try next.
+        off_btn = group.locator("button[value='hidden']")
+        off_btn.click()
         page.wait_for_timeout(400)
     assert grew, (
-        f"Expected some level chip to add Σ column(s); clicked={clicked} "
+        f"Expected some level toggle to add Σ column(s); "
         f"cols_all_off={cols_all_off}"
     )
 

@@ -174,6 +174,7 @@ MIGRATIONS = [
     "ALTER TABLE sheets ADD COLUMN excel_code TEXT DEFAULT ''",
     "ALTER TABLE sheets ADD COLUMN sort_order INTEGER DEFAULT 0",
     "ALTER TABLE analytic_records ADD COLUMN excel_row INTEGER",
+    "ALTER TABLE sheets ADD COLUMN locked INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE sheet_analytics ADD COLUMN is_main INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE sheet_analytics ADD COLUMN min_period_level TEXT DEFAULT NULL",
     "ALTER TABLE sheet_analytics ADD COLUMN visible_record_ids TEXT DEFAULT NULL",

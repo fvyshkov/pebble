@@ -9,6 +9,7 @@ import FolderOutlined from '@mui/icons-material/FolderOutlined'
 import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
 import CategoryOutlined from '@mui/icons-material/CategoryOutlined'
 import LockOutlined from '@mui/icons-material/LockOutlined'
+import LockOpenOutlined from '@mui/icons-material/LockOpenOutlined'
 import * as Icons from '@mui/icons-material'
 import * as api from '../api'
 import { currentLang } from '../i18n'
@@ -23,6 +24,7 @@ interface Props {
   sheetsOnly?: boolean
   currentUserId?: string
   isAdmin?: boolean
+  onRefresh?: () => void
 }
 
 interface ModelTree {
@@ -31,7 +33,7 @@ interface ModelTree {
   analytics: Analytic[]
 }
 
-export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId, isAdmin }: Props) {
+export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId, isAdmin, onRefresh }: Props) {
   const { t } = useTranslation()
   const [trees, setTrees] = useState<ModelTree[]>([])
   const [search, setSearch] = useState('')
@@ -86,12 +88,20 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
 
   useEffect(() => { load() }, [load, refreshKey])
 
-  // Reload translations on language change
+  // Reload only translations on language change (don't rebuild the tree)
   useEffect(() => {
-    const handler = () => { load() }
+    const handler = async () => {
+      const lang = currentLang()
+      for (const td of trees) {
+        try {
+          const tr = await api.getModelTranslations(td.model.id, lang)
+          setTrMap(prev => ({ ...prev, ...tr }))
+        } catch { /* ignore */ }
+      }
+    }
     window.addEventListener('pebble:langChange', handler)
     return () => window.removeEventListener('pebble:langChange', handler)
-  }, [load])
+  }, [trees])
 
   // Auto-expand after create
   useEffect(() => {
@@ -242,6 +252,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                 >
                   {filteredSheets.map(s => {
                     const sheetName = tr('sheet', s.id, s.name) || t('left.noName')
+                    const isLocked = !!(s as any).locked
                     return (
                       <TreeItem
                         key={s.id}
@@ -254,8 +265,46 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                                 {(s as any).excel_code}
                               </span>
                             )}
-                            <span style={{ color: s.can_edit === false ? '#999' : undefined }}>{sheetName}</span>
-                            {s.can_edit === false && <LockOutlined sx={{ fontSize: 12, color: '#ccc', ml: 'auto' }} />}
+                            <span style={{ color: (s.can_edit === false || isLocked) ? '#999' : undefined }}>{sheetName}</span>
+                            {s.can_edit === false && !isLocked && <LockOutlined sx={{ fontSize: 12, color: '#ccc', ml: 'auto' }} />}
+                            {isLocked && (
+                              <Tooltip title={isAdmin ? t('left.unlockSheet', 'Разблокировать лист') : t('left.sheetLocked', 'Лист заблокирован')}>
+                                <span style={{ marginLeft: 'auto', display: 'flex' }}>
+                                  <LockOutlined
+                                    sx={{ fontSize: 14, color: '#ef5350', cursor: isAdmin ? 'pointer' : 'default' }}
+                                    onClick={isAdmin ? (e) => {
+                                      e.stopPropagation()
+                                      api.toggleSheetLock(s.id).then(() => {
+                                        setTrees(prev => prev.map(t => ({
+                                          ...t,
+                                          sheets: t.sheets.map(sh => sh.id === s.id ? { ...sh, locked: 0 } : sh)
+                                        })))
+                                        onRefresh?.()
+                                      })
+                                    } : undefined}
+                                  />
+                                </span>
+                              </Tooltip>
+                            )}
+                            {!isLocked && isAdmin && (
+                              <Tooltip title={t('left.lockSheet', 'Заблокировать лист')}>
+                                <span style={{ marginLeft: isLocked || s.can_edit === false ? 0 : 'auto', display: 'flex' }}>
+                                  <LockOpenOutlined
+                                    sx={{ fontSize: 14, color: '#ccc', cursor: 'pointer', '&:hover': { color: '#999' } }}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      api.toggleSheetLock(s.id).then(() => {
+                                        setTrees(prev => prev.map(t => ({
+                                          ...t,
+                                          sheets: t.sheets.map(sh => sh.id === s.id ? { ...sh, locked: 1 } : sh)
+                                        })))
+                                        onRefresh?.()
+                                      })
+                                    }}
+                                  />
+                                </span>
+                              </Tooltip>
+                            )}
                           </div>
                         }
                       />
@@ -367,7 +416,8 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                                 {(s as any).excel_code}
                               </span>
                             )}
-                            <span>{sheetName}</span>
+                            <span style={{ color: (s as any).locked ? '#999' : undefined }}>{sheetName}</span>
+                            {!!(s as any).locked && <LockOutlined sx={{ fontSize: 13, color: '#ef5350' }} />}
                             <span className="actions">
                               <IconButton size="small" onClick={e => handleDeleteSheet(e, s.id)}>
                                 <DeleteOutlineOutlined sx={{ fontSize: 14 }} />

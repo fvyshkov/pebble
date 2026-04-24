@@ -43,6 +43,7 @@ export interface Sheet {
   name: string
   created_at: string
   updated_at: string
+  locked?: number
 }
 
 export interface SheetAnalytic {

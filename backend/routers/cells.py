@@ -1,7 +1,7 @@
 import uuid
 import json
 import asyncio
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from backend.db import get_db
@@ -190,6 +190,10 @@ async def _recalc_model(db, sheet_id: str) -> int:
 @router.put("/by-sheet/{sheet_id}")
 async def save_cells(sheet_id: str, body: BulkCellsIn, no_recalc: bool = Query(False)):
     db = get_db()
+    # Check sheet lock
+    lock_row = await db.execute_fetchall("SELECT locked FROM sheets WHERE id = ?", (sheet_id,))
+    if lock_row and lock_row[0]["locked"]:
+        raise HTTPException(403, "Sheet is locked")
     # Check edit permissions if user_id provided
     user_id = body.cells[0].user_id if body.cells else None
     edit_restrictions = await _get_editable_records(db, user_id, sheet_id)

@@ -568,7 +568,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 selection={selection} onSelect={handleSelect}
                 refreshKey={refreshKey} expandAfterCreate={expandAfterCreate} onCreated={onCreated}
                 sheetsOnly={isDataMode} currentUserId={isDataMode ? currentUserId : undefined}
-                isAdmin={isAdmin}
+                isAdmin={isAdmin} onRefresh={onRefresh}
               />
             </div>
             <Splitter onResize={d => setLeftWidth(w => Math.max(180, w + d))} />

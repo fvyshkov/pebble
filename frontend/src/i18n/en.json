@@ -51,7 +51,10 @@
     "analytics": "Analytics",
     "newSheet": "New sheet",
     "newAnalytic": "New analytic",
-    "delete": "Delete"
+    "delete": "Delete",
+    "lockSheet": "Lock sheet",
+    "unlockSheet": "Unlock sheet",
+    "sheetLocked": "Sheet is locked"
   },
   "grid": {
     "selected": "Selected",
@@ -76,6 +79,7 @@
     "quarters": "Quarters",
     "months": "Months",
     "halfyears": "Half-years",
+    "off": "Off",
     "fixed": "(fixed)",
     "needMin2": "Need at least 2 analytics on sheet (columns + rows)",
     "saveFailed": "Failed to save",

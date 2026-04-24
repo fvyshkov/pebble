@@ -8,7 +8,7 @@
  * and `treeData={true}`.
  */
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
-import { Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, LinearProgress, Snackbar, Tooltip, Typography, Button as MUIButton, IconButton } from '@mui/material'
+import { Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, LinearProgress, Snackbar, ToggleButton, ToggleButtonGroup, Tooltip, Typography, Button as MUIButton, IconButton } from '@mui/material'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import * as am5 from '@amcharts/amcharts5'
 import * as am5xy from '@amcharts/amcharts5/xy'
@@ -328,6 +328,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   const [rowData, setRowData] = useState<RowDatum[]>([])
   const [columnDefs, setColumnDefs] = useState<(ColDef | ColGroupDef)[]>([])
   const [sheetName, setSheetName] = useState('')
+  const [locked, setLocked] = useState(false)
   const [recalcRunning, setRecalcRunning] = useState(false)
   // Mirror local/external recalc state into the store that feeds the custom
   // AG Grid status panel (which lives outside the React tree).
@@ -535,7 +536,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     setLoading(true)
     setError(null)
     try {
-      const sa: SheetAnalytic[] = await api.listSheetAnalytics(sheetId)
+      // Fetch sheet locked state + analytics in parallel
+      const [sa, sheets] = await Promise.all([
+        api.listSheetAnalytics(sheetId),
+        api.listSheets(modelId),
+      ])
+      const sheetRecord = sheets.find(s => s.id === sheetId)
+      setLocked(!!sheetRecord?.locked)
       if (sa.length < 2) throw new Error(t('grid.needMin2'))
 
       const aMap: Record<string, Analytic> = {}
@@ -668,43 +675,34 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       // Leaves first, then sum columns for each level based on toggle state.
       sumColLeavesRef.current = {}
 
-      // Collect sum columns per level for 'start'/'end' placement
-      const _collectSumCols = (nodes: RecordNode[], lvl: number, acc: Map<number, (ColDef | ColGroupDef)[]>) => {
+      // Recursive column builder: interleaves sum columns with their group's
+      // leaves so that e.g. "Σ2025" sits right before/after Jan–Dec 2025,
+      // NOT lumped together with Σ2026.
+      const buildColDefs = (nodes: RecordNode[], lvl: number): (ColDef | ColGroupDef)[] => {
+        const result: (ColDef | ColGroupDef)[] = []
         for (const n of nodes) {
-          if (n.children.length === 0) continue
-          const state = colLevelTogglesRef.current[lvl]
-          if (state && state !== 'hidden') {
-            const label = recordLabel(n)
-            const leafIds = getLeaves([n]).map(l => l.record.id)
-            if (!acc.has(lvl)) acc.set(lvl, [])
-            acc.get(lvl)!.push(makeSumColDef(label, leafIds, n.record.id))
+          if (n.children.length === 0) {
+            // Leaf → period column
+            result.push(makePeriodColDef(recordLabel(n), n.record.id))
+          } else {
+            // Group node → recurse into children, optionally add sum column
+            const childCols = buildColDefs(n.children, lvl + 1)
+            const state = colLevelTogglesRef.current[lvl]
+            if (state && state !== 'hidden') {
+              const label = recordLabel(n)
+              const leafIds = getLeaves([n]).map(l => l.record.id)
+              const sumCol = makeSumColDef(label, leafIds, n.record.id)
+              if (state === 'start') {
+                result.push(sumCol, ...childCols)
+              } else {
+                result.push(...childCols, sumCol)
+              }
+            } else {
+              result.push(...childCols)
+            }
           }
-          _collectSumCols(n.children, lvl + 1, acc)
         }
-      }
-
-      const buildColDefs = (nodes: RecordNode[], _lvl: number): (ColDef | ColGroupDef)[] => {
-        // 1. Collect all leaf columns (flat)
-        const leaves = getLeaves(nodes)
-        const leafCols = leaves.map(l => makePeriodColDef(recordLabel(l), l.record.id))
-
-        // 2. Collect sum columns grouped by level
-        const sumByLevel = new Map<number, (ColDef | ColGroupDef)[]>()
-        _collectSumCols(nodes, 0, sumByLevel)
-
-        // 3. Build final order: 'start' sums → leaves → 'end' sums
-        // Sum levels sorted from most granular (highest level) to least (lowest)
-        const sortedLevels = Array.from(sumByLevel.keys()).sort((a, b) => b - a)
-        const startCols: (ColDef | ColGroupDef)[] = []
-        const endCols: (ColDef | ColGroupDef)[] = []
-        for (const lvl of sortedLevels) {
-          const state = colLevelTogglesRef.current[lvl]
-          const cols = sumByLevel.get(lvl) || []
-          if (state === 'start') startCols.push(...cols)
-          else if (state === 'end') endCols.push(...cols)
-        }
-
-        return [...startCols, ...leafCols, ...endCols]
+        return result
       }
 
       // ── Cells (full prefetch) ───────────────────────────────────────────
@@ -894,39 +892,29 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     if (!colTree.length) return
     // Reset sum-col leaf map — toggle rebuild re-registers them below.
     sumColLeavesRef.current = {}
-    const rebuild = (nodes: RecordNode[], _lvl: number): (ColDef | ColGroupDef)[] => {
-      // Same flat layout as buildColDefs
-      sumColLeavesRef.current = {}
-      const leaves = getLeaves(nodes)
-      const leafCols = leaves.map(l => makePeriodColDef(recordLabel(l), l.record.id))
-
-      const sumByLevel = new Map<number, (ColDef | ColGroupDef)[]>()
-      const collectSums = (ns: RecordNode[], lvl: number) => {
-        for (const n of ns) {
-          if (n.children.length === 0) continue
+    const rebuild = (nodes: RecordNode[], lvl: number): (ColDef | ColGroupDef)[] => {
+      const result: (ColDef | ColGroupDef)[] = []
+      for (const n of nodes) {
+        if (n.children.length === 0) {
+          result.push(makePeriodColDef(recordLabel(n), n.record.id))
+        } else {
+          const childCols = rebuild(n.children, lvl + 1)
           const state = colLevelToggles[lvl]
           if (state && state !== 'hidden') {
             const label = recordLabel(n)
             const leafIds = getLeaves([n]).map(l => l.record.id)
-            if (!sumByLevel.has(lvl)) sumByLevel.set(lvl, [])
-            sumByLevel.get(lvl)!.push(makeSumColDef(label, leafIds, n.record.id))
+            const sumCol = makeSumColDef(label, leafIds, n.record.id)
+            if (state === 'start') {
+              result.push(sumCol, ...childCols)
+            } else {
+              result.push(...childCols, sumCol)
+            }
+          } else {
+            result.push(...childCols)
           }
-          collectSums(n.children, lvl + 1)
         }
       }
-      collectSums(nodes, 0)
-
-      const sortedLevels = Array.from(sumByLevel.keys()).sort((a, b) => b - a)
-      const startCols: (ColDef | ColGroupDef)[] = []
-      const endCols: (ColDef | ColGroupDef)[] = []
-      for (const lvl of sortedLevels) {
-        const state = colLevelToggles[lvl]
-        const cols = sumByLevel.get(lvl) || []
-        if (state === 'start') startCols.push(...cols)
-        else if (state === 'end') endCols.push(...cols)
-      }
-
-      return [...startCols, ...leafCols, ...endCols]
+      return result
     }
     setColumnDefs(prev => {
       // Preserve the auto-group column (always first, pinned left) + any
@@ -1199,6 +1187,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       // api.flashCells() in the recalc-diff effect and in the local
       // parent-sum update path.
       editable: (p: any) => {
+        if (locked) return false // sheet is locked — no edits
         if (mode === 'formulas') return false // read-only in formula view
         if (!p.data || !p.data.isLeaf) return false // group rows: read-only
         const rule: CellRule = p.data[`__rule_${periodRecId}`] || 'manual'
@@ -1304,7 +1293,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           s.background = '#fff'
           s.color = '#1565c0'
         } else {
-          s.background = '#fdf8e8' // manual input tint (legacy parity)
+          s.background = locked ? '#e0f2f1' : '#fdf8e8' // locked: teal tint, normal: beige
+          if (locked) s.color = '#00695c'
         }
         const num = Number(p.value)
         if (!Number.isNaN(num) && num < 0) s.color = '#d32f2f'
@@ -2068,26 +2058,37 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           )
         })}
         {/* Column-level aggregate toggles (Годы / Кварталы).
-            3-state cycle: end → start → hidden → end.
-            'end' = show after leaves (default), 'start' = show before, 'hidden' = off. */}
+            3-state switch: hidden / start (before periods) / end (after periods). */}
         {colLevelNames.length > 0 && (
-          <Box sx={{ display: 'flex', gap: 0.5, ml: pinnedEntries.length ? 1 : 0 }}>
+          <Box sx={{ display: 'flex', gap: 1, ml: pinnedEntries.length ? 1 : 0, alignItems: 'center' }}>
             {colLevelNames.map(({ level, label }) => {
               const state = colLevelToggles[level] || 'hidden'
-              const nextState = (s: ColLevelState): ColLevelState =>
-                s === 'end' ? 'start' : s === 'start' ? 'hidden' : 'end'
-              const icon = state === 'start' ? '\u25C0' : state === 'end' ? '\u25B6' : ''
               return (
-                <Chip
-                  key={`lvl-${level}`}
-                  size="small"
-                  label={`\u03A3 ${label}${icon ? ' ' + icon : ''}`}
-                  color={state !== 'hidden' ? 'primary' : 'default'}
-                  variant={state !== 'hidden' ? 'filled' : 'outlined'}
-                  onClick={() => setColLevelToggles(prev => ({ ...prev, [level]: nextState(state) }))}
-                  sx={{ fontSize: 11 }}
-                  data-testid={`col-level-chip-${level}`}
-                />
+                <Box key={`lvl-${level}`} sx={{ display: 'flex', alignItems: 'center', gap: 0.3 }}>
+                  <Typography sx={{ fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>
+                    {`\u03A3 ${label}`}
+                  </Typography>
+                  <ToggleButtonGroup
+                    size="small"
+                    exclusive
+                    value={state}
+                    onChange={(_e, val) => {
+                      if (val !== null) setColLevelToggles(prev => ({ ...prev, [level]: val as ColLevelState }))
+                    }}
+                    data-testid={`col-level-toggle-${level}`}
+                    sx={{ height: 22 }}
+                  >
+                    <ToggleButton value="hidden" sx={{ px: 0.7, py: 0, fontSize: 10, textTransform: 'none' }}>
+                      {t('grid.off', 'Выкл')}
+                    </ToggleButton>
+                    <ToggleButton value="start" sx={{ px: 0.7, py: 0, fontSize: 10, textTransform: 'none' }}>
+                      {'\u25C0'}
+                    </ToggleButton>
+                    <ToggleButton value="end" sx={{ px: 0.7, py: 0, fontSize: 10, textTransform: 'none' }}>
+                      {'\u25B6'}
+                    </ToggleButton>
+                  </ToggleButtonGroup>
+                </Box>
               )
             })}
           </Box>

@@ -70,6 +70,8 @@ export const deleteSheet = (id: string) =>
   fetch(`${BASE}/sheets/${id}`, { method: 'DELETE' }).then(r => json<any>(r))
 export const reorderSheets = (modelId: string, orderedIds: string[]) =>
   fetch(`${BASE}/sheets/reorder/${modelId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ordered_ids: orderedIds }) }).then(r => json<any>(r))
+export const toggleSheetLock = (sheetId: string) =>
+  fetch(`${BASE}/sheets/${sheetId}/lock`, { method: 'PATCH' }).then(r => json<Sheet>(r))
 
 // Sheet Analytics
 export const listSheetAnalytics = (sheetId: string) =>
