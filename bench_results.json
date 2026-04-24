@@ -1,0 +1,42 @@
+[
+  {
+    "excel": "Doscredobank FinModel BaaS 2026-2028 v.12.xlsx",
+    "sheet": "0",
+    "results": {
+      "qwen3-235b-together": {
+        "total_indicators": 19,
+        "groups": 2,
+        "leaves": 17,
+        "formulas": 0,
+        "formula_ref_accuracy": 1.0,
+        "has_display_name": true,
+        "has_data_start_col": true,
+        "elapsed": "cached",
+        "input_tokens": 3994,
+        "output_tokens": 658,
+        "cost_usd": 0.0015,
+        "from_cache": true
+      }
+    }
+  },
+  {
+    "excel": "Doscredobank FinModel BaaS 2026-2028 v.12.xlsx",
+    "sheet": "BaaS.1",
+    "results": {
+      "qwen3-235b-together": {
+        "total_indicators": 119,
+        "groups": 7,
+        "leaves": 112,
+        "formulas": 73,
+        "formula_ref_accuracy": 0.97,
+        "has_display_name": true,
+        "has_data_start_col": true,
+        "elapsed": 257.5,
+        "input_tokens": 11269,
+        "output_tokens": 7846,
+        "cost_usd": 0.0073,
+        "from_cache": false
+      }
+    }
+  }
+]
