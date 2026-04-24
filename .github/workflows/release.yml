@@ -26,6 +26,8 @@ jobs:
           pip install pytest pytest-asyncio httpx
 
       - name: Run backend API tests
+        env:
+          PYTHONPATH: .
         run: pytest backend/tests/ -v --tb=short
 
   # ── Excel import + recalc verification ──
@@ -34,8 +36,6 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - uses: actions/setup-python@v5
         with:
@@ -80,8 +80,6 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - uses: actions/setup-python@v5
         with:
