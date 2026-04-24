@@ -1293,8 +1293,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           s.background = '#fff'
           s.color = '#1565c0'
         } else {
-          s.background = locked ? '#e0f2f1' : '#fdf8e8' // locked: teal tint, normal: beige
-          if (locked) s.color = '#00695c'
+          s.background = locked ? '#fce4ec' : '#fdf8e8' // locked: light pink, normal: beige
+          if (locked) s.color = '#880e4f'
         }
         const num = Number(p.value)
         if (!Number.isNaN(num) && num < 0) s.color = '#d32f2f'

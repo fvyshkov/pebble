@@ -49,7 +49,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
       const accessible = await api.getAccessibleSheets(currentUserId)
       const treesData: ModelTree[] = accessible.map((m: any) => ({
         model: { id: m.id, name: m.name } as Model,
-        sheets: m.sheets.map((s: any) => ({ id: s.id, name: s.name, excel_code: s.excel_code, can_edit: s.can_edit, model_id: m.id, created_at: '', updated_at: '' } as Sheet & { can_edit?: boolean })),
+        sheets: m.sheets.map((s: any) => ({ id: s.id, name: s.name, excel_code: s.excel_code, can_edit: s.can_edit, locked: s.locked, model_id: m.id, created_at: '', updated_at: '' } as Sheet & { can_edit?: boolean })),
         analytics: [],
       }))
       setTrees(treesData)
@@ -269,38 +269,52 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                             {s.can_edit === false && !isLocked && <LockOutlined sx={{ fontSize: 12, color: '#ccc', ml: 'auto' }} />}
                             {isLocked && (
                               <Tooltip title={isAdmin ? t('left.unlockSheet', 'Разблокировать лист') : t('left.sheetLocked', 'Лист заблокирован')}>
-                                <span style={{ marginLeft: 'auto', display: 'flex' }}>
+                                <span
+                                  style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', background: '#ffebee', borderRadius: 4, padding: '1px 3px', cursor: isAdmin ? 'pointer' : 'default' }}
+                                  onMouseDown={isAdmin ? (e) => {
+                                    e.stopPropagation()
+                                    e.preventDefault()
+                                  } : undefined}
+                                  onClick={isAdmin ? (e) => {
+                                    e.stopPropagation()
+                                    e.preventDefault()
+                                    api.toggleSheetLock(s.id).then(() => {
+                                      setTrees(prev => prev.map(t => ({
+                                        ...t,
+                                        sheets: t.sheets.map(sh => sh.id === s.id ? { ...sh, locked: 0 } : sh)
+                                      })))
+                                      onRefresh?.()
+                                    })
+                                  } : undefined}
+                                >
                                   <LockOutlined
-                                    sx={{ fontSize: 14, color: '#ef5350', cursor: isAdmin ? 'pointer' : 'default' }}
-                                    onClick={isAdmin ? (e) => {
-                                      e.stopPropagation()
-                                      api.toggleSheetLock(s.id).then(() => {
-                                        setTrees(prev => prev.map(t => ({
-                                          ...t,
-                                          sheets: t.sheets.map(sh => sh.id === s.id ? { ...sh, locked: 0 } : sh)
-                                        })))
-                                        onRefresh?.()
-                                      })
-                                    } : undefined}
+                                    sx={{ fontSize: 15, color: '#d32f2f' }}
                                   />
                                 </span>
                               </Tooltip>
                             )}
                             {!isLocked && isAdmin && (
                               <Tooltip title={t('left.lockSheet', 'Заблокировать лист')}>
-                                <span style={{ marginLeft: isLocked || s.can_edit === false ? 0 : 'auto', display: 'flex' }}>
+                                <span
+                                  style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', padding: '1px 3px', borderRadius: 4, cursor: 'pointer' }}
+                                  onMouseDown={(e) => {
+                                    e.stopPropagation()
+                                    e.preventDefault()
+                                  }}
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    e.preventDefault()
+                                    api.toggleSheetLock(s.id).then(() => {
+                                      setTrees(prev => prev.map(t => ({
+                                        ...t,
+                                        sheets: t.sheets.map(sh => sh.id === s.id ? { ...sh, locked: 1 } : sh)
+                                      })))
+                                      onRefresh?.()
+                                    })
+                                  }}
+                                >
                                   <LockOpenOutlined
-                                    sx={{ fontSize: 14, color: '#ccc', cursor: 'pointer', '&:hover': { color: '#999' } }}
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      api.toggleSheetLock(s.id).then(() => {
-                                        setTrees(prev => prev.map(t => ({
-                                          ...t,
-                                          sheets: t.sheets.map(sh => sh.id === s.id ? { ...sh, locked: 1 } : sh)
-                                        })))
-                                        onRefresh?.()
-                                      })
-                                    }}
+                                    sx={{ fontSize: 15, color: '#bbb', '&:hover': { color: '#666' } }}
                                   />
                                 </span>
                               </Tooltip>
@@ -417,7 +431,7 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                               </span>
                             )}
                             <span style={{ color: (s as any).locked ? '#999' : undefined }}>{sheetName}</span>
-                            {!!(s as any).locked && <LockOutlined sx={{ fontSize: 13, color: '#ef5350' }} />}
+                            {!!(s as any).locked && <span style={{ display: 'inline-flex', alignItems: 'center', background: '#ffebee', borderRadius: 3, padding: '0 2px' }}><LockOutlined sx={{ fontSize: 13, color: '#d32f2f' }} /></span>}
                             <span className="actions">
                               <IconButton size="small" onClick={e => handleDeleteSheet(e, s.id)}>
                                 <DeleteOutlineOutlined sx={{ fontSize: 14 }} />

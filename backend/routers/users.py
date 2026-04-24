@@ -110,7 +110,7 @@ async def get_accessible_sheets(user_id: str):
     rows = await db.execute_fetchall("""
         SELECT m.id as model_id, m.name as model_name,
                s.id as sheet_id, s.name as sheet_name,
-               s.excel_code, s.sort_order,
+               s.excel_code, s.sort_order, s.locked,
                COALESCE(sp.can_view, 1) as can_view,
                COALESCE(sp.can_edit, 1) as can_edit
         FROM sheets s
@@ -128,6 +128,7 @@ async def get_accessible_sheets(user_id: str):
             "id": r["sheet_id"], "name": r["sheet_name"],
             "excel_code": r["excel_code"] or "",
             "can_edit": bool(r["can_edit"]),
+            "locked": r["locked"] or 0,
         })
     return list(models.values())
 
