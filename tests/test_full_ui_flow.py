@@ -325,9 +325,10 @@ def _add_child(page: Page, parent_name: str, child_name: str):
     row = page.locator('table tbody tr', has=page.locator(f'input[value="{parent_name}"]'))
     row.hover()
     page.wait_for_timeout(300)
-    # The add-child button is inside .row-actions — first IconButton (AddOutlined icon)
+    # The add-child button is inside .row-actions (opacity:0 until hover).
+    # On headless CI, hover may not trigger opacity — use JS click.
     btn = row.locator('.row-actions button').first
-    btn.click(force=True)
+    btn.dispatch_event('click')
     page.wait_for_timeout(600)
     inputs = page.locator('table tbody input[type="text"]')
     new_input = inputs.last
@@ -384,8 +385,15 @@ def test_06_verify_branch_distribution(page: Page):
 # ── Users ──
 
 def _open_users_dialog(page: Page):
+    # Close any existing dialog first (from a previous failed test)
+    if page.locator('h6:has-text("Пользователи")').count() > 0:
+        try:
+            _close_users_dialog(page)
+        except Exception:
+            page.keyboard.press('Escape')
+            page.wait_for_timeout(300)
     btn = page.locator('button[aria-label="Пользователи"]').first
-    btn.click()
+    btn.click(force=True)
     page.wait_for_timeout(500)
     expect(page.locator('h6:has-text("Пользователи")')).to_be_visible(timeout=5000)
 
