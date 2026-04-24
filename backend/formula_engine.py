@@ -19,11 +19,24 @@ Multiple params are comma-separated.
 All references resolve by EXACT name match (case-insensitive). No fuzzy matching.
 """
 
+import os
 import re
 import json
 import math
 import itertools
+import time
 from typing import Any
+
+# ── Rust engine toggle ────────────────────────────────────────────────────
+_USE_RUST = os.environ.get("PEBBLE_ENGINE", "python") == "rust"
+try:
+    import pebble_calc as _rust_engine
+except ImportError:
+    _rust_engine = None
+    if _USE_RUST:
+        import warnings
+        warnings.warn("PEBBLE_ENGINE=rust but pebble_calc not installed, falling back to Python")
+        _USE_RUST = False
 
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────
@@ -253,6 +266,88 @@ def evaluate(formula: str, get_ref_value) -> float:
         return 0.0
 
 
+# ── Serialization bridge for Rust engine ───────────────────────────────────
+
+def _serialize_for_rust(all_sheets, sheet_meta, global_cells, global_formulas,
+                        manual_cells, phantom_cells, sheet_name_to_id,
+                        prev_period, period_order) -> str:
+    """Serialize loaded model data to JSON for the Rust engine."""
+    sheets = []
+    for s in all_sheets:
+        sid = s["id"]
+        meta = sheet_meta[sid]
+        cells = {}
+        for gk, val in global_cells.items():
+            if gk[0] != sid:
+                continue
+            ck = gk[1]
+            formula = global_formulas.get(gk, "")
+            if gk in manual_cells:
+                rule = "manual"
+            elif gk in phantom_cells:
+                rule = "phantom"
+            elif formula:
+                rule = "formula"
+            else:
+                rule = "manual"
+            cells[ck] = {"value": val, "rule": rule, "formula": formula}
+
+        records = {}
+        for rid, rec in meta["record_by_id"].items():
+            data = rec.get("_data") or {}
+            records[rid] = {
+                "id": rid,
+                "analytic_id": rec.get("analytic_id", ""),
+                "parent_id": rec.get("parent_id"),
+                "sort_order": rec.get("sort_order", 0),
+                "name": data.get("name", ""),
+                "period_key": data.get("period_key"),
+                "excel_row": rec.get("excel_row"),
+            }
+
+        # Convert rules: ensure scope values are strings
+        rules_by_indicator = {}
+        for ind_rid, rules in meta.get("rules_by_indicator", {}).items():
+            rules_by_indicator[ind_rid] = [
+                {
+                    "id": r["id"],
+                    "kind": r["kind"],
+                    "scope": {str(k): str(v) if v else "" for k, v in (r.get("scope") or {}).items()},
+                    "priority": r.get("priority", 0),
+                    "formula": r.get("formula", ""),
+                }
+                for r in rules
+            ]
+
+        # Convert name_to_rids: ensure all values are lists
+        name_to_rids = {}
+        for aid, nmap in meta.get("name_to_rids", {}).items():
+            name_to_rids[aid] = {name: list(rids) for name, rids in nmap.items()}
+
+        sheets.append({
+            "id": sid,
+            "name": meta["name"],
+            "ordered_aids": meta["ordered_aids"],
+            "period_aid": meta.get("period_aid"),
+            "main_aid": meta.get("main_aid"),
+            "analytic_name_to_id": meta.get("analytic_name_to_id", {}),
+            "name_to_rids": name_to_rids,
+            "records": records,
+            "children_by_rid": {k: list(v) for k, v in meta.get("children_by_rid", {}).items()},
+            "rules_by_indicator": rules_by_indicator,
+            "cells": cells,
+            "rid_to_period_key": meta.get("rid_to_period_key", {}),
+            "period_key_to_rid": meta.get("period_key_to_rid", {}),
+        })
+
+    return json.dumps({
+        "sheets": sheets,
+        "sheet_name_to_id": sheet_name_to_id,
+        "prev_period": prev_period,
+        "period_order": period_order,
+    })
+
+
 # ── Model-level lazy calculator ────────────────────────────────────────────
 
 async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
@@ -443,6 +538,21 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     _original_cell_keys = set(global_cells.keys())
     # Snapshot original values so we can detect what actually changed.
     _original_values: dict[tuple, str] = dict(global_cells)
+
+    # ── Rust engine branch ──
+    if _USE_RUST and _rust_engine is not None:
+        t0 = time.perf_counter()
+        model_json = _serialize_for_rust(
+            all_sheets, sheet_meta, global_cells, global_formulas,
+            _manual_cells, _phantom_cells, sheet_name_to_id,
+            prev_period, period_order,
+        )
+        t1 = time.perf_counter()
+        rust_result = _rust_engine.calculate(model_json)
+        t2 = time.perf_counter()
+        total_cells = sum(len(v) for v in rust_result.values())
+        print(f"[formula_engine] Rust engine: serialize={t1-t0:.3f}s compute={t2-t1:.3f}s cells={total_cells}")
+        return rust_result
 
     # ── Pre-filter: remove formulas with unresolvable cross-sheet refs ──
     # If a formula references [Sheet::indicator] and that indicator doesn't exist
