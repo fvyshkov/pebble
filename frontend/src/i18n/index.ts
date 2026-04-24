@@ -3,6 +3,7 @@ import { initReactI18next } from 'react-i18next'
 import ru from './ru.json'
 import en from './en.json'
 import ky from './ky.json'
+import vi from './vi.json'
 
 const savedLang = localStorage.getItem('pebble_lang') || 'ru'
 
@@ -13,6 +14,7 @@ i18n
       ru: { translation: ru },
       en: { translation: en },
       ky: { translation: ky },
+      vi: { translation: vi },
     },
     lng: savedLang,
     fallbackLng: 'ru',
@@ -27,6 +29,7 @@ export const LANGUAGES = [
   { code: 'ru', label: 'RU', name: 'Русский' },
   { code: 'en', label: 'EN', name: 'English' },
   { code: 'ky', label: 'KY', name: 'Кыргызча' },
+  { code: 'vi', label: 'VI', name: 'Tiếng Việt' },
 ] as const
 
 export function changeLanguage(lang: string) {

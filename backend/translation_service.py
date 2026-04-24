@@ -1,6 +1,6 @@
 """Multilingual translation service for Pebble.
 
-Supports three languages: Russian (ru), English (en), Kyrgyz (ky).
+Supports four languages: Russian (ru), English (en), Kyrgyz (ky), Vietnamese (vi).
 Uses Google Translate (via deep-translator) for fast free translation.
 Translations are stored in the `translations` table.
 """
@@ -16,10 +16,10 @@ import aiosqlite
 
 from backend.db import get_db
 
-SUPPORTED_LANGS = ("ru", "en", "ky")
+SUPPORTED_LANGS = ("ru", "en", "ky", "vi")
 DEFAULT_LANG = "ru"
 
-LANG_NAMES = {"ru": "Russian", "en": "English", "ky": "Kyrgyz"}
+LANG_NAMES = {"ru": "Russian", "en": "English", "ky": "Kyrgyz", "vi": "Vietnamese"}
 
 # Month / quarter / half-year names per language
 MONTH_NAMES = {
@@ -29,18 +29,22 @@ MONTH_NAMES = {
             "July", "August", "September", "October", "November", "December"],
     "ky": ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
             "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"],
+    "vi": ["Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6",
+            "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12"],
 }
 
 QUARTER_NAMES = {
     "ru": ["1-й квартал", "2-й квартал", "3-й квартал", "4-й квартал"],
     "en": ["Q1", "Q2", "Q3", "Q4"],
     "ky": ["1-чейрек", "2-чейрек", "3-чейрек", "4-чейрек"],
+    "vi": ["Quý 1", "Quý 2", "Quý 3", "Quý 4"],
 }
 
 HALFYEAR_NAMES = {
     "ru": ["1-е полугодие", "2-е полугодие"],
     "en": ["H1", "H2"],
     "ky": ["1-жарым жылдык", "2-жарым жылдык"],
+    "vi": ["Nửa năm 1", "Nửa năm 2"],
 }
 
 # Common field labels per language
@@ -54,6 +58,9 @@ FIELD_LABELS = {
     "ky": {"name": "Аталышы", "start": "Башталышы", "end": "Аякталышы",
             "unit": "Өлчөө бирдиги", "periods": "Мезгилдер",
             "indicators": "Көрсөткүчтөр"},
+    "vi": {"name": "Tên", "start": "Bắt đầu", "end": "Kết thúc",
+            "unit": "Đơn vị đo", "periods": "Kỳ",
+            "indicators": "Chỉ tiêu"},
 }
 
 
