@@ -130,6 +130,22 @@ PROVIDERS = {
         "cost_per_1m_input": 0.23,
         "cost_per_1m_output": 0.40,
     },
+    "deepseek-v4-pro": {
+        "type": "openai",
+        "model": "deepseek-v4-pro",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-8ffb32d2295a41939cc02ccbba8dd47a",
+        "cost_per_1m_input": 2.00,
+        "cost_per_1m_output": 8.00,
+    },
+    "deepseek-v4-flash": {
+        "type": "openai",
+        "model": "deepseek-v4-flash",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-8ffb32d2295a41939cc02ccbba8dd47a",
+        "cost_per_1m_input": 0.20,
+        "cost_per_1m_output": 0.80,
+    },
 }
 
 

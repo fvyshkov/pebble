@@ -104,6 +104,17 @@ RULES:
 13. INDENTATION RULE: A row with indent=N whose immediately following rows have indent>N is a parent group header. Attach those deeper-indent rows as children, even if the header row has no bold/formula. This is a HARD rule — do not put indented rows as siblings of their parent.
 14. Sheet 0 / «параметры» caveat: most rows there ARE manual input, BUT a row matching rule 12 above is still a grouping header with `sum_children`, not manual. Do not blanket-mark every row on sheet 0 as manual.
 
+15. NAME DISAMBIGUATION IS MANDATORY. When the same indicator name appears under different product groups (e.g. "количество выдач" under both "Потребительский кредит" and "BNPL"), you MUST append the group name in parentheses to make each name globally unique:
+   "количество выдач (потребительский)" under Потребительский кредит, "количество выдач (BNPL)" under BNPL.
+   DO NOT leave bare duplicate names — they break formula references! Use a SHORT suffix (key word from group).
+16. CROSS-SHEET REFERENCES: the ONLY valid syntax is [SheetDisplayName::indicator_name] with :: separator.
+   CORRECT: [параметры::количество партнеров]
+   WRONG: [количество партнеров]('0'::периоды="текущий")
+17. formula_first MUST differ from formula when the formula uses (периоды="предыдущий"):
+   - Delta formulas (X - X(prev)): formula_first = "0"
+   - Average with prev ((X+X(prev))/2): formula_first uses only current value
+   NEVER copy the main formula verbatim as formula_first if it references "предыдущий".
+
 Return ONLY valid JSON, no markdown:
 {"excel_name":"Tab","display_name":"Title","data_start_col":4,"indicators":[
   {"name":"Тип продукта","unit":"","row":12,"is_group":true,"children":[
@@ -298,32 +309,12 @@ def _is_input_cell(cell) -> bool:
 
 # ── LLM API call ──────────────────────────────────────────────────────────
 
-# Extra prompt for non-Claude models to improve name disambiguation and formula quality
-_OPENAI_COMPAT_PROMPT_SUFFIX = """
-
-CRITICAL ADDITIONAL RULES (read carefully):
-
-A) NAME DISAMBIGUATION IS MANDATORY. When the same indicator name appears under different product groups (e.g. "количество выдач" under "Потребительский кредит" and "BNPL"), you MUST append the group name in parentheses to make each name globally unique:
-   - "количество выдач (потребительский)" under Потребительский кредит
-   - "количество выдач (BNPL)" under BNPL
-   DO NOT use bare "количество выдач" — it is ambiguous and will break formulas!
-   The suffix should be SHORT — abbreviate the group name to the key word.
-
-B) CROSS-SHEET REFERENCES use :: separator with the sheet's display_name:
-   CORRECT: [параметры::количество партнеров]
-   WRONG:   [количество партнеров]('0'::периоды="текущий")
-   The syntax is: [SheetDisplayName::indicator_name] — nothing else.
-
-C) formula_first: When a formula uses (периоды="предыдущий") and there IS no previous period (first column), formula_first must handle this:
-   - If the formula computes a delta: formula_first = "0"
-   - If the formula computes an average with prev: formula_first should use only current period
-   - NEVER just copy the main formula as formula_first if it references "предыдущий"
-"""
+# Disambiguation/cross-sheet/formula_first rules merged into SHEET_ANALYSIS_PROMPT (rules 15-17)
 
 
 def _get_import_llm_provider() -> str:
-    """Return 'claude' or 'openai-compat' based on env config."""
-    return os.environ.get("PEBBLE_IMPORT_LLM", "claude").lower()
+    """Return 'openai-compat' (default, Qwen via Together AI) or 'claude' as fallback."""
+    return os.environ.get("PEBBLE_IMPORT_LLM", "openai-compat").lower()
 
 
 def _get_claude_client():
@@ -356,31 +347,62 @@ def _parse_claude_json(response_text: str) -> dict:
     return json.loads(text)
 
 
-# Use persistent disk (/data) on Render, local .llm_cache otherwise
+# ── LLM cache (DB-backed with file fallback for migration) ───────────────
+
+# Legacy file cache dir (kept for reading old entries)
 _LLM_CACHE_DIR = os.path.join(
     os.environ.get("PEBBLE_DB", "").rsplit("/", 1)[0] or os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     ".llm_cache"
 )
 
-def _llm_cache_get(key: str):
-    """Legacy per-sheet-text cache (pre-shared-cache). Keeps prior warmed
-    entries usable. New calls also go through backend.llm_cache via
-    cached_messages_create in chat.py."""
+
+def _cache_hash(key: str) -> str:
     import hashlib
-    h = hashlib.sha256(key.encode()).hexdigest()[:16]
-    path = os.path.join(_LLM_CACHE_DIR, f"{h}.json")
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
+async def _llm_cache_get(key: str):
+    """Get cached LLM response from DB, falling back to legacy file cache."""
+    from backend.db import get_db
+    h = _cache_hash(key)
+    try:
+        db = get_db()
+        rows = await db.execute_fetchall(
+            "SELECT response FROM llm_cache WHERE cache_key = ?", (h,)
+        )
+        if rows:
+            return json.loads(rows[0]["response"])
+    except Exception:
+        pass
+    # Fallback: legacy file cache
+    import hashlib
+    h16 = hashlib.sha256(key.encode()).hexdigest()[:16]
+    path = os.path.join(_LLM_CACHE_DIR, f"{h16}.json")
     if os.path.exists(path):
         with open(path) as f:
-            return json.load(f)
+            data = json.load(f)
+        # Migrate to DB
+        try:
+            await _llm_cache_set(key, data)
+        except Exception:
+            pass
+        return data
     return None
 
-def _llm_cache_set(key: str, value):
-    import hashlib
-    os.makedirs(_LLM_CACHE_DIR, exist_ok=True)
-    h = hashlib.sha256(key.encode()).hexdigest()[:16]
-    path = os.path.join(_LLM_CACHE_DIR, f"{h}.json")
-    with open(path, "w") as f:
-        json.dump(value, f, ensure_ascii=False)
+
+async def _llm_cache_set(key: str, value, provider: str = ""):
+    """Save LLM response to DB cache."""
+    from backend.db import get_db
+    h = _cache_hash(key)
+    try:
+        db = get_db()
+        await db.execute(
+            "INSERT OR REPLACE INTO llm_cache (cache_key, response, provider) VALUES (?, ?, ?)",
+            (h, json.dumps(value, ensure_ascii=False), provider),
+        )
+        await db.commit()
+    except Exception as e:
+        log.warning("Failed to cache LLM response: %s", e)
 
 
 async def _analyze_sheet_with_openai_compat(sheet_text: str) -> dict:
@@ -402,7 +424,7 @@ async def _analyze_sheet_with_openai_compat(sheet_text: str) -> dict:
         "messages": [
             {"role": "system", "content": PEBBLE_SYSTEM_PROMPT
              + "\n\nIMPORTANT: Return ONLY valid JSON. No markdown fences, no comments, no trailing commas. No <think> tags."},
-            {"role": "user", "content": SHEET_ANALYSIS_PROMPT + sheet_text + _OPENAI_COMPAT_PROMPT_SUFFIX},
+            {"role": "user", "content": SHEET_ANALYSIS_PROMPT + sheet_text},
         ],
     }
     url = base_url.rstrip("/") + "/chat/completions"
@@ -421,25 +443,9 @@ async def _analyze_sheet_with_openai_compat(sheet_text: str) -> dict:
     return _parse_claude_json(raw_text)
 
 
-async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) -> dict:
-    """Analyze one sheet with LLM. Supports Claude (default) or OpenAI-compatible providers.
-    Returns sheet config dict (cached)."""
-    import time, asyncio
-
-    # Check cache first
-    cached = _llm_cache_get(sheet_text)
-    if cached:
-        log.info("Cache hit for sheet analysis")
-        return cached
-
-    provider = _get_import_llm_provider()
-
-    if provider == "openai-compat":
-        result = await _analyze_sheet_with_openai_compat(sheet_text)
-        _llm_cache_set(sheet_text, result)
-        return result
-
-    # Default: Claude / Anthropic
+async def _analyze_sheet_with_claude_direct(client, sheet_text: str, retries: int = 3) -> dict:
+    """Analyze one sheet with Claude Anthropic API."""
+    import asyncio
     loop = asyncio.get_event_loop()
     for attempt in range(retries):
         try:
@@ -452,14 +458,255 @@ async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) 
                     {"role": "assistant", "content": "{"},  # prefill to force JSON
                 ],
             ))
-            result = _parse_claude_json("{" + message.content[0].text)
-            _llm_cache_set(sheet_text, result)  # cache for next time
-            return result
+            return _parse_claude_json("{" + message.content[0].text)
         except Exception as e:
             if attempt < retries - 1 and ("overloaded" in str(e).lower() or "529" in str(e)):
                 await asyncio.sleep(2 ** attempt)
                 continue
             raise
+
+
+async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) -> dict:
+    """Analyze one sheet with LLM. Default: Together AI (Qwen), fallback: Claude.
+    Returns sheet config dict (cached in DB)."""
+
+    # Check cache first
+    cached = await _llm_cache_get(sheet_text)
+    if cached:
+        log.info("Cache hit for sheet analysis")
+        return cached
+
+    provider = _get_import_llm_provider()
+
+    if provider == "openai-compat":
+        try:
+            result = await _analyze_sheet_with_openai_compat(sheet_text)
+            await _llm_cache_set(sheet_text, result, provider="openai-compat")
+            return result
+        except Exception as e:
+            log.warning("OpenAI-compat provider failed, falling back to Claude: %s", e)
+            # Fallback to Claude
+            result = await _analyze_sheet_with_claude_direct(client, sheet_text, retries)
+            await _llm_cache_set(sheet_text, result, provider="claude-fallback")
+            return result
+
+    # Explicit Claude mode
+    result = await _analyze_sheet_with_claude_direct(client, sheet_text, retries)
+    await _llm_cache_set(sheet_text, result, provider="claude")
+    return result
+
+
+# ── Sheet chunking for large sheets ──────────────────────────────────────
+
+# Threshold: sheets above this size (chars) get chunked
+_CHUNK_THRESHOLD = 5000
+
+
+def _split_sheet_into_chunks(sheet_text: str) -> list[str]:
+    """Split a large sheet text into chunks by BOLD group headers.
+
+    Each chunk contains the header section + one BOLD group and its children.
+    Small sheets (< _CHUNK_THRESHOLD chars) are returned as a single chunk.
+    """
+    if len(sheet_text) < _CHUNK_THRESHOLD:
+        return [sheet_text]
+
+    lines = sheet_text.split("\n")
+
+    # Separate header section (everything before "--- Row labels ---" + first few rows)
+    header_lines = []
+    body_lines = []
+    in_body = False
+    for line in lines:
+        if "--- Row labels ---" in line:
+            header_lines.append(line)
+            in_body = True
+            continue
+        if not in_body:
+            header_lines.append(line)
+        else:
+            body_lines.append(line)
+
+    if not body_lines:
+        return [sheet_text]
+
+    # Find BOLD row positions (group headers) in body
+    groups: list[list[str]] = []
+    current_group: list[str] = []
+
+    for line in body_lines:
+        is_bold = "BOLD" in line and "indent=" not in line  # top-level BOLD = group header
+        if is_bold and current_group:
+            groups.append(current_group)
+            current_group = [line]
+        else:
+            current_group.append(line)
+    if current_group:
+        groups.append(current_group)
+
+    # If only 1-2 groups, no benefit in chunking
+    if len(groups) <= 2:
+        return [sheet_text]
+
+    # Build chunks: header + each group
+    header_text = "\n".join(header_lines)
+    chunks = []
+    for group_lines in groups:
+        chunk = header_text + "\n" + "\n".join(group_lines)
+        chunks.append(chunk)
+
+    log.info("Split sheet into %d chunks (from %d chars)", len(chunks), len(sheet_text))
+    return chunks
+
+
+def _merge_chunk_results(results: list[dict]) -> dict:
+    """Merge multiple chunk analysis results into a single sheet config."""
+    if len(results) == 1:
+        return results[0]
+
+    merged = {
+        "excel_name": results[0].get("excel_name", ""),
+        "display_name": results[0].get("display_name", ""),
+        "data_start_col": results[0].get("data_start_col"),
+        "indicators": [],
+    }
+
+    for r in results:
+        merged["indicators"].extend(r.get("indicators", []))
+
+    # Use display_name from first non-empty result
+    for r in results:
+        if r.get("display_name"):
+            merged["display_name"] = r["display_name"]
+            break
+
+    return merged
+
+
+async def _analyze_sheet_chunked(client, sheet_text: str) -> dict:
+    """Analyze a sheet, chunking if large. Sends chunks in parallel."""
+    import asyncio
+
+    chunks = _split_sheet_into_chunks(sheet_text)
+    if len(chunks) == 1:
+        return await _analyze_sheet_with_claude(client, chunks[0])
+
+    # Process chunks in parallel
+    tasks = [_analyze_sheet_with_claude(client, chunk) for chunk in chunks]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Filter out errors
+    good_results = []
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            log.warning("Chunk %d failed: %s", i, r)
+        else:
+            good_results.append(r)
+
+    if not good_results:
+        raise RuntimeError("All chunks failed")
+
+    return _merge_chunk_results(good_results)
+
+
+async def _verify_import_against_excel(
+    db, model_id: str, wb, created_sheets: list[dict],
+    tolerance: float = 0.01,
+) -> list[dict]:
+    """Compare all imported Pebble cell values against the original Excel.
+
+    Uses col_to_period_rid and row_to_rid mappings stored on each created_sheet
+    entry to find the Excel cell for each Pebble cell_data row.
+
+    Returns list of mismatch dicts: {sheet, indicator, period, excel, pebble, rel_error}.
+    """
+    mismatches = []
+
+    for cs in created_sheets:
+        sheet_id = cs["id"]
+        sheet_name = cs["name"]
+        excel_name = cs.get("excel_name", sheet_name)
+        col_to_period_rid = cs.get("col_to_period_rid", {})
+        row_to_rid = cs.get("row_to_rid", {})
+
+        if not col_to_period_rid or not row_to_rid:
+            continue
+
+        # Find the Excel worksheet
+        ws = None
+        for sn in wb.sheetnames:
+            if sn == excel_name:
+                ws = wb[sn]
+                break
+        if ws is None:
+            continue
+
+        # Invert mappings: period_rid → col, indicator_rid → row
+        period_rid_to_col = {str(rid): int(col) for col, rid in col_to_period_rid.items()}
+        indicator_rid_to_row = {str(rid): int(row) for row, rid in row_to_rid.items()}
+
+        # Get indicator names for reporting
+        indicator_rid_to_name: dict[str, str] = {}
+        for row, rid in row_to_rid.items():
+            try:
+                recs = await db.execute_fetchall(
+                    "SELECT data_json FROM analytic_records WHERE id = ?", (str(rid),))
+                if recs:
+                    dj = json.loads(recs[0]["data_json"]) if isinstance(recs[0]["data_json"], str) else recs[0]["data_json"]
+                    indicator_rid_to_name[str(rid)] = dj.get("name", "")
+            except Exception:
+                pass
+
+        # Get all cells for this sheet
+        cells = await db.execute_fetchall(
+            "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (sheet_id,)
+        )
+
+        checked = 0
+        for cell in cells:
+            parts = cell["coord_key"].split("|")
+            if len(parts) < 2:
+                continue
+
+            period_rid = parts[0]
+            indicator_rid = parts[-1]
+
+            col = period_rid_to_col.get(period_rid)
+            row = indicator_rid_to_row.get(indicator_rid)
+            if not col or not row:
+                continue
+
+            excel_val = ws.cell(row, col).value
+            if excel_val is None:
+                continue
+            try:
+                excel_num = float(excel_val)
+            except (ValueError, TypeError):
+                continue
+            try:
+                pebble_num = float(cell["value"])
+            except (ValueError, TypeError):
+                continue
+
+            checked += 1
+            if excel_num == 0 and pebble_num == 0:
+                continue
+            rel_err = abs(pebble_num - excel_num) / max(abs(excel_num), 1e-9)
+
+            if rel_err > tolerance:
+                mismatches.append({
+                    "sheet": sheet_name,
+                    "indicator": indicator_rid_to_name.get(indicator_rid, "?"),
+                    "period": period_rid,
+                    "excel": round(excel_num, 4),
+                    "pebble": round(pebble_num, 4),
+                    "rel_error": round(rel_err, 4),
+                })
+
+        log.info("Verified %d cells for sheet '%s', %d mismatches", checked, sheet_name, len(mismatches))
+
+    mismatches.sort(key=lambda m: m.get("rel_error", 0), reverse=True)
+    return mismatches
 
 
 async def _analyze_workbook_with_claude(sheet_texts: dict[str, str], period_dates: list) -> dict:
@@ -480,11 +727,11 @@ async def _analyze_workbook_with_claude(sheet_texts: dict[str, str], period_date
 
     period_config = {"period_types": ["year", "quarter", "month"], "start": start, "end": end}
 
-    # Analyze each sheet with Claude (sequentially to avoid rate limits)
+    # Analyze each sheet with LLM (chunked for large sheets)
     sheets = []
     for sheet_name, text in sheet_texts.items():
         try:
-            sheet_cfg = await _analyze_sheet_with_claude(client, text)
+            sheet_cfg = await _analyze_sheet_chunked(client, text)
             sheet_cfg["excel_name"] = sheet_name  # Ensure correct name
             sheets.append(sheet_cfg)
             log.info("Sheet '%s' analyzed: %d indicators", sheet_name,
@@ -2524,7 +2771,12 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             if n_consol:
                 log.info(f"[import] Extracted {n_consol} consolidation formulas from Excel totals for «{sheet_display}»")
 
-        created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
+        created_sheets.append({
+                "name": sheet_display, "id": pebble_sheet_id, "cells": cell_count,
+                "excel_name": excel_name,
+                "col_to_period_rid": dict(col_to_period_rid),
+                "row_to_rid": dict(row_to_rid),
+            })
 
     await db.commit()
 
@@ -2645,7 +2897,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 """Analyze one sheet: Claude (with cache+retry) → heuristic fallback."""
                 for attempt in range(2):
                     try:
-                        cfg = await _analyze_sheet_with_claude(client, sheet_texts[sn])
+                        cfg = await _analyze_sheet_chunked(client, sheet_texts[sn])
                         cfg["excel_name"] = sn
                         if len(cfg.get("indicators", [])) > 0:
                             return cfg
@@ -3160,7 +3412,12 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 )
 
             total_cells += cell_count
-            created_sheets.append({"name": sheet_display, "id": pebble_sheet_id, "cells": cell_count})
+            created_sheets.append({
+                "name": sheet_display, "id": pebble_sheet_id, "cells": cell_count,
+                "excel_name": excel_name,
+                "col_to_period_rid": dict(col_to_period_rid),
+                "row_to_rid": dict(row_to_rid),
+            })
             consol_msg = f", {n_consol} формул консолидации из Excel" if n_consol else ""
             yield event(f"   [OK]«{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек{consol_msg} ({done_indicators}/{total_indicators})")
 
@@ -3276,6 +3533,22 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 yield event(f"   [OK]Переведено {len(unique_names)} названий на {len(SUPPORTED_LANGS)} языка")
             except Exception as e:
                 yield event(f"[WARN]Перевод не удался: {e}")
+
+        # ── Post-import: verify values against Excel ──
+        try:
+            yield event("Верификация с Excel...")
+            mismatches = await _verify_import_against_excel(db, model_id, wb, created_sheets, tolerance=0.01)
+            if mismatches:
+                yield event(f"[WARN]Расхождения с Excel: {len(mismatches)} ячеек")
+                for mm in mismatches[:5]:  # show first 5
+                    yield event(f"   {mm['sheet']}: {mm['indicator']} / {mm['period']} — "
+                                f"Excel={mm['excel']}, Pebble={mm['pebble']}")
+                if len(mismatches) > 5:
+                    yield event(f"   ...и ещё {len(mismatches) - 5}")
+            else:
+                yield event("   [OK]Все проверенные значения совпадают с Excel")
+        except Exception as e:
+            log.warning("Verification failed: %s", e)
 
         yield event(f"[DONE]Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
                      {"done": True, "model_id": model_id, "model_name": model_name_final})

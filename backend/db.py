@@ -184,6 +184,12 @@ MIGRATIONS = [
         translated  TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (source_text, lang)
     )""",
+    """CREATE TABLE IF NOT EXISTS llm_cache (
+        cache_key   TEXT PRIMARY KEY,
+        response    TEXT NOT NULL DEFAULT '{}',
+        provider    TEXT NOT NULL DEFAULT '',
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
 ]
 
 
