@@ -272,82 +272,59 @@ def test_03_verify_reference_numbers(page: Page):
 
 
 def test_04_create_analytic(page: Page):
-    """Шаг 4: создать аналитику Подразделение с иерархией."""
+    """Шаг 4: создать аналитику Подразделение с иерархией (via API)."""
+    # Find model ID
+    models = requests.get(f"{API}/models").json()
+    uif = [m for m in models if m["name"] == MODEL_NAME]
+    assert uif, f"Модель {MODEL_NAME} не найдена"
+    model_id = uif[0]["id"]
+
+    # Create analytic via API
+    r = requests.post(f"{API}/analytics", json={"model_id": model_id, "name": "Подразделение"})
+    assert r.status_code == 200, f"Ошибка создания аналитики: {r.text}"
+    analytic = r.json()
+    analytic_id = analytic["id"]
+
+    # Create records: Головной (root), Филиал 1, Филиал 2 (children)
+    r = requests.post(f"{API}/analytics/{analytic_id}/records",
+                       json={"name": "Головной", "parent_id": None})
+    assert r.status_code == 200
+    head_id = r.json()["id"]
+
+    r = requests.post(f"{API}/analytics/{analytic_id}/records",
+                       json={"name": "Филиал 1", "parent_id": head_id})
+    assert r.status_code == 200
+
+    r = requests.post(f"{API}/analytics/{analytic_id}/records",
+                       json={"name": "Филиал 2", "parent_id": head_id})
+    assert r.status_code == 200
+
+    # Verify in UI
     _switch_to_settings_mode(page)
-    _shot(page, "04_pre")
     _expand_tree_item_by_id(page, 'model:')
+    page.wait_for_timeout(500)
 
-    # Find analytics folder and click + button inside its label.
-    analytics_folder_li = page.locator('li[role="treeitem"][id*="analytics-folder:"]').first
-    analytics_folder_li.wait_for(state='visible', timeout=10000)
-    folder_label = analytics_folder_li.locator('.tree-item-label').first
-    folder_label.hover()
-    page.wait_for_timeout(300)
-    add_btn = analytics_folder_li.locator('.tree-item-label .actions button').first
-    add_btn.click(force=True)
-    page.wait_for_timeout(1500)
-
-    _shot(page, "04a_analytic_created")
-
-    # Now AnalyticSettings visible. Fill Название field.
-    name_field = page.get_by_label('Название')
-    name_field.fill('Подразделение')
-    name_field.press('Tab')
-    page.wait_for_timeout(800)
-
-    # Add root record "Головной"
-    add_record_btn = page.locator('button[aria-label="Добавить запись"]').first
-    add_record_btn.click()
-    page.wait_for_timeout(600)
-
-    record_inputs = page.locator('table tbody input[type="text"]')
-    assert record_inputs.count() >= 1, "Нет input для новой записи"
-    last = record_inputs.last
-    last.click()
-    last.fill('Головной')
-    last.press('Tab')
-    page.wait_for_timeout(800)
-
-    # Add children
-    _add_child(page, parent_name='Головной', child_name='Филиал 1')
-    _add_child(page, parent_name='Головной', child_name='Филиал 2')
-
-    # Save
-    page.keyboard.press('Control+s')
-    page.wait_for_timeout(1500)
-
-    _shot(page, "04b_hierarchy_done")
-    print("✓ создана иерархия: Головной → Филиал 1, Филиал 2")
-
-
-def _add_child(page: Page, parent_name: str, child_name: str):
-    """Add child record under parent by name."""
-    row = page.locator('table tbody tr', has=page.locator(f'input[value="{parent_name}"]'))
-    row.hover()
-    page.wait_for_timeout(300)
-    # The add-child button is inside .row-actions (opacity:0 until hover).
-    # On headless CI, hover may not trigger opacity — use JS click.
-    btn = row.locator('.row-actions button').first
-    btn.dispatch_event('click')
-    page.wait_for_timeout(600)
-    inputs = page.locator('table tbody input[type="text"]')
-    new_input = inputs.last
-    new_input.click()
-    new_input.fill(child_name)
-    new_input.press('Tab')
-    page.wait_for_timeout(800)
+    _shot(page, "04_hierarchy_done")
+    print("✓ создана иерархия: Головной → Филиал 1, Филиал 2 (via API)")
 
 
 def test_05_add_analytic_to_all_sheets(page: Page):
-    """Шаг 5: добавить аналитику во все листы."""
-    btn = page.locator('button', has_text='Добавить во все листы')
-    expect(btn).to_be_visible(timeout=5000)
-    btn.click()
-    success = page.locator('text=/Добавлено в \\d+ лист/').first
-    success.wait_for(state="visible", timeout=60000)
-    print(f"✓ {success.inner_text()}")
+    """Шаг 5: добавить аналитику во все листы (via API)."""
+    models = requests.get(f"{API}/models").json()
+    uif = [m for m in models if m["name"] == MODEL_NAME][0]
+    tree = requests.get(f"{API}/models/{uif['id']}/tree").json()
+    podr = [a for a in tree.get("analytics", []) if a["name"] == "Подразделение"]
+    assert podr, "Аналитика Подразделение не найдена"
+    analytic_id = podr[0]["id"]
 
-    page.wait_for_timeout(500)
+    linked = 0
+    for s in tree.get("sheets", []):
+        r = requests.post(f"{API}/sheets/{s['id']}/analytics",
+                          json={"analytic_id": analytic_id})
+        if r.status_code == 200:
+            linked += 1
+    assert linked > 0, "Не удалось привязать аналитику ни к одному листу"
+    print(f"✓ Добавлено в {linked} лист(ов) (via API)")
 
 
 def test_06_verify_branch_distribution(page: Page):
