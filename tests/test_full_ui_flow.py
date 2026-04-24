@@ -325,8 +325,9 @@ def _add_child(page: Page, parent_name: str, child_name: str):
     row = page.locator('table tbody tr', has=page.locator(f'input[value="{parent_name}"]'))
     row.hover()
     page.wait_for_timeout(300)
-    btn = row.locator('button[aria-label="Добавить дочерний"]').first
-    btn.click()
+    # The add-child button is inside .row-actions — first IconButton (AddOutlined icon)
+    btn = row.locator('.row-actions button').first
+    btn.click(force=True)
     page.wait_for_timeout(600)
     inputs = page.locator('table tbody input[type="text"]')
     new_input = inputs.last
