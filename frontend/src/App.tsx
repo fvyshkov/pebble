@@ -127,7 +127,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
           setDone(true)
           onImported(data.model_id)
         }
-      })
+      }, currentLang())
     } catch (err) {
       setLog(prev => [...prev, `[ERR]${t('import.error')}: ${(err as Error).message}`])
     } finally {

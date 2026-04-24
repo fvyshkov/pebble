@@ -271,6 +271,71 @@ def test_03_verify_reference_numbers(page: Page):
     print(f"✓ лист содержит {count} ячеек AG Grid, из них числовых >= {num_count}")
 
 
+def test_03a_translations_exist_ky_vi(page: Page):
+    """Verify that KY and VI translations exist after import."""
+    models = requests.get(f"{API}/models").json()
+    uif = [m for m in models if m["name"] == MODEL_NAME]
+    assert uif, f"Model {MODEL_NAME} not found"
+    model_id = uif[0]["id"]
+
+    for lang in ("ky", "vi"):
+        tr = requests.get(f"{API}/i18n/model/{model_id}?lang={lang}").json()
+        # Should have translations for analytic records (indicator names)
+        record_translations = {k: v for k, v in tr.items()
+                               if k.startswith("analytic_record:") and ":name" in k}
+        assert len(record_translations) > 10, \
+            f"Expected >10 {lang} indicator translations, got {len(record_translations)}"
+        # Verify at least one translation is different from Russian
+        ru_tr = requests.get(f"{API}/i18n/model/{model_id}?lang=ru").json()
+        different = sum(1 for k, v in record_translations.items()
+                       if k in ru_tr and v != ru_tr[k])
+        assert different > 5, \
+            f"Expected >5 {lang} translations different from RU, got {different}"
+        print(f"  {lang}: {len(record_translations)} indicator translations, {different} differ from RU")
+    print("✓ KY and VI translations exist after import")
+
+
+def test_03b_import_messages_localized(page: Page):
+    """Verify that import progress messages respect lang parameter."""
+    import json as _json
+    # Import a minimal test via streaming with lang=en
+    with open(XLSX_PATH, "rb") as f:
+        r = requests.post(
+            f"{API}/import/excel-stream",
+            files={"file": ("test.xlsx", f)},
+            data={"model_name": "LANG_TEST", "lang": "en"},
+            stream=True, timeout=600,
+        )
+    assert r.status_code == 200
+    messages = []
+    model_id = None
+    for line in r.iter_lines(decode_unicode=True):
+        if line and line.startswith("data: "):
+            data = _json.loads(line[6:])
+            msg = data.get("message", "")
+            messages.append(msg)
+            if data.get("model_id"):
+                model_id = data["model_id"]
+
+    # Check that messages are in English, not Russian
+    english_markers = ["Loading", "Found", "sheets", "created", "Import complete",
+                       "Analyzing", "Creating", "Translating", "Verifying"]
+    russian_markers = ["Загрузка", "Найдено", "листов", "Создана", "Импорт завершён",
+                       "Анализ", "Создаю", "Перевод", "Верификация"]
+
+    all_text = " ".join(messages)
+    en_hits = sum(1 for m in english_markers if m in all_text)
+    ru_hits = sum(1 for m in russian_markers if m in all_text)
+
+    assert en_hits > ru_hits, \
+        f"Expected English messages (en={en_hits}) > Russian (ru={ru_hits}). Sample: {messages[:3]}"
+    print(f"✓ Import messages in English: {en_hits} EN markers vs {ru_hits} RU markers")
+
+    # Cleanup the test model
+    if model_id:
+        requests.delete(f"{API}/models/{model_id}", timeout=30)
+
+
 def test_04_create_analytic(page: Page):
     """Шаг 4: создать аналитику Подразделение с иерархией (via API)."""
     # Find model ID

@@ -2793,17 +2793,58 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
 # ── Streaming import endpoint (SSE) ───────────────────────────────────────
 
 @router.post("/excel-stream")
-async def import_excel_stream(file: UploadFile = File(...), model_name: str = Form("Imported Model")):
+async def import_excel_stream(file: UploadFile = File(...), model_name: str = Form("Imported Model"), lang: str = Form("ru")):
     import asyncio
     content = await file.read()
+    _lang = lang if lang in ("ru", "en", "ky", "vi") else "ru"
 
     async def generate():
         import time as _time
         _t0 = _time.time()
 
+        # ── Import progress message translations ──
+        _IM = {
+            "loading":       {"ru": "Загрузка файла Excel...", "en": "Loading Excel file...", "ky": "Excel файлы жүктөлүүдө...", "vi": "Đang tải file Excel..."},
+            "found_sheets":  {"ru": "Найдено {n} листов: {names}", "en": "Found {n} sheets: {names}", "ky": "{n} барак табылды: {names}", "vi": "Tìm thấy {n} trang: {names}"},
+            "analyzing":     {"ru": "Анализ структуры с помощью Claude AI...", "en": "Analyzing structure with Claude AI...", "ky": "Claude AI менен структураны талдоо...", "vi": "Phân tích cấu trúc bằng Claude AI..."},
+            "analyzing_n":   {"ru": "🔍 Анализ {n} листов параллельно...", "en": "🔍 Analyzing {n} sheets in parallel...", "ky": "🔍 {n} барак параллель талдоо...", "vi": "🔍 Phân tích song song {n} trang..."},
+            "sheet_err":     {"ru": "   [ERR]«{name}»: ошибка — {err}", "en": "   [ERR]\"{name}\": error — {err}", "ky": "   [ERR]«{name}»: ката — {err}", "vi": "   [ERR]\"{name}\": lỗi — {err}"},
+            "sheet_ok":      {"ru": "   [OK]«{name}» ({i}/{n}): {groups} групп, {inds} показателей", "en": "   [OK]\"{name}\" ({i}/{n}): {groups} groups, {inds} indicators", "ky": "   [OK]«{name}» ({i}/{n}): {groups} топ, {inds} көрсөткүч", "vi": "   [OK]\"{name}\" ({i}/{n}): {groups} nhóm, {inds} chỉ tiêu"},
+            "sheet_parse_err":{"ru": "   [ERR]«{name}»: не удалось разобрать", "en": "   [ERR]\"{name}\": failed to parse", "ky": "   [ERR]«{name}»: талдоо мүмкүн эмес", "vi": "   [ERR]\"{name}\": không thể phân tích"},
+            "claude_unavail":{"ru": "[WARN]Claude API недоступен, используем эвристики: {err}", "en": "[WARN]Claude API unavailable, using heuristics: {err}", "ky": "[WARN]Claude API жеткиликсиз, эвристикалар колдонулууда: {err}", "vi": "[WARN]Claude API không khả dụng, sử dụng heuristics: {err}"},
+            "model_created": {"ru": "Создана модель «{name}»", "en": "Model \"{name}\" created", "ky": "«{name}» модели түзүлдү", "vi": "Đã tạo mô hình \"{name}\""},
+            "periods":       {"ru": "Создана иерархия периодов: {start} — {end} ({n} периодов)", "en": "Period hierarchy created: {start} — {end} ({n} periods)", "ky": "Мезгилдер иерархиясы түзүлдү: {start} — {end} ({n} мезгил)", "vi": "Đã tạo phân cấp kỳ: {start} — {end} ({n} kỳ)"},
+            "total_inds":    {"ru": "📊 Всего {n} показателей в {sheets} листах", "en": "📊 Total {n} indicators in {sheets} sheets", "ky": "📊 Жалпы {sheets} баракта {n} көрсөткүч", "vi": "📊 Tổng {n} chỉ tiêu trong {sheets} trang"},
+            "creating":      {"ru": "Создаю структуру «{name}» ({done}/{total})...", "en": "Creating structure \"{name}\" ({done}/{total})...", "ky": "«{name}» структурасы түзүлүүдө ({done}/{total})...", "vi": "Đang tạo cấu trúc \"{name}\" ({done}/{total})..."},
+            "importing_data":{"ru": "Структура создана. Импорт данных ({n} листов)...", "en": "Structure created. Importing data ({n} sheets)...", "ky": "Структура түзүлдү. Маалыматтар импорттолууда ({n} барак)...", "vi": "Đã tạo cấu trúc. Nhập dữ liệu ({n} trang)..."},
+            "data_ok":       {"ru": "   [OK]«{name}»: {inds} показателей, {cells} ячеек{consol} ({done}/{total})", "en": "   [OK]\"{name}\": {inds} indicators, {cells} cells{consol} ({done}/{total})", "ky": "   [OK]«{name}»: {inds} көрсөткүч, {cells} уячалар{consol} ({done}/{total})", "vi": "   [OK]\"{name}\": {inds} chỉ tiêu, {cells} ô{consol} ({done}/{total})"},
+            "sheets_warn":   {"ru": "[WARN]Импортировано {done}/{total} листов. Пропущены: {missing}", "en": "[WARN]Imported {done}/{total} sheets. Skipped: {missing}", "ky": "[WARN]{done}/{total} барак импорттолду. Калтырылды: {missing}", "vi": "[WARN]Đã nhập {done}/{total} trang. Bỏ qua: {missing}"},
+            "zero_cells":    {"ru": "[WARN]«{name}»: 0 ячеек импортировано", "en": "[WARN]\"{name}\": 0 cells imported", "ky": "[WARN]«{name}»: 0 уячалар импорттолду", "vi": "[WARN]\"{name}\": 0 ô đã nhập"},
+            "consol_rules":  {"ru": "   [OK]Claude подобрал {n} формул консолидации по периодам", "en": "   [OK]Claude matched {n} consolidation formulas", "ky": "   [OK]Claude {n} консолидация формулаларын тандады", "vi": "   [OK]Claude đã khớp {n} công thức hợp nhất"},
+            "translating":   {"ru": "Перевод названий (ru/en/ky/vi)...", "en": "Translating names (ru/en/ky/vi)...", "ky": "Аттар которулууда (ru/en/ky/vi)...", "vi": "Đang dịch tên (ru/en/ky/vi)..."},
+            "translated_ok": {"ru": "   [OK]Переведено {n} названий на {langs} языка", "en": "   [OK]Translated {n} names into {langs} languages", "ky": "   [OK]{n} ат {langs} тилге которулду", "vi": "   [OK]Đã dịch {n} tên sang {langs} ngôn ngữ"},
+            "translate_fail":{"ru": "[WARN]Перевод не удался: {err}", "en": "[WARN]Translation failed: {err}", "ky": "[WARN]Которуу ишке ашкан жок: {err}", "vi": "[WARN]Dịch thất bại: {err}"},
+            "verifying":     {"ru": "Верификация с Excel...", "en": "Verifying against Excel...", "ky": "Excel менен текшерүү...", "vi": "Xác minh với Excel..."},
+            "verify_warn":   {"ru": "[WARN]Расхождения с Excel: {n} ячеек", "en": "[WARN]Mismatches with Excel: {n} cells", "ky": "[WARN]Excel менен дал келбөөлөр: {n} уячалар", "vi": "[WARN]Sai lệch với Excel: {n} ô"},
+            "verify_more":   {"ru": "   ...и ещё {n}", "en": "   ...and {n} more", "ky": "   ...жана дагы {n}", "vi": "   ...và thêm {n}"},
+            "verify_ok":     {"ru": "   [OK]Все проверенные значения совпадают с Excel", "en": "   [OK]All verified values match Excel", "ky": "   [OK]Бардык текшерилген маанилер Excel менен дал келет", "vi": "   [OK]Tất cả giá trị đã xác minh khớp với Excel"},
+            "done":          {"ru": "[DONE]Импорт завершён! {sheets} листов, {cells} ячеек", "en": "[DONE]Import complete! {sheets} sheets, {cells} cells", "ky": "[DONE]Импорт аяктады! {sheets} барак, {cells} уячалар", "vi": "[DONE]Nhập hoàn tất! {sheets} trang, {cells} ô"},
+        }
+
+        def _m(key: str, **kwargs) -> str:
+            """Get localized import message."""
+            tpl = _IM.get(key, {}).get(_lang) or _IM.get(key, {}).get("ru", key)
+            try:
+                return tpl.format(**kwargs) if kwargs else tpl
+            except (KeyError, IndexError):
+                return tpl
+
+        _ts_labels = {"ru": "с", "en": "s", "ky": "сек", "vi": "s"}
+        _ts_label = _ts_labels.get(_lang, "с")
+
         def event(msg: str, data: dict | None = None):
             elapsed = _time.time() - _t0
-            ts = f"[{int(elapsed)}с]"
+            ts = f"[{int(elapsed)}{_ts_label}]"
             payload = json.dumps({"message": f"{ts} {msg}", **(data or {})}, ensure_ascii=False)
             return f"data: {payload}\n\n"
 
@@ -2817,14 +2858,14 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         else:
             model_name_final = model_name
 
-        yield event(f"Загрузка файла Excel...")
+        yield event(_m("loading"))
 
         # Run blocking openpyxl in executor to not block event loop
         wb_formulas = await loop.run_in_executor(None, lambda: load_workbook(io.BytesIO(content)))
         wb_data = await loop.run_in_executor(None, lambda: load_workbook(io.BytesIO(content), data_only=True))
         sheet_names = wb_formulas.sheetnames
 
-        yield event(f"Найдено {len(sheet_names)} листов: {', '.join(sheet_names)}")
+        yield event(_m("found_sheets", n=len(sheet_names), names=', '.join(sheet_names)))
 
         # Extract text, dates and period types
         sheet_texts = {}
@@ -2864,7 +2905,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             all_dates.append(datetime(int(v), 1, 1))
                             all_dates.append(datetime(int(v), 12, 1))
 
-        yield event("Анализ структуры с помощью Claude AI...")
+        yield event(_m("analyzing"))
 
         # Analyze with Claude (per-sheet with progress)
         try:
@@ -2891,7 +2932,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             sheets_config = []
 
             # Launch ALL sheets in parallel for speed
-            yield event(f"🔍 Анализ {len(sheet_names)} листов параллельно...")
+            yield event(_m("analyzing_n", n=len(sheet_names)))
 
             async def analyze_one(sn):
                 """Analyze one sheet: Claude (with cache+retry) → heuristic fallback."""
@@ -2916,18 +2957,18 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
             for i, (sn, result) in enumerate(zip(sheet_names, results)):
                 if isinstance(result, Exception):
-                    yield event(f"   [ERR]«{sn}»: ошибка — {result}")
+                    yield event(_m("sheet_err", name=sn, err=result))
                 elif result and len(result.get("indicators", [])) > 0:
                     ind_count = len(result.get("indicators", []))
                     ch_count = sum(len(x.get("children", [])) for x in result.get("indicators", []))
-                    yield event(f"   [OK]«{sn}» ({i+1}/{len(sheet_names)}): {ind_count} групп, {ch_count} показателей")
+                    yield event(_m("sheet_ok", name=sn, i=i+1, n=len(sheet_names), groups=ind_count, inds=ch_count))
                     sheets_config.append(result)
                 else:
-                    yield event(f"   [ERR]«{sn}»: не удалось разобрать")
+                    yield event(_m("sheet_parse_err", name=sn))
 
             analysis = {"period_config": period_config, "sheets": sheets_config}
         except Exception as e:
-            yield event(f"[WARN]Claude API недоступен, используем эвристики: {e}")
+            yield event(_m("claude_unavail", err=e))
             analysis = _fallback_heuristic_analysis(wb_formulas)
 
         period_config = analysis["period_config"]
@@ -2947,7 +2988,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             "INSERT INTO models (id, name, description) VALUES (?, ?, ?)",
             (model_id, model_name_final, "Импортировано из Excel"),
         )
-        yield event(f"Создана модель «{model_name_final}»")
+        yield event(_m("model_created", name=model_name_final))
 
         # Period analytics — one per granularity (monthly/qhy/yearly)
         all_period_types = period_config.get("period_types", ["year", "quarter", "month"])
@@ -3083,14 +3124,14 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             _sheet_visible_rids[excel_name] = visible_rids
 
         total_period_count = len(period_record_ids)
-        yield event(f"Создана иерархия периодов: {period_start} — {period_end} ({total_period_count} периодов)")
+        yield event(_m("periods", start=period_start, end=period_end, n=total_period_count))
 
         # Count total indicators across all sheets for progress
         def _count_indicators(items):
             return sum(1 + _count_indicators(it.get("children", [])) for it in items)
         total_indicators = sum(_count_indicators(sc.get("indicators", [])) for sc in sheets_config)
         done_indicators = 0
-        yield event(f"📊 Всего {total_indicators} показателей в {len(sheets_config)} листах")
+        yield event(_m("total_inds", n=total_indicators, sheets=len(sheets_config)))
 
         # Process sheets (two passes: 1. create structure, 2. import cells)
         from backend.excel_formula_translator import translate_excel_formula
@@ -3128,7 +3169,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 continue
 
             sheet_indicators = _count_indicators(indicators)
-            yield event(f"Создаю структуру «{sheet_display}» ({done_indicators}/{total_indicators})...")
+            yield event(_m("creating", name=sheet_display, done=done_indicators, total=total_indicators))
 
             indicator_analytic_id = str(uuid.uuid4())
             await db.execute(
@@ -3233,7 +3274,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 "sheet_indicators": sheet_indicators,
             })
 
-        yield event(f"Структура создана. Импорт данных ({len(sheet_meta)} листов)...")
+        yield event(_m("importing_data", n=len(sheet_meta)))
 
         # Second pass: import cells using deterministic formula translator
         for meta in sheet_meta:
@@ -3419,7 +3460,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 "row_to_rid": dict(row_to_rid),
             })
             consol_msg = f", {n_consol} формул консолидации из Excel" if n_consol else ""
-            yield event(f"   [OK]«{sheet_display}»: {len(row_to_rid)} показателей, {cell_count} ячеек{consol_msg} ({done_indicators}/{total_indicators})")
+            yield event(_m("data_ok", name=sheet_display, inds=len(row_to_rid), cells=cell_count, consol=consol_msg, done=done_indicators, total=total_indicators))
 
         await db.commit()
 
@@ -3428,12 +3469,12 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         actual_sheets = len(created_sheets)
         if actual_sheets < expected_sheets:
             missing = set(sheet_names) - {sc["excel_name"] for sc in sheets_config}
-            yield event(f"[WARN]Импортировано {actual_sheets}/{expected_sheets} листов. Пропущены: {', '.join(missing)}")
+            yield event(_m("sheets_warn", done=actual_sheets, total=expected_sheets, missing=', '.join(missing)))
 
         # Log cell counts per sheet (informational, not a warning)
         for cs in created_sheets:
             if cs["cells"] == 0:
-                yield event(f"[WARN]«{cs['name']}»: 0 ячеек импортировано")
+                yield event(_m("zero_cells", name=cs['name']))
 
         # ── Post-import: detect period-consolidation formulas for ratios/averages ──
         # Ask Claude which indicators should NOT be summed across periods
@@ -3468,89 +3509,88 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 except Exception as e:
                     print(f"[import] propagate_consolidations failed: {e}")
             if total_rules:
-                yield event(f"   [OK]Claude подобрал {total_rules} формул консолидации по периодам")
+                yield event(_m("consol_rules", n=total_rules))
 
-        # ── Post-import: translate all names to ru/en/ky ──
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            yield event("Перевод названий (ru/en/ky)...")
-            try:
-                from backend.translation_service import batch_translate, save_translations, SUPPORTED_LANGS
+        # ── Post-import: translate all names to ru/en/ky/vi ──
+        yield event(_m("translating"))
+        try:
+            from backend.translation_service import batch_translate, save_translations, SUPPORTED_LANGS
 
-                # Collect all names that need translation
-                names_to_translate: list[str] = []
-                entity_map: list[tuple[str, str, str]] = []  # (entity_type, entity_id, name)
+            # Collect all names that need translation
+            names_to_translate: list[str] = []
+            entity_map: list[tuple[str, str, str]] = []  # (entity_type, entity_id, name)
 
-                # Model name
-                names_to_translate.append(model_name_final)
-                entity_map.append(("model", model_id, model_name_final))
+            # Model name
+            names_to_translate.append(model_name_final)
+            entity_map.append(("model", model_id, model_name_final))
 
-                # Sheet names
-                sheets_rows = await db.execute_fetchall(
-                    "SELECT id, name FROM sheets WHERE model_id = ?", (model_id,))
-                for sr in sheets_rows:
-                    if sr["name"]:
-                        names_to_translate.append(sr["name"])
-                        entity_map.append(("sheet", sr["id"], sr["name"]))
+            # Sheet names
+            sheets_rows = await db.execute_fetchall(
+                "SELECT id, name FROM sheets WHERE model_id = ?", (model_id,))
+            for sr in sheets_rows:
+                if sr["name"]:
+                    names_to_translate.append(sr["name"])
+                    entity_map.append(("sheet", sr["id"], sr["name"]))
 
-                # Analytic names
-                analytics_rows = await db.execute_fetchall(
-                    "SELECT id, name FROM analytics WHERE model_id = ?", (model_id,))
-                for ar in analytics_rows:
-                    if ar["name"]:
-                        names_to_translate.append(ar["name"])
-                        entity_map.append(("analytic", ar["id"], ar["name"]))
+            # Analytic names
+            analytics_rows = await db.execute_fetchall(
+                "SELECT id, name FROM analytics WHERE model_id = ?", (model_id,))
+            for ar in analytics_rows:
+                if ar["name"]:
+                    names_to_translate.append(ar["name"])
+                    entity_map.append(("analytic", ar["id"], ar["name"]))
 
-                # Analytic record names (indicator names, period names)
-                record_rows = await db.execute_fetchall(
-                    """SELECT r.id, r.data_json FROM analytic_records r
-                       JOIN analytics a ON r.analytic_id = a.id
-                       WHERE a.model_id = ?""", (model_id,))
-                for rr in record_rows:
-                    try:
-                        dj = json.loads(rr["data_json"]) if isinstance(rr["data_json"], str) else rr["data_json"]
-                        name = dj.get("name", "")
-                        if name:
-                            names_to_translate.append(name)
-                            entity_map.append(("analytic_record", rr["id"], name))
-                    except Exception:
-                        pass
+            # Analytic record names (indicator names, period names)
+            record_rows = await db.execute_fetchall(
+                """SELECT r.id, r.data_json FROM analytic_records r
+                   JOIN analytics a ON r.analytic_id = a.id
+                   WHERE a.model_id = ?""", (model_id,))
+            for rr in record_rows:
+                try:
+                    dj = json.loads(rr["data_json"]) if isinstance(rr["data_json"], str) else rr["data_json"]
+                    name = dj.get("name", "")
+                    if name:
+                        names_to_translate.append(name)
+                        entity_map.append(("analytic_record", rr["id"], name))
+                except Exception:
+                    pass
 
-                # Batch translate (deduplicated inside)
-                unique_names = list(dict.fromkeys(names_to_translate))
-                # Translate in chunks of 50 to avoid token limits
-                all_translations: dict[str, dict[str, str]] = {}
-                for i in range(0, len(unique_names), 50):
-                    chunk = unique_names[i:i+50]
-                    chunk_result = await batch_translate(chunk)
-                    all_translations.update(chunk_result)
+            # Batch translate (deduplicated inside)
+            unique_names = list(dict.fromkeys(names_to_translate))
+            # Translate in chunks of 50 to avoid token limits
+            all_translations: dict[str, dict[str, str]] = {}
+            for i in range(0, len(unique_names), 50):
+                chunk = unique_names[i:i+50]
+                chunk_result = await batch_translate(chunk)
+                all_translations.update(chunk_result)
 
-                # Save translations
-                for etype, eid, name in entity_map:
-                    tr = all_translations.get(name, {lang: name for lang in SUPPORTED_LANGS})
-                    await save_translations(etype, eid, "name", tr, db=db)
+            # Save translations
+            for etype, eid, name in entity_map:
+                tr = all_translations.get(name, {lang: name for lang in SUPPORTED_LANGS})
+                await save_translations(etype, eid, "name", tr, db=db)
 
-                await db.commit()
-                yield event(f"   [OK]Переведено {len(unique_names)} названий на {len(SUPPORTED_LANGS)} языка")
-            except Exception as e:
-                yield event(f"[WARN]Перевод не удался: {e}")
+            await db.commit()
+            yield event(_m("translated_ok", n=len(unique_names), langs=len(SUPPORTED_LANGS)))
+        except Exception as e:
+            yield event(_m("translate_fail", err=e))
 
         # ── Post-import: verify values against Excel ──
         try:
-            yield event("Верификация с Excel...")
+            yield event(_m("verifying"))
             mismatches = await _verify_import_against_excel(db, model_id, wb, created_sheets, tolerance=0.01)
             if mismatches:
-                yield event(f"[WARN]Расхождения с Excel: {len(mismatches)} ячеек")
+                yield event(_m("verify_warn", n=len(mismatches)))
                 for mm in mismatches[:5]:  # show first 5
                     yield event(f"   {mm['sheet']}: {mm['indicator']} / {mm['period']} — "
                                 f"Excel={mm['excel']}, Pebble={mm['pebble']}")
                 if len(mismatches) > 5:
-                    yield event(f"   ...и ещё {len(mismatches) - 5}")
+                    yield event(_m("verify_more", n=len(mismatches) - 5))
             else:
-                yield event("   [OK]Все проверенные значения совпадают с Excel")
+                yield event(_m("verify_ok"))
         except Exception as e:
             log.warning("Verification failed: %s", e)
 
-        yield event(f"[DONE]Импорт завершён! {len(created_sheets)} листов, {total_cells} ячеек",
+        yield event(_m("done", sheets=len(created_sheets), cells=total_cells),
                      {"done": True, "model_id": model_id, "model_name": model_name_final})
 
     return StreamingResponse(generate(), media_type="text/event-stream")
