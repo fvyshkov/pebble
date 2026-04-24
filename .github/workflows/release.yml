@@ -1,4 +1,4 @@
-name: Build & Release
+name: Test & Release
 
 on:
   push:
@@ -8,20 +8,158 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # ── Fast backend unit tests (in-memory DB, no server needed) ──
+  unit-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx
+
+      - name: Run backend API tests
+        run: pytest backend/tests/ -v --tb=short
+
+  # ── Excel import + recalc verification ──
+  xls-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          pip install pytest requests openpyxl
+
+      - name: Start backend
+        run: |
+          rm -f pebble.db pebble.db-shm pebble.db-wal
+          nohup python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 \
+            > /tmp/backend.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/api/models >/dev/null; then
+              echo "Backend is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend failed to start"
+          cat /tmp/backend.log
+          exit 1
+
+      - name: Run XLS model tests
+        run: pytest tests/test_xls_models.py -v -s --tb=short
+
+      - name: Upload backend log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xls-backend-log
+          path: /tmp/backend.log
+          if-no-files-found: ignore
+
+  # ── E2E UI tests (Playwright) ──
+  e2e-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: frontend/package.json
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install backend deps
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-playwright requests
+
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+
+      - name: Install & build frontend
+        working-directory: frontend
+        run: |
+          npm ci || npm install
+          npm run build
+
+      - name: Start backend
+        run: |
+          rm -f pebble.db pebble.db-shm pebble.db-wal
+          nohup python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 \
+            > /tmp/backend.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/api/models >/dev/null; then
+              echo "Backend is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend failed to start"
+          cat /tmp/backend.log
+          exit 1
+
+      - name: Run E2E tests
+        env:
+          PEBBLE_BASE: http://localhost:8000
+          PEBBLE_API: http://localhost:8000/api
+        run: pytest tests/test_full_ui_flow.py -v -s --tb=short
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: /tmp/uiflow/
+          if-no-files-found: ignore
+
+      - name: Upload backend log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-backend-log
+          path: /tmp/backend.log
+          if-no-files-found: ignore
+
+  # ── Release only after ALL tests pass ──
+  release:
+    needs: [unit-tests, xls-tests, e2e-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package.json
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
