@@ -174,7 +174,7 @@ async def suggest_consolidations_for_sheet(
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, lambda: cached_messages_create(
                 client,
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             ))

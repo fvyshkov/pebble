@@ -847,7 +847,7 @@ async def _build_presentation_from_data(data_text: str, title: str | None, focus
     import anthropic as _anthropic
     _aclient = _anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
     resp = await _aclient.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=8000,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -1681,7 +1681,7 @@ async def _chat_message_impl(req: ChatRequest):
     # Tool-use loop (cap at 8 iterations to prevent runaway)
     for _ in range(15):
         resp = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             system=system,
             tools=TOOLS,
@@ -1784,7 +1784,7 @@ async def chat_message_stream(req: ChatRequest):
 
             for iteration in range(15):
                 resp = await client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model="claude-sonnet-4-6",
                     max_tokens=2000,
                     system=system,
                     tools=TOOLS,

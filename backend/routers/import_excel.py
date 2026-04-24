@@ -450,7 +450,7 @@ async def _analyze_sheet_with_claude_direct(client, sheet_text: str, retries: in
     for attempt in range(retries):
         try:
             message = await loop.run_in_executor(None, lambda: client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=16384,
                 system=PEBBLE_SYSTEM_PROMPT + "\n\nIMPORTANT: Return ONLY valid JSON. No markdown fences, no comments, no trailing commas.",
                 messages=[
