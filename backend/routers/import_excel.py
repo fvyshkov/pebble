@@ -296,35 +296,7 @@ def _is_input_cell(cell) -> bool:
     return _get_cell_bg_color(cell) is not None
 
 
-# ── LLM API call ──────────────────────────────────────────────────────────
-
-# Extra prompt for non-Claude models to improve name disambiguation and formula quality
-_OPENAI_COMPAT_PROMPT_SUFFIX = """
-
-CRITICAL ADDITIONAL RULES (read carefully):
-
-A) NAME DISAMBIGUATION IS MANDATORY. When the same indicator name appears under different product groups (e.g. "количество выдач" under "Потребительский кредит" and "BNPL"), you MUST append the group name in parentheses to make each name globally unique:
-   - "количество выдач (потребительский)" under Потребительский кредит
-   - "количество выдач (BNPL)" under BNPL
-   DO NOT use bare "количество выдач" — it is ambiguous and will break formulas!
-   The suffix should be SHORT — abbreviate the group name to the key word.
-
-B) CROSS-SHEET REFERENCES use :: separator with the sheet's display_name:
-   CORRECT: [параметры::количество партнеров]
-   WRONG:   [количество партнеров]('0'::периоды="текущий")
-   The syntax is: [SheetDisplayName::indicator_name] — nothing else.
-
-C) formula_first: When a formula uses (периоды="предыдущий") and there IS no previous period (first column), formula_first must handle this:
-   - If the formula computes a delta: formula_first = "0"
-   - If the formula computes an average with prev: formula_first should use only current period
-   - NEVER just copy the main formula as formula_first if it references "предыдущий"
-"""
-
-
-def _get_import_llm_provider() -> str:
-    """Return 'claude' or 'openai-compat' based on env config."""
-    return os.environ.get("PEBBLE_IMPORT_LLM", "claude").lower()
-
+# ── Claude API call ────────────────────────────────────────────────────────
 
 def _get_claude_client():
     """Create Anthropic client from environment."""
@@ -383,47 +355,8 @@ def _llm_cache_set(key: str, value):
         json.dump(value, f, ensure_ascii=False)
 
 
-async def _analyze_sheet_with_openai_compat(sheet_text: str) -> dict:
-    """Analyze one sheet via OpenAI-compatible API (Together AI, etc.)."""
-    import httpx, asyncio
-
-    base_url = os.environ.get("PEBBLE_IMPORT_LLM_BASE_URL", "https://api.together.xyz/v1")
-    api_key = os.environ.get("PEBBLE_IMPORT_LLM_API_KEY", "")
-    model = os.environ.get("PEBBLE_IMPORT_LLM_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507-tput")
-
-    if not api_key:
-        raise RuntimeError("PEBBLE_IMPORT_LLM_API_KEY not set")
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {
-        "model": model,
-        "max_tokens": 16384,
-        "temperature": 0.1,
-        "messages": [
-            {"role": "system", "content": PEBBLE_SYSTEM_PROMPT
-             + "\n\nIMPORTANT: Return ONLY valid JSON. No markdown fences, no comments, no trailing commas. No <think> tags."},
-            {"role": "user", "content": SHEET_ANALYSIS_PROMPT + sheet_text + _OPENAI_COMPAT_PROMPT_SUFFIX},
-        ],
-    }
-    url = base_url.rstrip("/") + "/chat/completions"
-
-    loop = asyncio.get_event_loop()
-    def _do_request():
-        with httpx.Client(timeout=300) as c:
-            resp = c.post(url, json=body, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
-
-    data = await loop.run_in_executor(None, _do_request)
-    raw_text = data["choices"][0]["message"]["content"]
-    # Strip <think> tags from Qwen3
-    raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
-    return _parse_claude_json(raw_text)
-
-
 async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) -> dict:
-    """Analyze one sheet with LLM. Supports Claude (default) or OpenAI-compatible providers.
-    Returns sheet config dict (cached)."""
+    """Analyze one sheet with Claude API. Returns sheet config dict (cached)."""
     import time, asyncio
 
     # Check cache first
@@ -432,14 +365,6 @@ async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) 
         log.info("Cache hit for sheet analysis")
         return cached
 
-    provider = _get_import_llm_provider()
-
-    if provider == "openai-compat":
-        result = await _analyze_sheet_with_openai_compat(sheet_text)
-        _llm_cache_set(sheet_text, result)
-        return result
-
-    # Default: Claude / Anthropic
     loop = asyncio.get_event_loop()
     for attempt in range(retries):
         try:
