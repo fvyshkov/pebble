@@ -1325,7 +1325,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
   }
 
   return (
-    <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', bgcolor: '#fff' }}>
+    <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', bgcolor: '#fff', position: 'relative' }}>
       {/* ─── Grid toolbar (compact) ─── */}
       <Box
         sx={{ display: 'flex', alignItems: 'center', px: 1, py: 0.5, borderBottom: '1px solid #f0f0f0', gap: 1, flexWrap: 'wrap', minHeight: 32 }}
@@ -1883,7 +1883,7 @@ export default function PivotGrid({ sheetId, modelId, currentUserId, mode: exter
           </Box>
         </Box>
       )}
-      {ctxMenu && <Box sx={{ position: 'fixed', inset: 0, zIndex: 1399 }} onClick={() => setCtxMenu(null)} />}
+      {ctxMenu && <Box sx={{ position: 'absolute', inset: 0, zIndex: 1399 }} onClick={() => setCtxMenu(null)} />}
 
       {/* Chart overlay */}
       {chartOverlay && (
