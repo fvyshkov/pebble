@@ -26,6 +26,7 @@ function RecordCellInput({ value, onChange }: { value: string; onChange: (v: str
     <TextField
       variant="standard"
       fullWidth
+      multiline
       value={local}
       onChange={e => setLocal(e.target.value)}
       onBlur={() => { if (local !== value) onChange(local) }}
@@ -367,7 +368,7 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   {fields.map((f, fi) => (
                     <TableCell key={f.id} sx={fi === 0 ? { pl: node.level * 6 + 1 } : undefined}>
                       {fi === 0 ? (
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
                           <Box className="row-actions" sx={{ display: 'flex', gap: 0, transition: 'opacity 0.15s', flexShrink: 0 }}>
                             <Tooltip title={t('records.addChild')}>
                               <IconButton size="small" onClick={() => handleAdd(node.record.id)}>
@@ -387,10 +388,12 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                                 : <ExpandMoreOutlined sx={{ fontSize: 16 }} />}
                             </IconButton>
                           ) : <Box sx={{ width: 28, flexShrink: 0 }} />}
-                          <RecordCellInput
-                            value={node.data[f.code] ?? ''}
-                            onChange={val => handleCellChange(node.record, f.code, val)}
-                          />
+                          <Box sx={{ minWidth: 0, flex: 1 }}>
+                            <RecordCellInput
+                              value={node.data[f.code] ?? ''}
+                              onChange={val => handleCellChange(node.record, f.code, val)}
+                            />
+                          </Box>
                         </Box>
                       ) : (
                         <RecordCellInput

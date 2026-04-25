@@ -240,6 +240,14 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                       <span style={{ fontWeight: 600 }}>{modelName}</span>
                       {isAdmin && (
                         <span className="actions">
+                          <Tooltip title={t('app.calculateAll')}>
+                            <IconButton size="small" onClick={e => {
+                              e.stopPropagation()
+                              api.calculateModelStream(model.id, () => {}).then(() => onRefresh?.())
+                            }}>
+                              <Icons.PlayArrowOutlined sx={{ fontSize: 16 }} />
+                            </IconButton>
+                          </Tooltip>
                           <Tooltip title={t('left.deleteModel')}>
                             <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, modelName)}>
                               <DeleteOutlineOutlined sx={{ fontSize: 16 }} />
