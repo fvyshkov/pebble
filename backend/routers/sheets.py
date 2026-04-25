@@ -100,6 +100,8 @@ async def create_sheet(body: SheetIn):
             (spid, sid, u["id"]),
         )
     await db.commit()
+    from backend.formula_engine import invalidate_engine
+    await invalidate_engine(db, body.model_id)
     row = await db.execute_fetchall("SELECT * FROM sheets WHERE id = ?", (sid,))
     return dict(row[0])
 
@@ -136,8 +138,13 @@ async def toggle_lock(sheet_id: str):
 @router.delete("/{sheet_id}")
 async def delete_sheet(sheet_id: str):
     db = get_db()
+    # Get model_id before deletion for invalidation
+    model_row = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
     await db.execute("DELETE FROM sheets WHERE id = ?", (sheet_id,))
     await db.commit()
+    if model_row:
+        from backend.formula_engine import invalidate_engine
+        await invalidate_engine(db, model_row[0]["model_id"])
     return {"ok": True}
 
 

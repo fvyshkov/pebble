@@ -20,7 +20,7 @@ from openpyxl.utils import column_index_from_string
 # Matches: 'Sheet Name'!E19, Sheet!E19, E19, $E$19, E$19, $E19
 # Note: \w with re.UNICODE matches Cyrillic and other Unicode word chars
 CELL_REF_RE = re.compile(
-    r"(?:'([^']+)'|([\w.+\-]+))!"              # optional sheet prefix (quoted or simple name, Unicode-aware)
+    r"(?:'([^']+)'|([\w.+]+))!"                # optional sheet prefix (quoted or simple name, Unicode-aware)
     r"(\$?[A-Z]{1,3})(\$?\d+)"                # column + row
     r"|"                                        # OR
     r"(\$?[A-Z]{1,3})(\$?\d+)",               # bare column + row

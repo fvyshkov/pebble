@@ -31,7 +31,7 @@ def _import_model(xlsx_path, model_name="TestModel"):
     """Import an Excel model via streaming API and return model_id."""
     with open(xlsx_path, "rb") as f:
         resp = requests.post(
-            f"{API}/import-excel/stream",
+            f"{API}/import/excel-stream",
             files={"file": (os.path.basename(xlsx_path), f)},
             data={"model_name": model_name},
             stream=True,

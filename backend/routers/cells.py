@@ -162,13 +162,18 @@ async def _save_cell(db, sheet_id: str, cell: CellIn):
         )
 
 
-async def _recalc_model(db, sheet_id: str) -> int:
-    """Recalculate all formula cells in the model containing this sheet."""
-    from backend.formula_engine import calculate_model
+async def _recalc_model(db, sheet_id: str,
+                        changed_cells: list[tuple[str, str, str]] | None = None) -> int:
+    """Recalculate formula cells. Uses incremental path if engine cached and changes provided."""
+    from backend.formula_engine import calculate_model, calculate_model_incremental
     sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
     if not sheet:
         return 0
-    result = await calculate_model(db, sheet[0]["model_id"])
+    model_id = sheet[0]["model_id"]
+    if changed_cells:
+        result = await calculate_model_incremental(db, model_id, changed_cells)
+    else:
+        result = await calculate_model(db, model_id)
     total = 0
     for sid, changes in result.items():
         for ck, val in changes.items():
@@ -204,11 +209,14 @@ async def save_cells(sheet_id: str, body: BulkCellsIn, no_recalc: bool = Query(F
         for cell in body.cells:
             if not _coord_allowed(cell.coord_key, edit_restrictions, order):
                 return {"error": f"No edit permission for {cell.coord_key}"}
+    changed = []
     for cell in body.cells:
         await _save_cell(db, sheet_id, cell)
+        if cell.value is not None and (cell.rule is None or cell.rule == "manual"):
+            changed.append((sheet_id, cell.coord_key, cell.value))
     computed = 0
     if not no_recalc:
-        computed = await _recalc_model(db, sheet_id)
+        computed = await _recalc_model(db, sheet_id, changed_cells=changed or None)
     await db.commit()
     return {"ok": True, "computed": computed}
 
@@ -224,7 +232,10 @@ async def save_single_cell(sheet_id: str, body: CellIn):
         if not _coord_allowed(body.coord_key, edit_restrictions, order):
             return {"error": "No edit permission"}
     await _save_cell(db, sheet_id, body)
-    computed = await _recalc_model(db, sheet_id)
+    changed = None
+    if body.value is not None and (body.rule is None or body.rule == "manual"):
+        changed = [(sheet_id, body.coord_key, body.value)]
+    computed = await _recalc_model(db, sheet_id, changed_cells=changed)
     await db.commit()
     return {"ok": True, "computed": computed}
 
@@ -236,6 +247,25 @@ async def calculate(sheet_id: str):
     computed = await _recalc_model(db, sheet_id)
     await db.commit()
     return {"computed": computed}
+
+
+class MarkDirtyChange(BaseModel):
+    sheet_id: str
+    coord_key: str
+
+
+class MarkDirtyIn(BaseModel):
+    changes: list[MarkDirtyChange]
+
+
+@router.post("/mark-dirty/{model_id}")
+async def mark_dirty(model_id: str, body: MarkDirtyIn):
+    """Return all cells transitively affected by the given changes (using cached DAG)."""
+    from backend.formula_engine import get_dirty_cells
+    db = get_db()
+    changes = [(c.sheet_id, c.coord_key) for c in body.changes]
+    dirty = await get_dirty_cells(db, model_id, changes)
+    return {"dirty": [{"sheet_id": s, "coord_key": c} for s, c in dirty]}
 
 
 @router.post("/calculate-model/{model_id}/stream")

@@ -28,7 +28,8 @@ import time
 from typing import Any
 
 # ── Rust engine toggle ────────────────────────────────────────────────────
-_USE_RUST = os.environ.get("PEBBLE_ENGINE", "python") == "rust"
+_ENGINE_MODE = os.environ.get("PEBBLE_ENGINE", "python")  # python, rust, rust_v2, rust_v3, rust_v4
+_USE_RUST = _ENGINE_MODE in ("rust", "rust_v2", "rust_v3", "rust_v4")
 try:
     import pebble_calc as _rust_engine
 except ImportError:
@@ -38,12 +39,116 @@ except ImportError:
         warnings.warn("PEBBLE_ENGINE=rust but pebble_calc not installed, falling back to Python")
         _USE_RUST = False
 
+# ── V4: Stateful DAG engine cache ────────────────────────────────────────
+_engine_cache: dict[str, Any] = {}  # model_id → pebble_calc.CalcEngine
+
+
+async def _try_load_dag_from_db(db, model_id: str):
+    """Try to load a cached DAG blob from the database. Returns CalcEngine or None."""
+    rows = await db.execute_fetchall(
+        "SELECT dag_blob FROM dag_cache WHERE model_id = ?", (model_id,),
+    )
+    if not rows or not rows[0]["dag_blob"]:
+        return None
+    try:
+        engine = _rust_engine.CalcEngine()
+        engine.load(rows[0]["dag_blob"])
+        print(f"[formula_engine] V4 engine loaded from DB cache for model {model_id}")
+        return engine
+    except Exception as e:
+        print(f"[formula_engine] V4 DAG cache load failed: {e}")
+        return None
+
+
+async def _save_dag_to_db(db, model_id: str, engine):
+    """Save the built DAG to the database for persistence."""
+    try:
+        blob = engine.serialize()
+        await db.execute(
+            """INSERT INTO dag_cache (model_id, dag_blob, created_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(model_id) DO UPDATE SET dag_blob = excluded.dag_blob, created_at = excluded.created_at""",
+            (model_id, blob),
+        )
+        await db.commit()
+        print(f"[formula_engine] V4 DAG saved to DB cache for model {model_id} ({len(blob)} bytes)")
+    except Exception as e:
+        print(f"[formula_engine] V4 DAG cache save failed: {e}")
+
+
+async def _get_or_build_engine(db, model_id: str, model_json: str):
+    """Get cached CalcEngine for model. Tries: memory → DB → full build.
+    Returns (engine, result). result is None if engine was loaded from cache."""
+    # 1. Check in-memory cache
+    engine = _engine_cache.get(model_id)
+    if engine is not None and engine.is_built():
+        return engine, None
+
+    # 2. Try loading from DB
+    engine = await _try_load_dag_from_db(db, model_id)
+    if engine is not None:
+        _engine_cache[model_id] = engine
+        return engine, None
+
+    # 3. Full build
+    engine = _rust_engine.CalcEngine()
+    result = engine.build(model_json)
+    _engine_cache[model_id] = engine
+
+    # Save to DB in background (non-blocking for the response)
+    await _save_dag_to_db(db, model_id, engine)
+
+    return engine, result
+
+
+async def invalidate_engine(db, model_id: str):
+    """Called when model structure changes — forces full rebuild on next calc."""
+    engine = _engine_cache.pop(model_id, None)
+    if engine is not None:
+        engine.drop_state()
+    # Remove from DB cache
+    try:
+        await db.execute("DELETE FROM dag_cache WHERE model_id = ?", (model_id,))
+        await db.commit()
+    except Exception:
+        pass
+    print(f"[formula_engine] V4 engine invalidated for model {model_id}")
+
+
+async def calculate_model_incremental(
+    db, model_id: str,
+    changed_cells: list[tuple[str, str, str]],  # [(sheet_id, coord_key, value)]
+) -> dict[str, dict[str, str]]:
+    """Fast path: update specific cell values using cached DAG.
+    Falls back to full recalc if engine not cached."""
+    engine = _engine_cache.get(model_id)
+    if engine is None or not engine.is_built():
+        # No cached engine — fall back to full recalc
+        return await calculate_model(db, model_id)
+
+    changes_json = json.dumps(changed_cells)
+    return engine.update_values(changes_json)
+
+
+async def get_dirty_cells(
+    db, model_id: str,
+    changed_cells: list[tuple[str, str]],  # [(sheet_id, coord_key)]
+) -> list[tuple[str, str]]:
+    """Return list of (sheet_id, coord_key) affected by the changes.
+    Returns empty list if engine not cached."""
+    engine = _engine_cache.get(model_id)
+    if engine is None or not engine.is_built():
+        return []
+
+    changes_json = json.dumps(changed_cells)
+    return engine.mark_dirty(changes_json)
+
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────
 
 TOKEN_RE = re.compile(r"""
     (\[(?:[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)\](?:\((?:[^()]*|\([^()]*\))*\))?)  |  # [ref](params) — supports nested [] in name
-    (SUM|AVERAGE|IF|MIN|MAX|ABS)\s*\(   |  # functions
+    (SUM|AVERAGE|IF|MIN|MAX|ABS|INT)\s*\(   |  # functions
     (\d+(?:\.\d+)?)                    |  # number
     ([+\-*/(),<>=!])                   |  # operators, parens, comparison
     (\s+)                                 # whitespace (skip)
@@ -252,6 +357,15 @@ def evaluate(formula: str, get_ref_value) -> float:
                 return max(_n(a) for a in args) if args else 0.0
             elif func_name == "ABS":
                 return abs(_n(args[0])) if args else 0.0
+            elif func_name == "INT":
+                v = _n(args[0]) if args else 0.0
+                # Excel INT() snaps values within 5e-14 of the next integer upward
+                # to avoid off-by-one errors from floating-point representation.
+                # E.g. 110 * (6/11) in f64 = 59.9999999999999929... => should be 60.
+                ceil_v = math.ceil(v)
+                if 0 < ceil_v - v < 5e-14:
+                    v = ceil_v
+                return math.floor(v)
             return sum(_n(a) for a in args)  # fallback
         if t[0] == "OP" and t[1] == "(":
             advance(); val = parse_expr(); expect_op(")"); return val
@@ -548,7 +662,17 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
             prev_period, period_order,
         )
         t1 = time.perf_counter()
-        rust_result = _rust_engine.calculate(model_json)
+        if _ENGINE_MODE == "rust_v4":
+            _engine, rust_result = await _get_or_build_engine(db, model_id, model_json)
+            if rust_result is None:
+                # Engine was loaded from cache — collect all changes
+                rust_result = _engine.collect_all_changes()
+        elif _ENGINE_MODE == "rust_v3":
+            rust_result = _rust_engine.calculate_v3(model_json)
+        elif _ENGINE_MODE == "rust_v2":
+            rust_result = _rust_engine.calculate_v2(model_json)
+        else:
+            rust_result = _rust_engine.calculate(model_json)
         t2 = time.perf_counter()
         total_cells = sum(len(v) for v in rust_result.values())
         print(f"[formula_engine] Rust engine: serialize={t1-t0:.3f}s compute={t2-t1:.3f}s cells={total_cells}")

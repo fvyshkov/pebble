@@ -159,6 +159,10 @@ where
             let val = self.parse_unary();
             return Some(-Self::n(val));
         }
+        if let Some(Token::Op('+')) = self.peek() {
+            self.advance();
+            return self.parse_unary();
+        }
         self.parse_primary()
     }
 
@@ -210,6 +214,20 @@ where
                     }
                     "ABS" => {
                         Self::n(args.first().copied().flatten()).abs()
+                    }
+                    "INT" => {
+                        let v = Self::n(args.first().copied().flatten());
+                        // Excel INT() snaps values within 5e-14 of the next integer upward
+                        // to avoid off-by-one errors from floating-point representation.
+                        let ceil_v = v.ceil();
+                        let snapped = if ceil_v - v > 0.0 && ceil_v - v < 5e-14 { ceil_v } else { v };
+                        snapped.floor()
+                    }
+                    "ROUND" => {
+                        let val = Self::n(args.first().copied().flatten());
+                        let decimals = Self::n(args.get(1).copied().flatten()) as i32;
+                        let factor = 10f64.powi(decimals);
+                        (val * factor).round() / factor
                     }
                     _ => args.iter().map(|a| Self::n(*a)).sum(), // fallback
                 })

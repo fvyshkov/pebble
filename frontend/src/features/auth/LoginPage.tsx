@@ -61,12 +61,14 @@ export default function LoginPage({ onLogin }: Props) {
           label={t('auth.login')} fullWidth value={username}
           onChange={e => setUsername(e.target.value)}
           autoComplete="username" name="username"
+          InputLabelProps={{ shrink: true }}
           sx={{ mb: 2 }} autoFocus
         />
         <TextField
           label={t('auth.password')} fullWidth type="password" value={password}
           onChange={e => setPassword(e.target.value)}
           autoComplete="current-password" name="password"
+          InputLabelProps={{ shrink: true }}
           sx={{ mb: 3 }}
         />
         <Button type="submit" variant="contained" fullWidth disabled={loading || !username || !password}>

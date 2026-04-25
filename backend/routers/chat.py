@@ -722,6 +722,8 @@ async def bulk_add_analytic(req: BulkAnalyticRequest):
         formulas_written += await _propagate_consolidations(db, req.model_id)
     except Exception as e:
         print(f"[bulk_add_analytic] propagate failed: {e}")
+    from backend.formula_engine import invalidate_engine
+    await invalidate_engine(db, req.model_id)
     return {"added": added, "total_sheets": len(sheets), "formulas_suggested": formulas_written}
 
 
@@ -745,6 +747,8 @@ async def bulk_remove_analytic(req: BulkAnalyticRequest):
             )
             removed += 1
     await db.commit()
+    from backend.formula_engine import invalidate_engine
+    await invalidate_engine(db, req.model_id)
     return {"removed": removed, "total_sheets": len(sheets)}
 
 

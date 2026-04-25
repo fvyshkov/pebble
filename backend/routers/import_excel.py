@@ -1121,7 +1121,7 @@ def _substitute_total_col_refs(
 _CROSS_SHEET_REF_RE = re.compile(
     r"'([^']+)'!(\$?[A-Z]{1,3})(\$?\d+)"   # quoted: 'Sheet Name'!E19
     r"|"
-    r"(?<!['\w])([A-Za-z\w.+\-]+)!(\$?[A-Z]{1,3})(\$?\d+)",  # unquoted: Sheet!E19
+    r"(?<!['\w])([A-Za-z\w.+]+)!(\$?[A-Z]{1,3})(\$?\d+)",  # unquoted: Sheet!E19
     re.UNICODE,
 )
 

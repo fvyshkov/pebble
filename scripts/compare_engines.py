@@ -50,9 +50,10 @@ async def main():
     py_cells = sum(len(v) for v in py_result.values())
     print(f"  Python: {t1 - t0:.3f}s, {py_cells} cells changed")
 
-    # --- Rust engine ---
-    print("Running Rust engine...")
+    # --- Rust V2 engine ---
+    print("Running Rust V2 engine...")
     fe._USE_RUST = True
+    fe._ENGINE_MODE = "rust_v2"
     if fe._rust_engine is None:
         print("ERROR: pebble_calc not installed")
         sys.exit(1)
@@ -60,7 +61,7 @@ async def main():
     rs_result = await fe.calculate_model(db, model_id)
     t1 = time.perf_counter()
     rs_cells = sum(len(v) for v in rs_result.values())
-    print(f"  Rust:   {t1 - t0:.3f}s, {rs_cells} cells changed")
+    print(f"  Rust V2: {t1 - t0:.3f}s, {rs_cells} cells changed")
 
     # --- Compare ---
     print("\n--- Comparison ---")

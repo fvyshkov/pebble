@@ -9,6 +9,19 @@ from backend.transliterate import transliterate
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
+
+async def _invalidate_engines_for_analytic(db, analytic_id: str):
+    """Invalidate V4 engine cache for all models using this analytic."""
+    from backend.formula_engine import invalidate_engine
+    rows = await db.execute_fetchall(
+        """SELECT DISTINCT s.model_id FROM sheet_analytics sa
+           JOIN sheets s ON s.id = sa.sheet_id
+           WHERE sa.analytic_id = ?""",
+        (analytic_id,),
+    )
+    for r in rows:
+        await invalidate_engine(db, r["model_id"])
+
 MONTH_NAMES_RU = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
@@ -182,6 +195,7 @@ async def create_record(analytic_id: str, body: RecordIn):
         (rid, analytic_id, body.parent_id, body.sort_order, json.dumps(body.data_json, ensure_ascii=False)),
     )
     await db.commit()
+    await _invalidate_engines_for_analytic(db, analytic_id)
     row = await db.execute_fetchall("SELECT * FROM analytic_records WHERE id = ?", (rid,))
     return dict(row[0])
 
@@ -195,6 +209,7 @@ async def update_record(analytic_id: str, record_id: str, body: RecordIn):
          record_id),
     )
     await db.commit()
+    await _invalidate_engines_for_analytic(db, analytic_id)
     row = await db.execute_fetchall("SELECT * FROM analytic_records WHERE id = ?", (record_id,))
     if not row:
         return {"ok": True}
@@ -206,6 +221,7 @@ async def delete_record(analytic_id: str, record_id: str):
     db = get_db()
     await db.execute("DELETE FROM analytic_records WHERE id = ? AND analytic_id = ?", (record_id, analytic_id))
     await db.commit()
+    await _invalidate_engines_for_analytic(db, analytic_id)
     return {"ok": True}
 
 
@@ -221,6 +237,7 @@ async def bulk_upsert_records(analytic_id: str, records: list[RecordIn]):
         )
         created.append(rid)
     await db.commit()
+    await _invalidate_engines_for_analytic(db, analytic_id)
     return {"created": created}
 
 

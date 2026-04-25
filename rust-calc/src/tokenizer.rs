@@ -45,7 +45,7 @@ pub fn tokenize(formula: &str) -> Vec<Token> {
             while peek < len && chars[peek].is_whitespace() {
                 peek += 1;
             }
-            if peek < len && chars[peek] == '(' && matches!(upper.as_str(), "SUM" | "AVERAGE" | "IF" | "MIN" | "MAX" | "ABS") {
+            if peek < len && chars[peek] == '(' && matches!(upper.as_str(), "SUM" | "AVERAGE" | "IF" | "MIN" | "MAX" | "ABS" | "INT" | "ROUND") {
                 tokens.push(Token::Func(upper));
                 pos = peek + 1; // skip the '('
             }

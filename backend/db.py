@@ -163,6 +163,12 @@ CREATE TABLE IF NOT EXISTS translations (
 );
 CREATE INDEX IF NOT EXISTS idx_translations_entity
     ON translations(entity_type, entity_id);
+
+CREATE TABLE IF NOT EXISTS dag_cache (
+    model_id   TEXT PRIMARY KEY,
+    dag_blob   BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

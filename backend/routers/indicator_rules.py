@@ -150,6 +150,13 @@ async def put_rules(sheet_id: str, indicator_id: str, body: RulesIn):
             ),
         )
     await db.commit()
+    # Invalidate V4 engine cache (structural change)
+    model_row = await db.execute_fetchall(
+        "SELECT model_id FROM sheets WHERE id = ?", (sheet_id,),
+    )
+    if model_row:
+        from backend.formula_engine import invalidate_engine
+        await invalidate_engine(db, model_row[0]["model_id"])
     return {"ok": True}
 
 
@@ -268,6 +275,13 @@ async def promote_cell(sheet_id: str, indicator_id: str, body: PromoteCellIn):
         (sheet_id, body.coord_key),
     )
     await db.commit()
+    # Invalidate V4 engine cache (structural change)
+    model_row = await db.execute_fetchall(
+        "SELECT model_id FROM sheets WHERE id = ?", (sheet_id,),
+    )
+    if model_row:
+        from backend.formula_engine import invalidate_engine
+        await invalidate_engine(db, model_row[0]["model_id"])
     return {"ok": True, "rule_id": rid, "priority": prio, "scope": scope}
 
 
