@@ -1002,7 +1002,7 @@ fn eval_formula_v3(
     resolved_refs: &[u32],
     values_ptr: *const f64,
 ) -> f64 {
-    let mut stack = [0.0f64; 64];
+    let mut stack = [0.0f64; 256];
     let mut sp: usize = 0;
 
     for instr in instrs {

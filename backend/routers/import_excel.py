@@ -834,12 +834,17 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
         return []
 
     # ── Phase 4: Build period list ──
-    # Prefer exact dates over Q/H/Y (datetime row has month precision;
-    # Q/H/Y may coexist as aggregate columns and will be auto-generated
-    # as parents in the period hierarchy).
+    # When both date_row and qhy_row exist, pick the one with more columns.
+    # Q/H/Y sheets (like "Funnel QH") have a few datetime values at quarter
+    # end-dates, but the actual structure is Q1/Q2/H1/H2/Y — prefer that.
     periods = []
     seen_keys = set()
-    scan_row = date_row or text_date_row or qhy_row or nmes_row or bare_year_row
+    if date_row and qhy_row:
+        date_count = sum(1 for c in range(1, max_col + 1) if isinstance(ws.cell(date_row, c).value, datetime))
+        qhy_count = sum(1 for c in range(1, max_col + 1) if isinstance(ws.cell(qhy_row, c).value, str) and _QHY_RE.match(ws.cell(qhy_row, c).value.strip()))
+        scan_row = qhy_row if qhy_count > date_count else date_row
+    else:
+        scan_row = date_row or text_date_row or qhy_row or nmes_row or bare_year_row
     month_counter = 0  # for "N мес" format
 
     for c in range(1, max_col + 1):
@@ -2017,17 +2022,17 @@ def _recover_missing_rows(indicators: list[dict], ws, data_start_col: int) -> li
 
     # 2. Determine label column (usually 1, sometimes 2)
     label_col = 1
-    # Heuristic: if most known indicators have labels in col B not col A, use B
-    b_count = 0
-    a_count = 0
-    for r in list(known_rows)[:20]:
-        va = ws.cell(r, 1).value
-        vb = ws.cell(r, 2).value
-        if va and str(va).strip():
-            a_count += 1
-        if vb and str(vb).strip():
-            b_count += 1
-    if b_count > a_count and a_count == 0:
+    # Heuristic: scan data region for columns with the most text content
+    max_row_scan = min(ws.max_row or 1, max_row, 500)
+    col_text_counts = {}
+    for _lc in (1, 2):
+        _tc = 0
+        for _lr in range(min_row, max_row_scan + 1):
+            _lv = ws.cell(_lr, _lc).value
+            if _lv is not None and isinstance(_lv, str) and len(str(_lv).strip()) > 1:
+                _tc += 1
+        col_text_counts[_lc] = _tc
+    if col_text_counts.get(2, 0) > col_text_counts.get(1, 0) * 1.5 and col_text_counts.get(2, 0) > 10:
         label_col = 2
 
     # 3. Scan for missing rows
@@ -2230,23 +2235,33 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                         all_dates.append(datetime(int(v), 1, 1))
                         all_dates.append(datetime(int(v), 12, 1))
 
-    # ── Step 2: Analyze with Claude API (per sheet) ──
-    try:
-        analysis = await _analyze_workbook_with_claude(sheet_texts, all_dates)
-    except Exception as e:
-        log.warning("Claude API analysis failed, falling back to heuristics: %s", e)
-        analysis = _fallback_heuristic_analysis(wb_formulas)
-
-    period_config = analysis["period_config"]
-    sheets_config = analysis["sheets"]
-
-    # Merge detected period types with Claude's analysis
+    # ── Step 2: Compute period config from detected dates ──
+    if all_dates:
+        min_d = min(all_dates)
+        max_d = max(all_dates)
+        p_start = f"{min_d.year}-{min_d.month:02d}-01"
+        end_m = max_d.month
+        end_y = max_d.year
+        end_day = monthrange(end_y, end_m)[1]
+        p_end = f"{end_y}-{end_m:02d}-{end_day:02d}"
+    else:
+        p_start, p_end = "2026-01-01", "2028-12-31"
+    period_config = {"period_types": ["year", "quarter", "month"], "start": p_start, "end": p_end}
     if detected_period_types:
-        pt = set(period_config.get("period_types", []))
+        pt = set(period_config["period_types"])
         pt.update(detected_period_types)
         if any(x in pt for x in ("quarter", "half", "month")):
             pt.add("year")
         period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
+
+    # ── Step 2b: Analyze sheet structure with Claude API ──
+    try:
+        analysis = await _analyze_workbook_with_claude(sheet_texts, all_dates)
+        sheets_config = analysis["sheets"]
+    except Exception as e:
+        log.warning("Claude API analysis failed, falling back to heuristics: %s", e)
+        fb = _fallback_heuristic_analysis(wb_formulas)
+        sheets_config = fb.get("sheets", [])
 
     # ── Step 3: Create model ──
     model_id = str(uuid.uuid4())
@@ -2907,28 +2922,32 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
         yield event(_m("analyzing"))
 
+        # Compute period config from detected dates BEFORE Claude analysis
+        # so it's preserved even if Claude API is unavailable
+        if all_dates:
+            min_d = min(all_dates)
+            max_d = max(all_dates)
+            p_start = f"{min_d.year}-{min_d.month:02d}-01"
+            end_m = max_d.month
+            end_y = max_d.year
+            end_day = monthrange(end_y, end_m)[1]
+            p_end = f"{end_y}-{end_m:02d}-{end_day:02d}"
+        else:
+            p_start, p_end = "2026-01-01", "2028-12-31"
+        log.info("Period detection: %d dates, unique_years=%s, range=%s..%s",
+                 len(all_dates), sorted(set(d.year for d in all_dates)) if all_dates else [], p_start, p_end)
+
+        period_config = {"period_types": ["year", "quarter", "month"], "start": p_start, "end": p_end}
+        if detected_period_types:
+            pt = set(period_config["period_types"])
+            pt.update(detected_period_types)
+            if any(x in pt for x in ("quarter", "half", "month")):
+                pt.add("year")
+            period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
+
         # Analyze with Claude (per-sheet with progress)
         try:
             client = _get_claude_client()
-            if all_dates:
-                min_d = min(all_dates)
-                max_d = max(all_dates)
-                p_start = f"{min_d.year}-{min_d.month:02d}-01"
-                end_m = max_d.month
-                end_y = max_d.year
-                end_day = monthrange(end_y, end_m)[1]
-                p_end = f"{end_y}-{end_m:02d}-{end_day:02d}"
-            else:
-                p_start, p_end = "2026-01-01", "2028-12-31"
-
-            period_config = {"period_types": ["year", "quarter", "month"], "start": p_start, "end": p_end}
-            # Merge detected period types with defaults
-            if detected_period_types:
-                pt = set(period_config["period_types"])
-                pt.update(detected_period_types)
-                if any(x in pt for x in ("quarter", "half", "month")):
-                    pt.add("year")
-                period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
             sheets_config = []
 
             # Launch ALL sheets in parallel for speed
@@ -2969,12 +2988,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             analysis = {"period_config": period_config, "sheets": sheets_config}
         except Exception as e:
             yield event(_m("claude_unavail", err=e))
-            analysis = _fallback_heuristic_analysis(wb_formulas)
+            fb = _fallback_heuristic_analysis(wb_formulas)
+            # Only take sheets from fallback; keep period_config from date detection
+            analysis = {"period_config": period_config, "sheets": fb.get("sheets", [])}
 
-        period_config = analysis["period_config"]
         sheets_config = analysis["sheets"]
 
-        # Ensure detected period types are always included (fallback may have overridden)
+        # Ensure detected period types are always included
         if detected_period_types:
             pt = set(period_config.get("period_types", []))
             pt.update(detected_period_types)
@@ -3600,14 +3620,18 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
 def _fallback_heuristic_analysis(wb) -> dict:
     """Basic heuristic analysis as fallback when Claude API is not available."""
-    # Detect period range from first sheet
-    first_ws = wb[wb.sheetnames[0]]
+    # Detect period range from all sheets (datetime objects + year numbers)
     dates = []
-    for r in range(1, 7):
-        for c in range(1, min((first_ws.max_column or 1) + 1, 200)):
-            v = first_ws.cell(r, c).value
-            if isinstance(v, datetime):
-                dates.append(v)
+    for sn in wb.sheetnames:
+        ws = wb[sn]
+        for r in range(1, 11):
+            for c in range(1, min((ws.max_column or 1) + 1, 200)):
+                v = ws.cell(r, c).value
+                if isinstance(v, datetime):
+                    dates.append(v)
+                elif isinstance(v, (int, float)) and 2020 <= v <= 2040 and v == int(v):
+                    dates.append(datetime(int(v), 1, 1))
+                    dates.append(datetime(int(v), 12, 1))
 
     if dates:
         min_d = min(dates)
@@ -3640,9 +3664,17 @@ def _fallback_heuristic_analysis(wb) -> dict:
         title = ws.cell(1, 1).value or ws.cell(1, 2).value or sheet_name
         title = str(title).strip()
 
-        # Detect label column
+        # Detect label column — pick column with most text content
         label_col = 1
-        if sheet_name in ("BS", "PL"):
+        col_text = {}
+        for _lc in (1, 2):
+            text_count = 0
+            for _lr in range(3, max_row + 1):
+                _lv = ws.cell(_lr, _lc).value
+                if _lv is not None and isinstance(_lv, str) and len(str(_lv).strip()) > 1:
+                    text_count += 1
+            col_text[_lc] = text_count
+        if col_text[2] > col_text[1] * 1.5 and col_text[2] > 10:
             label_col = 2
 
         # Find first data row

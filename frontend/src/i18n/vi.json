@@ -119,6 +119,9 @@
     "mainAnalytic": "Phân tích chính (công thức chỉ tiêu nằm ở đây)",
     "makeMain": "Đặt làm phân tích chính",
     "minPeriodLevel": "Cấp kỳ tối thiểu:",
+    "visibleRecords": "Bản ghi hiển thị",
+    "selectAll": "Tất cả",
+    "selectNone": "Không",
     "noAnalytics": "Không có phân tích liên kết. Thêm phân tích vào trang tính."
   },
   "formulas": {

@@ -395,6 +395,128 @@ def test_no_average_consolidation(imported_model):
         f"Too many indicators with AVERAGE consolidation:\n" + "\n".join(bad[:20])
 
 
+def test_indicator_structure(imported_model):
+    """Verify indicator counts and hierarchy for ENG model sheets.
+
+    Only runs for the ENG model (other models don't have this issue).
+    Checks that sheets have enough indicators and proper parent-child hierarchy.
+    """
+    filename = imported_model["filename"]
+    if "ENG" not in filename:
+        pytest.skip("Structure test only for ENG model")
+
+    model_id = imported_model["model_id"]
+    db = sqlite3.connect(str(DB_PATH))
+
+    # (excel_code, min_total_indicators, min_hierarchical, min_depth)
+    expected = {
+        "Goals": (80, 50, 2),
+        "Funnel": (80, 50, 1),
+        "Funnel QH": (20, 8, 1),
+        "packages (indiv)": (100, 50, 1),
+        "Micro_30 (indiv)": (80, 60, 1),
+        "Installment card_150 (indiv)": (100, 60, 1),
+        "Installment card_1000 (indiv)": (100, 60, 1),
+        "Debit card (indiv)": (70, 40, 1),
+        "CashCredit_dossym (indiv)": (80, 30, 1),
+        "Deposits (indiv)": (120, 40, 1),
+        "Merchants(corp)": (200, 60, 1),
+        "OPEX_CAPEX": (60, 50, 1),
+        "BS (Ecosystem)": (50, 40, 1),
+        "PL (Ecosystem)": (90, 50, 1),
+    }
+
+    failures = []
+    for excel_code, (min_total, min_hier, min_depth) in expected.items():
+        row = db.execute(
+            "SELECT id FROM sheets WHERE model_id = ? AND excel_code = ?",
+            (model_id, excel_code),
+        ).fetchone()
+        if not row:
+            failures.append(f"{excel_code}: sheet not found")
+            continue
+        sheet_id = row[0]
+
+        sas = db.execute("""
+            SELECT sa.analytic_id FROM sheet_analytics sa
+            JOIN analytics a ON a.id = sa.analytic_id
+            WHERE sa.sheet_id = ? AND a.is_periods = 0
+        """, (sheet_id,)).fetchall()
+
+        total = with_parent = max_depth = 0
+        for (aid,) in sas:
+            recs = db.execute(
+                "SELECT id, parent_id FROM analytic_records WHERE analytic_id = ?",
+                (aid,),
+            ).fetchall()
+            parents = {r[0]: r[1] for r in recs}
+            total += len(recs)
+            with_parent += sum(1 for r in recs if r[1])
+            for rid in parents:
+                d = 0
+                cur = rid
+                while parents.get(cur):
+                    cur = parents[cur]
+                    d += 1
+                    if d > 20:
+                        break
+                max_depth = max(max_depth, d)
+
+        if total < min_total:
+            failures.append(f"{excel_code}: {total} indicators < {min_total} minimum")
+        if with_parent < min_hier:
+            failures.append(f"{excel_code}: {with_parent} hierarchical < {min_hier} minimum")
+        if max_depth < min_depth:
+            failures.append(f"{excel_code}: depth {max_depth} < {min_depth} minimum")
+        print(f"    {excel_code}: {total} inds ({with_parent} hier, depth={max_depth})")
+
+    db.close()
+    assert not failures, "Indicator structure failures:\n" + "\n".join(failures)
+
+
+def test_period_levels(imported_model):
+    """Verify period level detection per sheet for ENG model.
+
+    Funnel QH should detect Q/H/Y periods, not monthly.
+    """
+    filename = imported_model["filename"]
+    if "ENG" not in filename:
+        pytest.skip("Period level test only for ENG model")
+
+    model_id = imported_model["model_id"]
+    db = sqlite3.connect(str(DB_PATH))
+
+    # Sheets where min_period_level should NOT be 'M' (monthly)
+    non_monthly = {
+        "Funnel QH": ("Q", "H", "Y"),
+        "Goals": ("Q", "H", "Y"),
+    }
+
+    failures = []
+    for excel_code, allowed_levels in non_monthly.items():
+        row = db.execute(
+            "SELECT id FROM sheets WHERE model_id = ? AND excel_code = ?",
+            (model_id, excel_code),
+        ).fetchone()
+        if not row:
+            continue
+        sheet_id = row[0]
+
+        sa = db.execute("""
+            SELECT sa.min_period_level FROM sheet_analytics sa
+            JOIN analytics a ON a.id = sa.analytic_id
+            WHERE sa.sheet_id = ? AND a.is_periods = 1
+        """, (sheet_id,)).fetchone()
+        if sa:
+            level = sa[0]
+            if level and level not in allowed_levels:
+                failures.append(f"{excel_code}: min_period_level={level}, expected one of {allowed_levels}")
+            print(f"    {excel_code}: min_period_level={level}")
+
+    db.close()
+    assert not failures, "Period level failures:\n" + "\n".join(failures)
+
+
 def test_avg_rate_indicators_have_formulas(imported_model):
     """Indicators with avg/rate patterns must have consolidation formulas."""
     AVG_RATE_PATTERNS = ("средн", "ср. ", "ставка", "доля ", "на 1 ",

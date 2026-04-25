@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react'
 import {
   Box, Typography, TextField, List, ListItem, ListItemIcon, ListItemText,
   IconButton, Menu, MenuItem, Tooltip, Radio,
-  ToggleButton, ToggleButtonGroup,
 } from '@mui/material'
 import AddOutlined from '@mui/icons-material/AddOutlined'
 import DeleteOutlineOutlined from '@mui/icons-material/DeleteOutlineOutlined'
@@ -12,6 +11,7 @@ import { useTranslation } from 'react-i18next'
 import * as api from '../../api'
 import type { Sheet, SheetAnalytic, Analytic } from '../../types'
 import { usePending } from '../../store/PendingContext'
+import RecordOrganizer from './RecordOrganizer'
 
 interface Props {
   sheetId: string
@@ -198,31 +198,19 @@ export default function SheetSettings({ sheetId, modelId }: Props) {
                 )
               })()}
             </ListItem>
-            {/* Period level selector for period analytics */}
+            {/* Record organizer for all analytics */}
             {(() => {
               const a = analyticById(b.analytic_id)
-              if (!a || !a.is_periods) return null
+              if (!a) return null
               return (
-                <Box sx={{ pl: 9, pb: 1 }}>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-                    {t('sheet.minPeriodLevel')}
-                  </Typography>
-                  <ToggleButtonGroup
-                    exclusive size="small"
-                    value={b.min_period_level || 'M'}
-                    onChange={async (_, v) => {
-                      if (!v) return
-                      const level = v === 'M' ? null : v
-                      await api.setPeriodLevel(sheetId, b.id, level)
-                      setBindings(prev => prev.map(x => x.id === b.id ? { ...x, min_period_level: level } : x))
-                    }}
-                  >
-                    <ToggleButton value="M" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>{t('grid.months')}</ToggleButton>
-                    <ToggleButton value="Q" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>{t('grid.quarters')}</ToggleButton>
-                    <ToggleButton value="H" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>{t('grid.halfyears')}</ToggleButton>
-                    <ToggleButton value="Y" sx={{ textTransform: 'none', py: 0.25, px: 1.5 }}>{t('grid.years')}</ToggleButton>
-                  </ToggleButtonGroup>
-                </Box>
+                <RecordOrganizer
+                  sheetId={sheetId}
+                  saId={b.id}
+                  analyticId={b.analytic_id}
+                  isPeriods={!!a.is_periods}
+                  initialVisible={b.visible_record_ids || null}
+                  onSaved={load}
+                />
               )
             })()}
           </Box>

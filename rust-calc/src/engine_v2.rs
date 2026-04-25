@@ -204,7 +204,7 @@ fn get_cell(model: &mut Model, sheet_idx: usize, coord: CoordKey) -> f64 {
 fn eval_compiled(model: &mut Model, sheet_idx: usize,
                  coord: CoordKey, formula_id: u32) -> (f64, bool) {
     let formula = model.compiled_formulas[formula_id as usize].clone();
-    let mut stack = [0.0f64; 64];
+    let mut stack = [0.0f64; 256];
     let mut sp: usize = 0;
     let mut has_unresolved = false;
 

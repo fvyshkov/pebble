@@ -82,8 +82,8 @@ export const removeSheetAnalytic = (sheetId: string, saId: string) =>
   fetch(`${BASE}/sheets/${sheetId}/analytics/${saId}`, { method: 'DELETE' }).then(r => json<any>(r))
 export const reorderSheetAnalytics = (sheetId: string, orderedIds: string[]) =>
   fetch(`${BASE}/sheets/${sheetId}/analytics-reorder`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ordered_ids: orderedIds }) }).then(r => json<any>(r))
-export const setPeriodLevel = (sheetId: string, saId: string, level: string | null) =>
-  fetch(`${BASE}/sheets/${sheetId}/analytics/${saId}/period-level`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ min_period_level: level }) }).then(r => json<SheetAnalytic>(r))
+export const setPeriodLevel = (sheetId: string, saId: string, level: string | null, visibleRecordIds?: string[] | null) =>
+  fetch(`${BASE}/sheets/${sheetId}/analytics/${saId}/period-level`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ min_period_level: level, visible_record_ids: visibleRecordIds ?? undefined }) }).then(r => json<SheetAnalytic>(r))
 
 // Main analytic + indicator formula rules
 export const getMainAnalytic = (sheetId: string) =>

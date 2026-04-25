@@ -187,7 +187,7 @@ pub fn build_model(input: &ModelInput) -> Model {
         let mut period_key_to_rid = HashMap::new();
         for (rid_str, pk_str) in &s.rid_to_period_key {
             let rid = interner.intern(rid_str);
-            let pk = interner.intern(pk_str);
+            let pk = interner.intern_lower(pk_str);
             rid_to_period_key.insert(rid, pk);
             period_key_to_rid.insert(pk, rid);
         }

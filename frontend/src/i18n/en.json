@@ -119,6 +119,9 @@
     "mainAnalytic": "Main analytic (indicator formulas live here)",
     "makeMain": "Make main analytic",
     "minPeriodLevel": "Minimum period level:",
+    "visibleRecords": "Visible records",
+    "selectAll": "All",
+    "selectNone": "None",
     "noAnalytics": "No linked analytics. Add an analytic to the sheet."
   },
   "formulas": {
