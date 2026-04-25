@@ -144,9 +144,9 @@ jobs:
           path: /tmp/backend.log
           if-no-files-found: ignore
 
-  # ── Release only after required tests pass (e2e is advisory) ──
+  # ── Release + deploy only after ALL tests pass ──
   release:
-    needs: [unit-tests, xls-tests]
+    needs: [unit-tests, xls-tests, e2e-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -251,3 +251,8 @@ jobs:
             git commit -m "Release ${{ steps.sha.outputs.short }}"
             git push
           }
+
+      # ── Trigger Render deploy (autoDeploy is off, deploy only after tests) ──
+      - name: Deploy to Render
+        if: ${{ vars.RENDER_DEPLOY_HOOK != '' }}
+        run: curl -sf "${{ vars.RENDER_DEPLOY_HOOK }}"

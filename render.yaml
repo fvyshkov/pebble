@@ -8,7 +8,7 @@ services:
     plan: starter            # $7/mo; use "free" if you prefer (but it sleeps)
     region: frankfurt
     branch: main
-    autoDeploy: true
+    autoDeploy: false
     healthCheckPath: /api/models
     disk:
       name: pebble-data

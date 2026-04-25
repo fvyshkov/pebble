@@ -18,6 +18,5 @@ pebble.zip
 .env
 save
 frontend/tsconfig.tsbuildinfo
-.github/workflows/
 ~$*
 .bench_cache/
