@@ -189,6 +189,13 @@ async def add_sheet_analytic(sheet_id: str, body: SheetAnalyticIn):
                 (new_key, c["id"])
             )
 
+    # Invalidate engine cache — model structure changed (new dimension)
+    model_row = await db.execute_fetchall(
+        "SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
+    if model_row:
+        from backend.formula_engine import invalidate_engine
+        await invalidate_engine(db, model_row[0]["model_id"])
+
     await db.commit()
     row = await db.execute_fetchall("SELECT * FROM sheet_analytics WHERE id = ?", (said,))
     return dict(row[0])
@@ -201,6 +208,12 @@ async def update_sheet_analytic(sheet_id: str, sa_id: str, body: SheetAnalyticIn
         "UPDATE sheet_analytics SET sort_order=?, is_fixed=?, fixed_record_id=? WHERE id=? AND sheet_id=?",
         (body.sort_order, int(body.is_fixed), body.fixed_record_id, sa_id, sheet_id),
     )
+    # Invalidate engine cache — sort order change affects coord_key structure
+    model_row = await db.execute_fetchall(
+        "SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
+    if model_row:
+        from backend.formula_engine import invalidate_engine
+        await invalidate_engine(db, model_row[0]["model_id"])
     await db.commit()
     row = await db.execute_fetchall("SELECT * FROM sheet_analytics WHERE id = ?", (sa_id,))
     return dict(row[0])
@@ -290,6 +303,12 @@ async def remove_sheet_analytic(sheet_id: str, sa_id: str):
             await db.execute("DELETE FROM cell_data WHERE id = ?", (cid,))
 
     await db.execute("DELETE FROM sheet_analytics WHERE id = ? AND sheet_id = ?", (sa_id, sheet_id))
+    # Invalidate engine cache — model structure changed
+    model_row = await db.execute_fetchall(
+        "SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
+    if model_row:
+        from backend.formula_engine import invalidate_engine
+        await invalidate_engine(db, model_row[0]["model_id"])
     await db.commit()
     return {"ok": True}
 
@@ -335,6 +354,12 @@ async def set_main_analytic(sheet_id: str, body: MainAnalyticIn):
         "UPDATE sheet_analytics SET is_main = 1 WHERE sheet_id = ? AND analytic_id = ?",
         (sheet_id, body.analytic_id),
     )
+    # Invalidate engine cache — main axis change affects consolidation
+    model_row = await db.execute_fetchall(
+        "SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
+    if model_row:
+        from backend.formula_engine import invalidate_engine
+        await invalidate_engine(db, model_row[0]["model_id"])
     await db.commit()
     return {"ok": True, "analytic_id": body.analytic_id}
 

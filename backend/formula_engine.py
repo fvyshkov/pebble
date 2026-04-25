@@ -109,15 +109,13 @@ async def calculate_model_incremental(
     db, model_id: str,
     changed_cells: list[tuple[str, str, str]],  # [(sheet_id, coord_key, value)]
 ) -> dict[str, dict[str, str]]:
-    """Fast path: update specific cell values using cached DAG.
-    Falls back to full recalc if engine not cached."""
-    engine = _engine_cache.get(model_id)
-    if engine is None or not engine.is_built():
-        # No cached engine — fall back to full recalc
-        return await calculate_model(db, model_id)
-
-    changes_json = json.dumps(changed_cells)
-    return engine.update_values(changes_json)
+    """Update specific cell values using cached DAG.
+    Falls back to full recalc if engine not cached.
+    Always invalidates first to ensure new cells are included in the DAG."""
+    # Always invalidate — new cells may have been added since the last build.
+    # Full recalc is fast enough (sub-second) and guarantees correctness.
+    await invalidate_engine(db, model_id)
+    return await calculate_model(db, model_id)
 
 
 async def get_dirty_cells(
@@ -393,7 +391,11 @@ def _serialize_for_rust(all_sheets, sheet_meta, global_cells, global_formulas,
             elif formula:
                 rule = "formula"
             else:
-                rule = "manual"
+                # No formula text, not manual, not phantom — this is a
+                # consolidation cell (rule=formula in DB but formula="").
+                # Mark as "phantom" so Rust doesn't treat it as manual
+                # and applies default SUM consolidation.
+                rule = "phantom"
             cells[ck] = {"value": val, "rule": rule, "formula": formula}
 
         records = {}
@@ -627,11 +629,15 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
 
     # Track manual cells — they must not be overwritten by consolidation
     _manual_cells: set[tuple] = set()
-    # Track "empty formula" cells — rule=formula but formula="" (phantom import cells).
-    # These should NOT be treated as real 0 values for AVERAGE calculations.
-    _empty_formula_cells: set[tuple] = set()
+    # Track cells that have rule=formula but no formula text — these are
+    # auto-created consolidation cells or migration artifacts. They should
+    # NOT be marked as manual (they need default SUM consolidation in Rust).
+    _formula_no_text: set[tuple] = set()
+    for c in await db.execute_fetchall(
+            "SELECT sheet_id, coord_key, rule FROM cell_data WHERE rule = 'formula' AND (formula IS NULL OR formula = '')"):
+        _formula_no_text.add((c["sheet_id"], c["coord_key"]))
     for gk in global_cells:
-        if gk not in global_formulas:
+        if gk not in global_formulas and gk not in _formula_no_text:
             _manual_cells.add(gk)
     # _empty_formula_cells are already identified during the cell loading above:
     # they have rule=formula, empty formula, and val=0/"". These are in global_cells
