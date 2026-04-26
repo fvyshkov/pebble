@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import {
   IconButton, Tooltip, Badge, Select, MenuItem, FormControl,
   Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, CircularProgress,
-  ToggleButton, ToggleButtonGroup, Typography, Box, Chip, Popover, List, ListItem, ListItemIcon, ListItemText,
+  ToggleButton, ToggleButtonGroup, Typography, Box, Chip, Popover, List, ListItem, ListItemIcon, ListItemText, Snackbar,
 } from '@mui/material'
 import RefreshOutlined from '@mui/icons-material/RefreshOutlined'
 import MenuOutlined from '@mui/icons-material/MenuOutlined'
@@ -276,6 +276,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   useEffect(() => { localStorage.setItem('pebble_chatWidth', String(chatWidth)) }, [chatWidth])
   const [chatImportFile, setChatImportFile] = useState<File | null>(null)
   // ── Undo state ──
+  const [undoSnack, setUndoSnack] = useState<string | null>(null)
   const gridRef = useRef<PivotGridAGHandle>(null)
   const [hasUndo, setHasUndo] = useState(false)
   const [undoAnchor, setUndoAnchor] = useState<HTMLElement | null>(null)
@@ -293,6 +294,24 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const [chartConfig, setChartConfig] = useState<ChartConfig | null>(null)
   const [presentation, setPresentation] = useState<{ html: string; title: string } | null>(null)
   const calcedModelsRef = useRef<Set<string>>(new Set())
+
+  /** Perform undo (optionally to a specific history_id) and show snackbar. */
+  const performUndo = useCallback(async (historyId?: string) => {
+    const modelId = selection?.modelId
+    if (!modelId) return
+    try {
+      const result = await api.undoChanges(modelId, historyId)
+      if (result.error) return
+      if (result.all_cells && gridRef.current) {
+        gridRef.current.applyCellUpdates(result.all_cells)
+      } else {
+        setRefreshKey(k => k + 1)
+      }
+      setHasUndo(result.has_more ?? false)
+      const n = result.undone ?? 1
+      setUndoSnack(t('app.undoMessage', `Отменено: {{n}}`, { n }))
+    } catch { /* ignore */ }
+  }, [selection?.modelId, t])
 
   useEffect(() => {
     api.listUsers().then(u => {
@@ -385,18 +404,9 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
       // Cmd/Ctrl+Z → history undo (point update, no full reload)
       if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && ev.key.toLowerCase() === 'z') {
         if (isEditable()) return
-        const modelId = selection?.modelId
-        if (!modelId) return
+        if (!selection?.modelId) return
         ev.preventDefault()
-        try {
-          const result = await api.undoChanges(modelId)
-          if (result.all_cells && gridRef.current) {
-            gridRef.current.applyCellUpdates(result.all_cells)
-          } else if (!result.error) {
-            setRefreshKey(k => k + 1)
-          }
-          setHasUndo(result.has_more ?? false)
-        } catch { /* ignore */ }
+        performUndo()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -559,19 +569,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             <>
               <Tooltip title={t('app.undo', 'Отменить')}>
                 <span>
-                  <IconButton size="small" disabled={!hasUndo} data-testid="undo-btn" onClick={async () => {
-                    const modelId = selection?.modelId
-                    if (!modelId) return
-                    try {
-                      const result = await api.undoChanges(modelId)
-                      if (result.all_cells && gridRef.current) {
-                        gridRef.current.applyCellUpdates(result.all_cells)
-                      } else if (!result.error) {
-                        setRefreshKey(k => k + 1)
-                      }
-                      setHasUndo(result.has_more ?? false)
-                    } catch { /* ignore */ }
-                  }}>
+                  <IconButton size="small" disabled={!hasUndo} data-testid="undo-btn" onClick={() => performUndo()}>
                     <UndoOutlined fontSize="small" />
                   </IconButton>
                 </span>
@@ -613,19 +611,9 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                       }}
                       onMouseEnter={() => setUndoHoverIdx(i)}
                       onMouseLeave={() => setUndoHoverIdx(null)}
-                      onClick={async () => {
+                      onClick={() => {
                         setUndoAnchor(null)
-                        const modelId = selection?.modelId
-                        if (!modelId) return
-                        try {
-                          const result = await api.undoChanges(modelId, item.id)
-                          if (result.all_cells && gridRef.current) {
-                            gridRef.current.applyCellUpdates(result.all_cells)
-                          } else if (!result.error) {
-                            setRefreshKey(k => k + 1)
-                          }
-                          setHasUndo(result.has_more ?? false)
-                        } catch { /* ignore */ }
+                        performUndo(item.id)
                       }}
                     >
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1 }}>
@@ -816,6 +804,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             initialFile={chatImportFile}
           />
         )}
+        <Snackbar
+          open={!!undoSnack}
+          autoHideDuration={2000}
+          onClose={() => setUndoSnack(null)}
+          message={undoSnack}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        />
       </div>
     </PendingProvider>
   )

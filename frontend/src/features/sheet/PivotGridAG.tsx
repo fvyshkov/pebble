@@ -950,7 +950,8 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       if (savedColumnStateRef.current) vs.columnState = savedColumnStateRef.current
       vs._user_id = currentUserId
       api.saveViewSettings(sheetId, vs).catch(() => {})
-      // Force reload by calling load
+      // Reset vsLoaded so load() re-reads the saved order
+      vsLoadedRef.current = false
       load()
     },
   }), [sheetId, currentUserId, pinned, colLevelToggles, load])
