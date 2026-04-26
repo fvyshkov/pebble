@@ -782,7 +782,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 setReorderColCount(newCol.length)
                 reorderDragIdx.current = null
                 setReorderDragOver(null)
-                gridRef.current?.applyAnalyticsOrder(newOrder)
+                gridRef.current?.applyAnalyticsOrder(newOrder, newCol.length)
               }
 
               const renderItem = (id: string, i: number, section: 'col' | 'row') => (

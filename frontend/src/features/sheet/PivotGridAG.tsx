@@ -149,7 +149,7 @@ export interface PivotGridAGHandle {
   /** Get current analytics order + names for reorder dialog. */
   getAnalyticsInfo: () => { order: string[]; names: Record<string, string>; colCount: number } | null
   /** Apply a new analytics display order and reload the grid. */
-  applyAnalyticsOrder: (newOrder: string[]) => void
+  applyAnalyticsOrder: (newOrder: string[], colCount?: number) => void
 }
 
 interface RowDatum {
@@ -356,6 +356,8 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   const [colLevelToggles, setColLevelToggles] = useState<Record<number, ColLevelState>>({})
   const [colLevelNames, setColLevelNames] = useState<{ level: number; label: string }[]>([])
   const colTreeRef = useRef<RecordNode[]>([])
+  // Extra column analytics leaf arrays (for multi-column cross-product)
+  const extraColLeafArraysRef = useRef<RecordNode[][]>([])
   const colLevelTogglesRef = useRef<Record<number, ColLevelState>>({})
   // colId → leafIds it sums. Used to flash Σ-columns whenever one of their
   // underlying leaf period cells changes.
@@ -417,6 +419,8 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
 
   // Ref to current analytics order + names (populated by load())
   const analyticsInfoRef = useRef<{ order: string[]; names: Record<string, string>; colCount: number } | null>(null)
+  // How many analytics are assigned to columns (rest are rows). Default 1.
+  const colCountRef = useRef(1)
 
   // Chart overlay + history dialog
   const [chartOverlay, setChartOverlay] = useState<{ type: string; labels: string[]; datasets: { label: string; data: number[] }[] } | null>(null)
@@ -537,6 +541,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   const colLeafIdsRef = useRef<string[]>([])
   const dbOrdRef = useRef<string[]>([])
   const colAIdRef = useRef<string>('')
+  const colAIdsRef = useRef<string[]>([])
   const pinnedRef = useRef<Record<string, string>>({})
   const analyticsRef = useRef<Record<string, Analytic>>({})
   /** For each row analytic, the single root record ID (if exactly one root with children exists). */
@@ -647,6 +652,9 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           if (vs?.columnState && Array.isArray(vs.columnState) && vs.columnState.length > 0) {
             savedColumnStateRef.current = vs.columnState
           }
+          if (typeof vs?.colCount === 'number' && vs.colCount >= 1) {
+            colCountRef.current = vs.colCount
+          }
           if (vs?.colLevelToggles && typeof vs.colLevelToggles === 'object') {
             // Migrate old formats → 2-state (hidden / end)
             const migrated: Record<number, ColLevelState> = {}
@@ -665,18 +673,58 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       // Populate analytics info for reorder dialog
       const aNames: Record<string, string> = {}
       for (const aid of curOrder) aNames[aid] = aMap[aid]?.name || aid.slice(0, 8)
-      // colCount: how many analytics are in columns (currently always 1)
-      const colCount = 1
+      // colCount: how many analytics are in columns (default 1, saved in view settings)
+      const colCount = colCountRef.current
       analyticsInfoRef.current = { order: curOrder, names: aNames, colCount }
 
-      const colAId = curOrder[0]
+      // Column analytics: first `colCount` in curOrder; the rest are rows.
+      const colAIds = curOrder.slice(0, colCount)
+      const colAId = colAIds[0] // primary column analytic (period hierarchy)
       colAIdRef.current = colAId
-      const rowAIds = curOrder.slice(1).filter(id => !effectivePinned[id])
+      colAIdsRef.current = colAIds
+      const rowAIds = curOrder.slice(colCount).filter(id => !effectivePinned[id])
 
       const colTree = rMap[colAId] || []
       const colLeaves = getLeaves(colTree)
-      colLeafIdsRef.current = colLeaves.map(l => l.record.id)
       colTreeRef.current = colTree
+
+      // Extra column analytics trees (for multi-column cross-product)
+      const extraColTrees = colAIds.slice(1).map(id => rMap[id] || [])
+      const extraColLeafArrays = extraColTrees.map(t => getLeaves(t))
+      extraColLeafArraysRef.current = extraColLeafArrays
+
+      // Build cross-product leaf tuples for multi-column.
+      // Each tuple: [{recId, label}, ...] — one entry per column analytic.
+      type ColTuple = { recId: string; label: string }[]
+      const buildCrossProduct = (primaryLeaf: RecordNode): ColTuple[] => {
+        if (extraColLeafArrays.length === 0) {
+          return [[{ recId: primaryLeaf.record.id, label: recordLabel(primaryLeaf) }]]
+        }
+        // Start with primary leaf, then cross with each extra analytic's leaves
+        let tuples: ColTuple[] = [[{ recId: primaryLeaf.record.id, label: recordLabel(primaryLeaf) }]]
+        for (const extraLeaves of extraColLeafArrays) {
+          const expanded: ColTuple[] = []
+          for (const tuple of tuples) {
+            for (const el of extraLeaves) {
+              expanded.push([...tuple, { recId: el.record.id, label: recordLabel(el) }])
+            }
+          }
+          tuples = expanded
+        }
+        return tuples
+      }
+
+      // Composite leaf key: join all column record IDs for field naming
+      const tupleKey = (tuple: ColTuple) => tuple.map(t => t.recId).join('__')
+
+      // Collect ALL leaf keys for colLeafIdsRef (used by applyCellUpdates)
+      const allLeafKeys: string[] = []
+      for (const primaryLeaf of colLeaves) {
+        for (const tuple of buildCrossProduct(primaryLeaf)) {
+          allLeafKeys.push(tupleKey(tuple))
+        }
+      }
+      colLeafIdsRef.current = allLeafKeys
 
       // Detect labels for each non-leaf column level (Годы, Кварталы, …).
       const detectedLevels: { level: number; label: string }[] = []
@@ -701,26 +749,68 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         colLevelTogglesRef.current = defaults
       }
 
-      // ── Column definitions (FLAT layout) ─────────────────────────────
-      // Leaves first, then sum columns for each level based on toggle state.
+      // ── Column definitions ───────────────────────────────────────────
       sumColLeavesRef.current = {}
 
+      // Build leaf columns for a primary leaf node. When colCount > 1,
+      // creates a ColGroupDef with nested children from extra column analytics.
+      const buildLeafCols = (primaryLeaf: RecordNode): (ColDef | ColGroupDef)[] => {
+        if (colCount <= 1) {
+          // Single column analytic — simple period column
+          return [makePeriodColDef(recordLabel(primaryLeaf), primaryLeaf.record.id)]
+        }
+        // Multi-column: nest extra analytics under this primary leaf
+        const buildNested = (extraIdx: number, parentTuple: ColTuple): (ColDef | ColGroupDef)[] => {
+          if (extraIdx >= extraColLeafArrays.length) {
+            // Terminal: data column keyed by full tuple
+            const key = tupleKey(parentTuple)
+            const lastLabel = parentTuple[parentTuple.length - 1].label
+            return [makePeriodColDef(lastLabel, key)]
+          }
+          const result: (ColDef | ColGroupDef)[] = []
+          for (const leaf of extraColLeafArrays[extraIdx]) {
+            const tuple = [...parentTuple, { recId: leaf.record.id, label: recordLabel(leaf) }]
+            const children = buildNested(extraIdx + 1, tuple)
+            if (children.length === 1 && !('children' in children[0])) {
+              // Single child — no need for group wrapper
+              result.push(children[0])
+            } else {
+              result.push({ headerName: recordLabel(leaf), children } as ColGroupDef)
+            }
+          }
+          return result
+        }
+        const baseTuple: ColTuple = [{ recId: primaryLeaf.record.id, label: recordLabel(primaryLeaf) }]
+        const children = buildNested(0, baseTuple)
+        return [{
+          headerName: recordLabel(primaryLeaf),
+          children,
+        } as ColGroupDef]
+      }
+
       // Recursive column builder: interleaves sum columns with their group's
-      // leaves so that e.g. "Σ2025" sits right before/after Jan–Dec 2025,
-      // NOT lumped together with Σ2026.
+      // leaves so that e.g. "Σ2025" sits right before/after Jan–Dec 2025.
       const buildColDefs = (nodes: RecordNode[], lvl: number): (ColDef | ColGroupDef)[] => {
         const result: (ColDef | ColGroupDef)[] = []
         for (const n of nodes) {
           if (n.children.length === 0) {
-            // Leaf → period column
-            result.push(makePeriodColDef(recordLabel(n), n.record.id))
+            // Leaf of primary column analytic
+            result.push(...buildLeafCols(n))
           } else {
             // Group node → recurse into children, optionally add sum column
             const childCols = buildColDefs(n.children, lvl + 1)
             const state = colLevelTogglesRef.current[lvl]
             if (state && state !== 'hidden') {
               const label = recordLabel(n)
-              const leafIds = getLeaves([n]).map(l => l.record.id)
+              // For sum columns in multi-column mode, collect all composite leaf keys
+              const primaryLeafIds = getLeaves([n]).map(l => l.record.id)
+              const leafIds = colCount <= 1
+                ? primaryLeafIds
+                : primaryLeafIds.flatMap(pid => {
+                    const pNode = colLeaves.find(l => l.record.id === pid)
+                    if (!pNode) return [pid]
+                    return buildCrossProduct(pNode).map(t => tupleKey(t))
+                  })
               const sumCol = makeSumColDef(label, leafIds, n.record.id)
               if (state === 'start') {
                 result.push(sumCol, ...childCols)
@@ -776,29 +866,33 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
               unit: node.data?.unit,
               format: node.data?.format,
             }
-            // Populate period cell values. For leaves we pull from cellMap;
-            // for group rows the value is recomputed in a bottom-up pass
-            // below (matches legacy sum_children default).
-            for (const leaf of colLeaves) {
-              const parts: string[] = []
-              for (const a of dbOrd) {
-                if (a === colAId) parts.push(leaf.record.id)
-                else if (effectivePinned[a]) parts.push(effectivePinned[a])
-                else if (recIds[a]) parts.push(recIds[a])
-                else if (rootMap[a]) parts.push(rootMap[a])
-              }
-              if (parts.length >= 2) {
-                const lookup = lookupCell(parts)
-                row[`p_${leaf.record.id}`] = lookup.value
-                row[`__coord_${leaf.record.id}`] = parts.join('|')
-                row[`__parts_${leaf.record.id}`] = parts
-                // 1. Full-key rule from backend (exact match)
-                // 2. Truncated-key rule from lookupCell (when cell found via fallback)
-                // 3. Default: sum_children for groups, manual for terminals
-                const fullRule = cellRuleRef.current[parts.join('|')]
-                row[`__rule_${leaf.record.id}`] = fullRule
-                  ?? (lookup.key !== parts.join('|') && lookup.value !== '' ? lookup.rule : undefined)
-                  ?? (isGroup ? 'sum_children' : 'manual')
+            // Populate cell values for each column leaf (cross-product when colCount>1).
+            for (const primaryLeaf of colLeaves) {
+              const tuples = buildCrossProduct(primaryLeaf)
+              for (const tuple of tuples) {
+                const leafKey = tupleKey(tuple)
+                const parts: string[] = []
+                // Build coord_key: one entry per analytic in dbOrd
+                const colRecMap: Record<string, string> = {}
+                for (let ci = 0; ci < colAIds.length; ci++) {
+                  colRecMap[colAIds[ci]] = tuple[ci].recId
+                }
+                for (const a of dbOrd) {
+                  if (colRecMap[a]) parts.push(colRecMap[a])
+                  else if (effectivePinned[a]) parts.push(effectivePinned[a])
+                  else if (recIds[a]) parts.push(recIds[a])
+                  else if (rootMap[a]) parts.push(rootMap[a])
+                }
+                if (parts.length >= 2) {
+                  const lookup = lookupCell(parts)
+                  row[`p_${leafKey}`] = lookup.value
+                  row[`__coord_${leafKey}`] = parts.join('|')
+                  row[`__parts_${leafKey}`] = parts
+                  const fullRule = cellRuleRef.current[parts.join('|')]
+                  row[`__rule_${leafKey}`] = fullRule
+                    ?? (lookup.key !== parts.join('|') && lookup.value !== '' ? lookup.rule : undefined)
+                    ?? (isGroup ? 'sum_children' : 'manual')
+                }
               }
             }
             rows.push(row)
@@ -824,19 +918,24 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           isLeaf: true,
           recordIds: { ...effectivePinned },
         }
-        for (const leaf of colLeaves) {
-          const parts: string[] = []
-          for (const a of dbOrd) {
-            if (a === colAId) parts.push(leaf.record.id)
-            else if (effectivePinned[a]) parts.push(effectivePinned[a])
-          }
-          if (parts.length >= 2) {
-            const lookup = lookupCell(parts)
-            row[`p_${leaf.record.id}`] = lookup.value
-            row[`__coord_${leaf.record.id}`] = parts.join('|')
-            row[`__parts_${leaf.record.id}`] = parts
-            row[`__rule_${leaf.record.id}`] =
-              cellRuleRef.current[parts.join('|')] ?? 'manual'
+        for (const primaryLeaf of colLeaves) {
+          for (const tuple of buildCrossProduct(primaryLeaf)) {
+            const leafKey = tupleKey(tuple)
+            const parts: string[] = []
+            const colRecMap: Record<string, string> = {}
+            for (let ci = 0; ci < colAIds.length; ci++) colRecMap[colAIds[ci]] = tuple[ci].recId
+            for (const a of dbOrd) {
+              if (colRecMap[a]) parts.push(colRecMap[a])
+              else if (effectivePinned[a]) parts.push(effectivePinned[a])
+            }
+            if (parts.length >= 2) {
+              const lookup = lookupCell(parts)
+              row[`p_${leafKey}`] = lookup.value
+              row[`__coord_${leafKey}`] = parts.join('|')
+              row[`__parts_${leafKey}`] = parts
+              row[`__rule_${leafKey}`] =
+                cellRuleRef.current[parts.join('|')] ?? 'manual'
+            }
           }
         }
         rows.push(row)
@@ -869,12 +968,10 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       }
       for (let i = 0; i < rows.length; i++) {
         if (rows[i].isLeaf) continue
-        for (const leaf of colLeaves) {
-          const field = `p_${leaf.record.id}`
-          const rule = rows[i][`__rule_${leaf.record.id}`]
+        for (const leafKey of allLeafKeys) {
+          const field = `p_${leafKey}`
+          const rule = rows[i][`__rule_${leafKey}`]
           if (rule === 'empty') { rows[i][field] = ''; continue }
-          // Only compute if current value is empty AND rule is sum_children
-          // (explicit formula/manual rules keep their stored value).
           if ((rows[i][field] === '' || rows[i][field] == null) && rule === 'sum_children') {
             const s = sumFor(i, field)
             if (s != null) rows[i][field] = String(s)
@@ -946,9 +1043,10 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     getAnalyticsInfo() {
       return analyticsInfoRef.current
     },
-    applyAnalyticsOrder(newOrder: string[]) {
+    applyAnalyticsOrder(newOrder: string[], newColCount?: number) {
+      if (newColCount != null && newColCount >= 1) colCountRef.current = newColCount
       // Save to view settings and reload
-      const vs: any = { order: newOrder, pinned, colLevelToggles }
+      const vs: any = { order: newOrder, pinned, colLevelToggles, colCount: colCountRef.current }
       if (savedColumnStateRef.current) vs.columnState = savedColumnStateRef.current
       vs._user_id = currentUserId
       api.saveViewSettings(sheetId, vs).catch(() => {})
@@ -990,17 +1088,61 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     }
     // Reset sum-col leaf map — toggle rebuild re-registers them below.
     sumColLeavesRef.current = {}
+    const cc = colCountRef.current
+    const extraLeafArrays = extraColLeafArraysRef.current
+    const allColLeaves = getLeaves(colTree)
+
+    // Build leaf columns (same logic as in load)
+    type RColTuple = { recId: string; label: string }[]
+    const rBuildCrossProduct = (primaryLeaf: RecordNode): RColTuple[] => {
+      if (extraLeafArrays.length === 0) return [[{ recId: primaryLeaf.record.id, label: recordLabel(primaryLeaf) }]]
+      let tuples: RColTuple[] = [[{ recId: primaryLeaf.record.id, label: recordLabel(primaryLeaf) }]]
+      for (const el of extraLeafArrays) {
+        const expanded: RColTuple[] = []
+        for (const t of tuples) for (const l of el) expanded.push([...t, { recId: l.record.id, label: recordLabel(l) }])
+        tuples = expanded
+      }
+      return tuples
+    }
+    const rTupleKey = (t: RColTuple) => t.map(x => x.recId).join('__')
+
+    const rebuildLeafCols = (primaryLeaf: RecordNode): (ColDef | ColGroupDef)[] => {
+      if (cc <= 1) return [makePeriodColDef(recordLabel(primaryLeaf), primaryLeaf.record.id)]
+      const buildNested = (extraIdx: number, parentTuple: RColTuple): (ColDef | ColGroupDef)[] => {
+        if (extraIdx >= extraLeafArrays.length) {
+          return [makePeriodColDef(parentTuple[parentTuple.length - 1].label, rTupleKey(parentTuple))]
+        }
+        const result: (ColDef | ColGroupDef)[] = []
+        for (const leaf of extraLeafArrays[extraIdx]) {
+          const tuple = [...parentTuple, { recId: leaf.record.id, label: recordLabel(leaf) }]
+          const children = buildNested(extraIdx + 1, tuple)
+          if (children.length === 1 && !('children' in children[0])) result.push(children[0])
+          else result.push({ headerName: recordLabel(leaf), children } as ColGroupDef)
+        }
+        return result
+      }
+      const baseTuple: RColTuple = [{ recId: primaryLeaf.record.id, label: recordLabel(primaryLeaf) }]
+      return [{ headerName: recordLabel(primaryLeaf), children: buildNested(0, baseTuple) } as ColGroupDef]
+    }
+
     const rebuild = (nodes: RecordNode[], lvl: number): (ColDef | ColGroupDef)[] => {
       const result: (ColDef | ColGroupDef)[] = []
       for (const n of nodes) {
         if (n.children.length === 0) {
-          result.push(makePeriodColDef(recordLabel(n), n.record.id))
+          result.push(...rebuildLeafCols(n))
         } else {
           const childCols = rebuild(n.children, lvl + 1)
           const state = colLevelToggles[lvl]
           if (state && state !== 'hidden') {
             const label = recordLabel(n)
-            const leafIds = getLeaves([n]).map(l => l.record.id)
+            const primaryLeafIds = getLeaves([n]).map(l => l.record.id)
+            const leafIds = cc <= 1
+              ? primaryLeafIds
+              : primaryLeafIds.flatMap(pid => {
+                  const pNode = allColLeaves.find(l => l.record.id === pid)
+                  if (!pNode) return [pid]
+                  return rBuildCrossProduct(pNode).map(t => rTupleKey(t))
+                })
             const sumCol = makeSumColDef(label, leafIds, n.record.id)
             result.push(...childCols, sumCol)
           } else {
