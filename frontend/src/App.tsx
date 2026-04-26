@@ -286,9 +286,10 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   // ── Analytics order dialog ──
   const [reorderOpen, setReorderOpen] = useState(false)
   const [reorderItems, setReorderItems] = useState<string[]>([])
+  const [reorderColCount, setReorderColCount] = useState(1)
   const [reorderNames, setReorderNames] = useState<Record<string, string>>({})
-  const reorderDragIdx = useRef<number | null>(null)
-  const [reorderDragOver, setReorderDragOver] = useState<number | null>(null)
+  const reorderDragIdx = useRef<{ section: 'col' | 'row'; idx: number } | null>(null)
+  const [reorderDragOver, setReorderDragOver] = useState<{ section: 'col' | 'row'; idx: number } | null>(null)
 
   // AG Grid is the only grid mode now.
   const [chartConfig, setChartConfig] = useState<ChartConfig | null>(null)
@@ -550,12 +551,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
 
           {/* Analytics order button */}
           {isSheetSelected && (
-            <Tooltip title={t('app.analyticsOrder', 'Порядок аналитик')}>
+            <Tooltip title={t('app.analyticsOrder')}>
               <IconButton size="small" onClick={() => {
                 const info = gridRef.current?.getAnalyticsInfo()
                 if (info) {
                   setReorderItems(info.order)
                   setReorderNames(info.names)
+                  setReorderColCount(info.colCount)
                   setReorderOpen(true)
                 }
               }}>
@@ -567,14 +569,14 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
           {/* Undo button + dropdown */}
           {isSheetSelected && (
             <>
-              <Tooltip title={t('app.undo', 'Отменить')}>
+              <Tooltip title={t('app.undo')}>
                 <span>
                   <IconButton size="small" disabled={!hasUndo} data-testid="undo-btn" onClick={() => performUndo()}>
                     <UndoOutlined fontSize="small" />
                   </IconButton>
                 </span>
               </Tooltip>
-              <Tooltip title={t('app.undoHistory', 'История изменений')}>
+              <Tooltip title={t('app.undoHistory')}>
                 <span>
                   <IconButton size="small" disabled={!hasUndo} data-testid="undo-dropdown-btn" onClick={(e) => {
                     const anchor = e.currentTarget
@@ -599,7 +601,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               >
                 <Box sx={{ maxHeight: 320, overflowY: 'auto', minWidth: 300 }}>
                   {undoItems.length === 0 && (
-                    <Typography sx={{ p: 2, fontSize: 12, color: '#999' }}>{t('app.noHistory', 'Нет истории')}</Typography>
+                    <Typography sx={{ p: 2, fontSize: 12, color: '#999' }}>{t('app.noHistory')}</Typography>
                   )}
                   {undoItems.map((item, i) => (
                     <Box
@@ -749,36 +751,82 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
 
         <UsersDialog open={showUsers} onClose={() => setShowUsers(false)} />
 
-        {/* Analytics reorder dialog */}
+        {/* Analytics reorder dialog — two sections: Columns / Rows */}
         <Dialog open={reorderOpen} onClose={() => setReorderOpen(false)} maxWidth="xs" fullWidth>
-          <DialogTitle>{t('app.analyticsOrder', 'Порядок аналитик')}</DialogTitle>
+          <DialogTitle>{t('app.analyticsOrder')}</DialogTitle>
           <DialogContent>
-            <Typography variant="caption" color="textSecondary" sx={{ mb: 1, display: 'block' }}>
-              {t('app.analyticsOrderHint', 'Первая = столбцы, остальные = строки (вложенность по порядку)')}
-            </Typography>
-            <List dense>
-              {reorderItems.map((id, i) => (
+            {/* Column analytics section */}
+            {(() => {
+              const colItems = reorderItems.slice(0, reorderColCount)
+              const rowItems = reorderItems.slice(reorderColCount)
+
+              const handleDrop = (targetSection: 'col' | 'row', targetIdx: number) => {
+                const from = reorderDragIdx.current
+                if (!from) return
+                const fromList = from.section === 'col' ? colItems : rowItems
+                const draggedId = fromList[from.idx]
+                if (!draggedId) return
+                // Build new order
+                const newCol = [...colItems]
+                const newRow = [...rowItems]
+                // Remove from source
+                if (from.section === 'col') newCol.splice(from.idx, 1)
+                else newRow.splice(from.idx, 1)
+                // Insert into target
+                if (targetSection === 'col') newCol.splice(targetIdx, 0, draggedId)
+                else newRow.splice(targetIdx, 0, draggedId)
+                // Must have at least 1 column analytic
+                if (newCol.length === 0) return
+                const newOrder = [...newCol, ...newRow]
+                setReorderItems(newOrder)
+                setReorderColCount(newCol.length)
+                reorderDragIdx.current = null
+                setReorderDragOver(null)
+                gridRef.current?.applyAnalyticsOrder(newOrder)
+              }
+
+              const renderItem = (id: string, i: number, section: 'col' | 'row') => (
                 <ListItem key={id} draggable
-                  onDragStart={() => { reorderDragIdx.current = i }}
-                  onDragOver={e => { e.preventDefault(); setReorderDragOver(i) }}
-                  onDrop={() => {
-                    const from = reorderDragIdx.current
-                    if (from !== null && from !== i) {
-                      const n = [...reorderItems]
-                      const [m] = n.splice(from, 1)
-                      n.splice(i, 0, m)
-                      setReorderItems(n)
-                      gridRef.current?.applyAnalyticsOrder(n)
-                    }
-                    reorderDragIdx.current = null; setReorderDragOver(null)
-                  }}
+                  onDragStart={() => { reorderDragIdx.current = { section, idx: i } }}
+                  onDragOver={e => { e.preventDefault(); setReorderDragOver({ section, idx: i }) }}
+                  onDrop={() => handleDrop(section, i)}
                   onDragEnd={() => { reorderDragIdx.current = null; setReorderDragOver(null) }}
-                  sx={{ cursor: 'grab', borderTop: reorderDragOver === i ? '2px solid #1976d2' : '2px solid transparent' }}>
+                  sx={{
+                    cursor: 'grab', py: 0.5,
+                    borderTop: reorderDragOver?.section === section && reorderDragOver?.idx === i ? '2px solid #1976d2' : '2px solid transparent',
+                  }}>
                   <ListItemIcon sx={{ minWidth: 28 }}><DragIndicatorOutlined sx={{ fontSize: 16, color: '#bbb' }} /></ListItemIcon>
-                  <ListItemText primary={`${i + 1}. ${reorderNames[id] || id}`} />
+                  <ListItemText primary={reorderNames[id] || id} primaryTypographyProps={{ fontSize: 13 }} />
                 </ListItem>
-              ))}
-            </List>
+              )
+
+              return (
+                <>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: '#1976d2', display: 'block', mt: 1, mb: 0.5 }}>
+                    {t('app.columns')}
+                  </Typography>
+                  <Box sx={{ bgcolor: '#f5f8ff', borderRadius: 1, minHeight: 36, mb: 1 }}
+                    onDragOver={e => { e.preventDefault(); if (colItems.length === 0) setReorderDragOver({ section: 'col', idx: 0 }) }}
+                    onDrop={() => { if (colItems.length === 0) handleDrop('col', 0) }}
+                  >
+                    <List dense disablePadding>
+                      {colItems.map((id, i) => renderItem(id, i, 'col'))}
+                    </List>
+                  </Box>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: '#666', display: 'block', mb: 0.5 }}>
+                    {t('app.rows')}
+                  </Typography>
+                  <Box sx={{ bgcolor: '#fafafa', borderRadius: 1, minHeight: 36 }}
+                    onDragOver={e => { e.preventDefault(); if (rowItems.length === 0) setReorderDragOver({ section: 'row', idx: 0 }) }}
+                    onDrop={() => { if (rowItems.length === 0) handleDrop('row', 0) }}
+                  >
+                    <List dense disablePadding>
+                      {rowItems.map((id, i) => renderItem(id, i, 'row'))}
+                    </List>
+                  </Box>
+                </>
+              )
+            })()}
           </DialogContent>
         </Dialog>
 

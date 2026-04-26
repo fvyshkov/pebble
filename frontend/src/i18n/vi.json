@@ -26,7 +26,14 @@
     "cancel": "Hủy",
     "deleteAll": "Xóa tất cả",
     "working": "đang xử lý...",
-    "presentation": "Trình bày"
+    "presentation": "Trình bày",
+    "analyticsOrder": "Thứ tự phân tích",
+    "columns": "Cột",
+    "rows": "Hàng",
+    "undo": "Hoàn tác",
+    "undoHistory": "Lịch sử thay đổi",
+    "noHistory": "Không có lịch sử",
+    "undoMessage": "Đã hoàn tác: {{n}}"
   },
   "import": {
     "title": "Nhập mô hình từ Excel",

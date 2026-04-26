@@ -26,7 +26,14 @@
     "cancel": "Cancel",
     "deleteAll": "Delete all",
     "working": "working...",
-    "presentation": "Presentation"
+    "presentation": "Presentation",
+    "analyticsOrder": "Analytics order",
+    "columns": "Columns",
+    "rows": "Rows",
+    "undo": "Undo",
+    "undoHistory": "Change history",
+    "noHistory": "No history",
+    "undoMessage": "Undone: {{n}}"
   },
   "import": {
     "title": "Import model from Excel",

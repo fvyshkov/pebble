@@ -199,7 +199,7 @@ def _wait_for_ag_grid(page: Page, timeout: int = 15000):
 
 def test_01_login_page_shown(page: Page):
     """Login page appears for unauthenticated user."""
-    page.goto(BASE)
+    page.goto(BASE, wait_until="networkidle")
     page.evaluate("localStorage.clear()")
     page.reload()
     page.wait_for_load_state("networkidle")

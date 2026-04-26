@@ -147,7 +147,7 @@ export interface PivotGridAGHandle {
   /** Apply point cell updates from undo — allCells is a map of coord_key → value. */
   applyCellUpdates: (allCells: Record<string, string | null>) => void
   /** Get current analytics order + names for reorder dialog. */
-  getAnalyticsInfo: () => { order: string[]; names: Record<string, string> } | null
+  getAnalyticsInfo: () => { order: string[]; names: Record<string, string>; colCount: number } | null
   /** Apply a new analytics display order and reload the grid. */
   applyAnalyticsOrder: (newOrder: string[]) => void
 }
@@ -416,7 +416,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   useEffect(() => { refreshUndoState() }, [refreshUndoState])
 
   // Ref to current analytics order + names (populated by load())
-  const analyticsInfoRef = useRef<{ order: string[]; names: Record<string, string> } | null>(null)
+  const analyticsInfoRef = useRef<{ order: string[]; names: Record<string, string>; colCount: number } | null>(null)
 
   // Chart overlay + history dialog
   const [chartOverlay, setChartOverlay] = useState<{ type: string; labels: string[]; datasets: { label: string; data: number[] }[] } | null>(null)
@@ -665,7 +665,9 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       // Populate analytics info for reorder dialog
       const aNames: Record<string, string> = {}
       for (const aid of curOrder) aNames[aid] = aMap[aid]?.name || aid.slice(0, 8)
-      analyticsInfoRef.current = { order: curOrder, names: aNames }
+      // colCount: how many analytics are in columns (currently always 1)
+      const colCount = 1
+      analyticsInfoRef.current = { order: curOrder, names: aNames, colCount }
 
       const colAId = curOrder[0]
       colAIdRef.current = colAId
