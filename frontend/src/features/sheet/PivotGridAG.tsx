@@ -8,8 +8,10 @@
  * and `treeData={true}`.
  */
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
-import { Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, LinearProgress, Snackbar, ToggleButton, ToggleButtonGroup, Tooltip, Typography, Button as MUIButton, IconButton } from '@mui/material'
+import { Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, LinearProgress, Popover, Snackbar, Tooltip, Typography, Button as MUIButton, IconButton } from '@mui/material'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
+import UndoOutlined from '@mui/icons-material/UndoOutlined'
+import ArrowDropDownOutlined from '@mui/icons-material/ArrowDropDownOutlined'
 import * as am5 from '@amcharts/amcharts5'
 import * as am5xy from '@amcharts/amcharts5/xy'
 import * as am5percent from '@amcharts/amcharts5/percent'
@@ -396,6 +398,51 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   const mainAnalyticIdRef = useRef<string | null>(null)
   const mainAnalyticIdxRef = useRef<number>(-1)
 
+  // Undo toolbar state
+  const [undoAnchor, setUndoAnchor] = useState<HTMLElement | null>(null)
+  const [undoItems, setUndoItems] = useState<any[]>([])
+  const [hasUndo, setHasUndo] = useState(false)
+  const [undoHoverIdx, setUndoHoverIdx] = useState<number | null>(null)
+  // loadRef holds reference to the load() function (declared later via useCallback)
+  // so undo handlers can trigger a full grid reload.
+  const loadRef = useRef<() => Promise<void>>(() => Promise.resolve())
+
+  const refreshUndoState = useCallback(() => {
+    api.getModelHistory(modelId, 1).then(h => setHasUndo(h.length > 0)).catch(() => {})
+  }, [modelId])
+
+  // Check undo availability on mount
+  useEffect(() => { refreshUndoState() }, [refreshUndoState])
+
+  const handleUndo = useCallback(async () => {
+    try {
+      const hist = await api.getModelHistory(modelId, 1)
+      if (hist.length > 0) {
+        await api.undoChanges(modelId, hist[0].id)
+        await loadRef.current()
+        refreshUndoState()
+      }
+    } catch { /* ignore */ }
+  }, [modelId, refreshUndoState])
+
+  const openUndoDropdown = useCallback(async (el: HTMLElement) => {
+    try {
+      const items = await api.getModelHistory(modelId, 20)
+      setUndoItems(items)
+      setUndoHoverIdx(null)
+      setUndoAnchor(el)
+    } catch { /* ignore */ }
+  }, [modelId])
+
+  const handleUndoTo = useCallback(async (idx: number) => {
+    setUndoAnchor(null)
+    try {
+      await api.undoChanges(modelId, undoItems[idx].id)
+      await loadRef.current()
+      refreshUndoState()
+    } catch { /* ignore */ }
+  }, [modelId, undoItems, refreshUndoState])
+
   // Chart overlay + history dialog
   const [chartOverlay, setChartOverlay] = useState<{ type: string; labels: string[]; datasets: { label: string; data: number[] }[] } | null>(null)
   const chartDivRef = useRef<HTMLDivElement>(null)
@@ -626,10 +673,11 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             savedColumnStateRef.current = vs.columnState
           }
           if (vs?.colLevelToggles && typeof vs.colLevelToggles === 'object') {
-            // Migrate old boolean format → new 3-state format
+            // Migrate old formats → 2-state (hidden / end)
             const migrated: Record<number, ColLevelState> = {}
             for (const [k, v] of Object.entries(vs.colLevelToggles)) {
               if (typeof v === 'boolean') migrated[Number(k)] = v ? 'end' : 'hidden'
+              else if (v === 'start') migrated[Number(k)] = 'end'
               else if (typeof v === 'string') migrated[Number(k)] = v as ColLevelState
             }
             setColLevelToggles(migrated)
@@ -864,6 +912,8 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     }
   }, [sheetId, currentUserId, lookupCell, pinned, recordLabel, t])
 
+  // Keep loadRef in sync so undo handlers can trigger reload
+  loadRef.current = load
   useEffect(() => { load() }, [load])
 
   // In formulas mode, resolve indicator-rule formulas for all known coord keys
@@ -890,6 +940,12 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   useEffect(() => {
     const colTree = colTreeRef.current
     if (!colTree.length) return
+    // Snapshot current column state BEFORE rebuilding, so we can merge it
+    // with the new column set (preserving widths/order for surviving columns).
+    const grid = gridApiRef.current
+    if (grid) {
+      savedColumnStateRef.current = grid.getColumnState()
+    }
     // Reset sum-col leaf map — toggle rebuild re-registers them below.
     sumColLeavesRef.current = {}
     const rebuild = (nodes: RecordNode[], lvl: number): (ColDef | ColGroupDef)[] => {
@@ -904,11 +960,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             const label = recordLabel(n)
             const leafIds = getLeaves([n]).map(l => l.record.id)
             const sumCol = makeSumColDef(label, leafIds, n.record.id)
-            if (state === 'start') {
-              result.push(sumCol, ...childCols)
-            } else {
-              result.push(...childCols, sumCol)
-            }
+            result.push(...childCols, sumCol)
           } else {
             result.push(...childCols)
           }
@@ -1500,27 +1552,39 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     ;(window as unknown as { __pebbleGridApi?: GridApi }).__pebbleGridApi = e.api
   }, [])
 
-  // Apply saved column state every time columnDefs are (re)built. If no
-  // saved state exists, auto-size columns to fit headers.
+  // Apply saved column state every time columnDefs are (re)built.
+  // Smart merge: only apply state for colIds that still exist in the new
+  // column set; new columns (e.g. sum columns just enabled) keep their
+  // natural position from columnDefs order.
   useEffect(() => {
     if (columnDefs.length === 0) return
     const grid = gridApiRef.current
     if (!grid) return
-    // Defer to next frame so AG Grid has registered the new columns.
     const raf = requestAnimationFrame(() => {
       const g = gridApiRef.current
       if (!g) return
       if (savedColumnStateRef.current && savedColumnStateRef.current.length > 0) {
-        g.applyColumnState({
-          state: savedColumnStateRef.current,
-          applyOrder: true,
-        })
+        // Collect all colIds present in the new columnDefs
+        const collectIds = (defs: (ColDef | ColGroupDef)[]): Set<string> => {
+          const ids = new Set<string>()
+          for (const d of defs) {
+            const cd = d as ColDef
+            if (cd.colId) ids.add(cd.colId)
+            else if (cd.field) ids.add(cd.field)
+            const gd = d as ColGroupDef
+            if (gd.children) for (const id of collectIds(gd.children)) ids.add(id)
+          }
+          return ids
+        }
+        const validIds = collectIds(columnDefs)
+        // Also include the auto-group column (ag-Grid-AutoColumn)
+        validIds.add('ag-Grid-AutoColumn')
+        // Filter saved state to only matching columns
+        const filtered = savedColumnStateRef.current.filter((cs: any) => validIds.has(cs.colId))
+        if (filtered.length > 0) {
+          g.applyColumnState({ state: filtered, applyOrder: true })
+        }
       }
-      // Note: we DON'T call autoSizeColumns here. AG Grid's header-measurement
-      // has been unreliable for long localised labels (e.g. "Декабрь 2026"
-      // getting clipped to ~138px). We instead rely on the generous default
-      // `width` in makePeriodColDef so headers always fit out of the box;
-      // users can shrink via drag, which persists via column-state.
     })
     return () => cancelAnimationFrame(raf)
   }, [columnDefs])
@@ -1863,12 +1927,13 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       // Server recomputed formulas synchronously — refetch + flash so any
       // derived (formula/sum_children) cells that changed light up green.
       refreshAndFlashParents()
+      refreshUndoState()
     }).catch(err => {
       setError(`${t('grid.saveFailed')}: ${err?.message || err}`)
     }).finally(() => {
       setRecalcRunning(false)
     })
-  }, [sheetId, currentUserId, recomputeParentsForField, refreshAndFlashParents, t])
+  }, [sheetId, currentUserId, recomputeParentsForField, refreshAndFlashParents, refreshUndoState, t])
 
   // ── Context menu: chart + history ───────────────────────────────────
   const buildChartFromSelection = useCallback((chartType: string) => {
@@ -2057,42 +2122,94 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             />
           )
         })}
-        {/* Column-level aggregate toggles (Годы / Кварталы).
-            3-state switch: hidden / start (before periods) / end (after periods). */}
+        {/* Column-level aggregate toggles (Годы / Кварталы). Simple on/off. */}
         {colLevelNames.length > 0 && (
-          <Box sx={{ display: 'flex', gap: 1, ml: pinnedEntries.length ? 1 : 0, alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', gap: 0.5, ml: pinnedEntries.length ? 1 : 0, alignItems: 'center' }}>
             {colLevelNames.map(({ level, label }) => {
-              const state = colLevelToggles[level] || 'hidden'
+              const on = (colLevelToggles[level] || 'hidden') !== 'hidden'
               return (
-                <Box key={`lvl-${level}`} sx={{ display: 'flex', alignItems: 'center', gap: 0.3 }}>
-                  <Typography sx={{ fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>
-                    {`\u03A3 ${label}`}
-                  </Typography>
-                  <ToggleButtonGroup
-                    size="small"
-                    exclusive
-                    value={state}
-                    onChange={(_e, val) => {
-                      if (val !== null) setColLevelToggles(prev => ({ ...prev, [level]: val as ColLevelState }))
-                    }}
-                    data-testid={`col-level-toggle-${level}`}
-                    sx={{ height: 22 }}
-                  >
-                    <ToggleButton value="hidden" sx={{ px: 0.7, py: 0, fontSize: 10, textTransform: 'none' }}>
-                      {t('grid.off', 'Выкл')}
-                    </ToggleButton>
-                    <ToggleButton value="start" sx={{ px: 0.7, py: 0, fontSize: 10, textTransform: 'none' }}>
-                      {'\u25C0'}
-                    </ToggleButton>
-                    <ToggleButton value="end" sx={{ px: 0.7, py: 0, fontSize: 10, textTransform: 'none' }}>
-                      {'\u25B6'}
-                    </ToggleButton>
-                  </ToggleButtonGroup>
-                </Box>
+                <Chip
+                  key={`lvl-${level}`}
+                  size="small"
+                  label={`\u03A3 ${label}`}
+                  variant={on ? 'filled' : 'outlined'}
+                  color={on ? 'primary' : 'default'}
+                  data-testid={`col-level-toggle-${level}`}
+                  onClick={() => {
+                    const next: ColLevelState = on ? 'hidden' : 'end'
+                    setColLevelToggles(prev => ({ ...prev, [level]: next }))
+                    // When turning on, unhide any sum columns that were hidden in saved column state
+                    if (next === 'end' && savedColumnStateRef.current) {
+                      const patched = savedColumnStateRef.current.map((cs: any) =>
+                        cs.colId?.startsWith('sum__') && cs.hide ? { ...cs, hide: false } : cs
+                      )
+                      savedColumnStateRef.current = patched
+                    }
+                  }}
+                  sx={{ fontSize: 11, height: 24 }}
+                />
               )
             })}
           </Box>
         )}
+        {/* Spacer to push undo to the right */}
+        <Box sx={{ flex: 1 }} />
+        {/* Undo button + dropdown */}
+        <Box sx={{ display: 'flex', alignItems: 'center', ml: 1 }}>
+          <Tooltip title={t('grid.undo', 'Отменить')}>
+            <span>
+              <IconButton size="small" disabled={!hasUndo} onClick={handleUndo} data-testid="undo-btn">
+                <UndoOutlined sx={{ fontSize: 18 }} />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title={t('grid.undoHistory', 'История изменений')}>
+            <span>
+              <IconButton size="small" disabled={!hasUndo} onClick={e => openUndoDropdown(e.currentTarget)} data-testid="undo-dropdown-btn">
+                <ArrowDropDownOutlined sx={{ fontSize: 18 }} />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Popover
+            open={!!undoAnchor}
+            anchorEl={undoAnchor}
+            onClose={() => setUndoAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+          >
+            <Box sx={{ maxHeight: 320, overflowY: 'auto', minWidth: 280 }}>
+              {undoItems.length === 0 && (
+                <Typography sx={{ p: 2, fontSize: 12, color: '#999' }}>{t('grid.noHistory', 'Нет истории')}</Typography>
+              )}
+              {undoItems.map((item, i) => (
+                <Box
+                  key={item.id}
+                  sx={{
+                    px: 1.5, py: 0.7, cursor: 'pointer', fontSize: 12, borderBottom: '1px solid #f0f0f0',
+                    bgcolor: undoHoverIdx !== null && i <= undoHoverIdx ? '#e3f2fd' : 'transparent',
+                    '&:hover': { bgcolor: '#e3f2fd' },
+                  }}
+                  onMouseEnter={() => setUndoHoverIdx(i)}
+                  onMouseLeave={() => setUndoHoverIdx(null)}
+                  onClick={() => handleUndoTo(i)}
+                >
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1 }}>
+                    <Typography sx={{ fontSize: 12, fontWeight: 500 }}>
+                      {item.coord_key?.split('|').pop() || '?'}
+                    </Typography>
+                    <Typography sx={{ fontSize: 11, color: '#999', whiteSpace: 'nowrap' }}>
+                      {item.created_at?.slice(11, 16) || ''}
+                    </Typography>
+                  </Box>
+                  <Typography sx={{ fontSize: 11, color: '#666' }}>
+                    {item.old_value ?? '∅'} → {item.new_value ?? '∅'}
+                    {item.username ? ` · ${item.username}` : ''}
+                  </Typography>
+                </Box>
+              ))}
+            </Box>
+          </Popover>
+        </Box>
       </Box>
       <Box sx={{ flex: 1, minHeight: 0 }} ref={gridContainerRef}>
         <AgGridReact
@@ -2119,8 +2236,6 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
           enterNavigatesVertically
           enterNavigatesVerticallyAfterEdit
           cellSelection={{ handle: { mode: 'fill' } }}
-          undoRedoCellEditing
-          undoRedoCellEditingLimit={50}
           suppressRowHoverHighlight
           rowSelection={undefined}
           onCellSelectionChanged={updateSelectionStats}
