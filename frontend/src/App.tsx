@@ -389,17 +389,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
         if (!modelId) return
         ev.preventDefault()
         try {
-          const hist = await api.getModelHistory(modelId, 1)
-          if (hist.length > 0) {
-            const result = await api.undoChanges(modelId, hist[0].id)
-            if (result.all_cells && gridRef.current) {
-              gridRef.current.applyCellUpdates(result.all_cells)
-            } else {
-              setRefreshKey(k => k + 1)
-            }
-            // Refresh undo state
-            api.getModelHistory(modelId, 1).then(h => setHasUndo(h.length > 0)).catch(() => {})
+          const result = await api.undoChanges(modelId)
+          if (result.all_cells && gridRef.current) {
+            gridRef.current.applyCellUpdates(result.all_cells)
+          } else if (!result.error) {
+            setRefreshKey(k => k + 1)
           }
+          setHasUndo(result.has_more ?? false)
         } catch { /* ignore */ }
       }
     }
@@ -567,16 +563,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                     const modelId = selection?.modelId
                     if (!modelId) return
                     try {
-                      const hist = await api.getModelHistory(modelId, 1)
-                      if (hist.length > 0) {
-                        const result = await api.undoChanges(modelId, hist[0].id)
-                        if (result.all_cells && gridRef.current) {
-                          gridRef.current.applyCellUpdates(result.all_cells)
-                        } else {
-                          setRefreshKey(k => k + 1)
-                        }
-                        api.getModelHistory(modelId, 1).then(h => setHasUndo(h.length > 0)).catch(() => {})
+                      const result = await api.undoChanges(modelId)
+                      if (result.all_cells && gridRef.current) {
+                        gridRef.current.applyCellUpdates(result.all_cells)
+                      } else if (!result.error) {
+                        setRefreshKey(k => k + 1)
                       }
+                      setHasUndo(result.has_more ?? false)
                     } catch { /* ignore */ }
                   }}>
                     <UndoOutlined fontSize="small" />
@@ -585,15 +578,15 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               </Tooltip>
               <Tooltip title={t('app.undoHistory', 'История изменений')}>
                 <span>
-                  <IconButton size="small" disabled={!hasUndo} data-testid="undo-dropdown-btn" onClick={async (e) => {
+                  <IconButton size="small" disabled={!hasUndo} data-testid="undo-dropdown-btn" onClick={(e) => {
+                    const anchor = e.currentTarget
                     const modelId = selection?.modelId
                     if (!modelId) return
-                    try {
-                      const items = await api.getModelHistory(modelId, 20)
+                    api.getModelHistory(modelId, 20).then(items => {
                       setUndoItems(items)
                       setUndoHoverIdx(null)
-                      setUndoAnchor(e.currentTarget)
-                    } catch { /* ignore */ }
+                      setUndoAnchor(anchor)
+                    }).catch(() => {})
                   }}>
                     <ArrowDropDownOutlined fontSize="small" />
                   </IconButton>
@@ -628,10 +621,10 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                           const result = await api.undoChanges(modelId, item.id)
                           if (result.all_cells && gridRef.current) {
                             gridRef.current.applyCellUpdates(result.all_cells)
-                          } else {
+                          } else if (!result.error) {
                             setRefreshKey(k => k + 1)
                           }
-                          api.getModelHistory(modelId, 1).then(h => setHasUndo(h.length > 0)).catch(() => {})
+                          setHasUndo(result.has_more ?? false)
                         } catch { /* ignore */ }
                       }}
                     >

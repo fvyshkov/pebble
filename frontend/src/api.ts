@@ -155,8 +155,8 @@ export const getCellHistory = (sheetId: string, coordKey: string) =>
   fetch(`${BASE}/cells/history/${sheetId}/${encodeURIComponent(coordKey)}`).then(r => json<any[]>(r))
 export const getModelHistory = (modelId: string, limit = 10) =>
   fetch(`${BASE}/cells/model-history/${modelId}?limit=${limit}`).then(r => json<any[]>(r))
-export const undoChanges = (modelId: string, historyId: string) =>
-  fetch(`${BASE}/cells/undo/${modelId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ history_id: historyId }) }).then(r => json<any>(r))
+export const undoChanges = (modelId: string, historyId?: string) =>
+  fetch(`${BASE}/cells/undo/${modelId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(historyId ? { history_id: historyId } : {}) }).then(r => json<any>(r))
 export const clearHistory = (modelId: string) =>
   fetch(`${BASE}/cells/model-history/${modelId}`, { method: 'DELETE' }).then(r => json<any>(r))
 

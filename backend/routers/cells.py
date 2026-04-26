@@ -379,15 +379,31 @@ async def get_model_history(model_id: str, limit: int = 10):
 
 
 class UndoIn(BaseModel):
-    history_id: str  # undo up to and including this history entry
+    history_id: str | None = None  # undo up to and including this entry; None = undo latest
 
 
 @router.post("/undo/{model_id}")
 async def undo(model_id: str, body: UndoIn):
     """Undo changes from most recent back to history_id (inclusive)."""
     db = get_db()
+
+    # If no history_id given, find the latest entry for this model
+    history_id = body.history_id
+    if not history_id:
+        sheet_ids = await db.execute_fetchall("SELECT id FROM sheets WHERE model_id = ?", (model_id,))
+        latest = None
+        for sr in sheet_ids:
+            rows = await db.execute_fetchall(
+                "SELECT id, created_at FROM cell_history WHERE sheet_id = ? ORDER BY created_at DESC LIMIT 1",
+                (sr["id"],))
+            if rows and (latest is None or rows[0]["created_at"] > latest["created_at"]):
+                latest = rows[0]
+        if not latest:
+            return {"error": "No history to undo"}
+        history_id = latest["id"]
+
     # Get target timestamp
-    target = await db.execute_fetchall("SELECT created_at FROM cell_history WHERE id = ?", (body.history_id,))
+    target = await db.execute_fetchall("SELECT created_at FROM cell_history WHERE id = ?", (history_id,))
     if not target:
         return {"error": "History entry not found"}
     target_ts = target[0]["created_at"]
@@ -416,22 +432,45 @@ async def undo(model_id: str, body: UndoIn):
         changes.append({"sheet_id": r["sheet_id"], "coord_key": r["coord_key"], "value": r["old_value"]})
         undone += 1
 
-    # Recalc
-    sheet_id = rows[0]["sheet_id"]
-    computed = await _recalc_model(db, sheet_id)
+    # Recalc — capture which cells were recomputed
+    from backend.formula_engine import calculate_model
+    sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (rows[0]["sheet_id"],))
+    model_id_for_recalc = sheet[0]["model_id"] if sheet else model_id
+    recalc_result = await calculate_model(db, model_id_for_recalc)
+    computed = 0
+    for sid, recalc_changes in recalc_result.items():
+        for ck, val in recalc_changes.items():
+            rule = 'empty' if val == '__empty__' else 'formula'
+            db_val = '' if val == '__empty__' else val
+            await db.execute(
+                """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule
+                   WHERE rule != 'manual'""",
+                (str(__import__('uuid').uuid4()), sid, ck, db_val, rule),
+            )
+        computed += len(recalc_changes)
     await db.commit()
 
-    # After recalc, read back all cell values for affected sheets so frontend
-    # can apply computed changes too (formulas may have cascaded).
-    affected_sheets = {c["sheet_id"] for c in changes}
+    # Build minimal all_cells: only undone cells + recomputed cells
     all_cells: dict[str, str | None] = {}
-    for sid in affected_sheets:
-        cell_rows = await db.execute_fetchall(
-            "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (sid,))
-        for cr in cell_rows:
-            all_cells[cr["coord_key"]] = cr["value"]
+    for c in changes:
+        all_cells[c["coord_key"]] = c["value"]
+    for sid, recalc_changes in recalc_result.items():
+        for ck, val in recalc_changes.items():
+            all_cells[ck] = '' if val == '__empty__' else val
 
-    return {"undone": undone, "computed": computed, "changes": changes, "all_cells": all_cells}
+    # Check if there's more history remaining
+    has_more = False
+    sheet_ids_check = await db.execute_fetchall("SELECT id FROM sheets WHERE model_id = ?", (model_id,))
+    for sr in sheet_ids_check:
+        remaining = await db.execute_fetchall(
+            "SELECT 1 FROM cell_history WHERE sheet_id = ? LIMIT 1", (sr["id"],))
+        if remaining:
+            has_more = True
+            break
+
+    return {"undone": undone, "computed": computed, "changes": changes, "all_cells": all_cells, "has_more": has_more}
 
 
 @router.delete("/model-history/{model_id}")

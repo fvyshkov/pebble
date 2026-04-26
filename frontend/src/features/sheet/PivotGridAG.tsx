@@ -1966,13 +1966,14 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       // Server recomputed formulas synchronously — refetch + flash so any
       // derived (formula/sum_children) cells that changed light up green.
       refreshAndFlashParents()
-      refreshUndoState()
+      // Immediately signal undo is available (no extra API roundtrip)
+      onUndoStateChange?.(true)
     }).catch(err => {
       setError(`${t('grid.saveFailed')}: ${err?.message || err}`)
     }).finally(() => {
       setRecalcRunning(false)
     })
-  }, [sheetId, currentUserId, recomputeParentsForField, refreshAndFlashParents, refreshUndoState, t])
+  }, [sheetId, currentUserId, recomputeParentsForField, refreshAndFlashParents, onUndoStateChange, t])
 
   // ── Context menu: chart + history ───────────────────────────────────
   const buildChartFromSelection = useCallback((chartType: string) => {
