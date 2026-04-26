@@ -937,6 +937,42 @@ def _detect_periods_from_headers(ws, max_col: int, base_year: int = 2025) -> lis
     return periods
 
 
+# ── Detect version labels (факт / план / прогноз) in header rows ─────────
+
+_VERSION_LABELS = {
+    "факт": "факт", "fact": "факт", "actual": "факт",
+    "план": "план", "plan": "план", "budget": "план",
+    "прогноз": "план", "forecast": "план", "прог.": "план",
+}
+
+
+def _detect_version_labels(ws, max_col: int) -> dict[int, str]:
+    """Scan header rows 1-20 for version labels (факт/план/прогноз).
+
+    Returns {col_number: normalised_version} where normalised_version
+    is one of "факт" or "план".  Columns that carry m1/m2/Y1/Y2 but
+    no explicit label are NOT included — callers infer "план" for them
+    when at least one explicit label exists on the sheet.
+
+    When multiple rows contain version labels, the row with the most
+    labels wins (covers sheets like CAPEX FM where "прог." appears on
+    one row and the full факт/план set on another).
+    """
+    best: dict[int, str] = {}
+    for r in range(1, 21):
+        labels: dict[int, str] = {}
+        for c in range(1, min(max_col + 1, 200)):
+            v = ws.cell(r, c).value
+            if not isinstance(v, str):
+                continue
+            key = v.strip().lower()
+            if key in _VERSION_LABELS:
+                labels[c] = _VERSION_LABELS[key]
+        if len(labels) > len(best):
+            best = labels
+    return best
+
+
 # ── Pre-substitute total-column references with values ───────────────────
 
 _CELL_REF_SIMPLE = re.compile(r"(?<!')\b(\$?[A-Z]{1,3})(\$?\d+)\b")
@@ -2297,6 +2333,19 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         _prescan_sheet_ptypes[excel_name] = _get_sheet_period_type(sp_scan)
         _prescan_sheet_periods[excel_name] = sp_scan
 
+    # Pre-scan: detect version labels (факт/план) per sheet
+    _prescan_version_labels: dict[str, dict[int, str]] = {}
+    _has_version_labels = False
+    for sheet_cfg in sheets_config:
+        excel_name = sheet_cfg["excel_name"]
+        if excel_name not in wb_data.sheetnames:
+            continue
+        ws_scan = wb_data[excel_name]
+        vl = _detect_version_labels(ws_scan, min(ws_scan.max_column or 1, 200))
+        _prescan_version_labels[excel_name] = vl
+        if vl:
+            _has_version_labels = True
+
     # ── Single shared period analytic for all sheets ──
     # Always include ALL period levels (M, Q, H, Y). Per-sheet visibility is
     # controlled by min_period_level on the sheet_analytics binding.
@@ -2336,6 +2385,32 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         )
     period_record_ids = await _create_period_hierarchy(db, pa_id, pt_list, start_d, end_d)
     period_analytic_id = pa_id
+
+    # ── Shared version analytic (Факт / План) ──
+    version_analytic_id = None
+    version_record_ids: dict[str, str] = {}  # "факт" → rid, "план" → rid
+    if _has_version_labels:
+        version_analytic_id = str(uuid.uuid4())
+        await db.execute(
+            """INSERT INTO analytics (id, model_id, name, code, icon, data_type, sort_order)
+               VALUES (?,?,?,?,?,?,?)""",
+            (version_analytic_id, model_id, "Версия", "version",
+             "SwapHorizOutlined", "sum", _period_analytic_sort),
+        )
+        _period_analytic_sort += 1
+        await db.execute(
+            "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
+            (str(uuid.uuid4()), version_analytic_id, "Наименование", "name", "string", 0),
+        )
+        for v_sort, (v_name, v_code) in enumerate([("Факт", "fact"), ("План", "plan")]):
+            v_rid = str(uuid.uuid4())
+            await db.execute(
+                "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
+                (v_rid, version_analytic_id, None, v_sort,
+                 json.dumps({"name": v_name, "code": v_code})),
+            )
+            version_record_ids[v_code.replace("fact", "факт").replace("plan", "план")] = v_rid
+        log.info(f"[import] Created version analytic with records: Факт, План")
 
     # Detect min_period_level per sheet from its Excel headers
     _sheet_min_period_level: dict[str, str | None] = {}  # excel_name → 'M'|'Q'|'H'|'Y'|None
@@ -2516,7 +2591,10 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         _min_lvl = _sheet_min_period_level.get(excel_name)
         _vis_rids = _sheet_visible_rids.get(excel_name)
         _vis_json = json.dumps(sorted(_vis_rids)) if _vis_rids and len(_vis_rids) < len(period_record_ids) else None
-        for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
+        _analytics_to_bind = [period_analytic_id, indicator_analytic_id]
+        if version_analytic_id:
+            _analytics_to_bind.append(version_analytic_id)
+        for bind_idx, aid in enumerate(_analytics_to_bind):
             sa_id = str(uuid.uuid4())
             is_main = 1 if aid == indicator_analytic_id else 0
             min_pl = _min_lvl if aid == period_analytic_id else None
@@ -2751,7 +2829,18 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     rule = "manual"
                     formula_text = ""
 
-                coord_key = f"{period_rid}|{indicator_rid}"
+                # Build coord_key: period|indicator[|version]
+                if version_analytic_id:
+                    _sheet_vlabels = _prescan_version_labels.get(excel_name, {})
+                    _vlabel = _sheet_vlabels.get(col_num)
+                    if _vlabel:
+                        _ver_rid = version_record_ids[_vlabel]
+                    else:
+                        # Column without explicit label → "план" (budget/forecast)
+                        _ver_rid = version_record_ids.get("план", "")
+                    coord_key = f"{period_rid}|{indicator_rid}|{_ver_rid}"
+                else:
+                    coord_key = f"{period_rid}|{indicator_rid}"
                 value_str = str(val)
 
                 # First-period formula cells often reference starting balances from
@@ -3034,6 +3123,19 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             _prescan_sheet_ptypes[excel_name] = _get_sheet_period_type(sp_scan)
             _prescan_sheet_periods[excel_name] = sp_scan
 
+        # Pre-scan: detect version labels (факт/план) per sheet
+        _prescan_version_labels: dict[str, dict[int, str]] = {}
+        _has_version_labels = False
+        for sheet_cfg in sheets_config:
+            excel_name = sheet_cfg["excel_name"]
+            if excel_name not in wb_data.sheetnames:
+                continue
+            ws_scan = wb_data[excel_name]
+            vl = _detect_version_labels(ws_scan, min(ws_scan.max_column or 1, 200))
+            _prescan_version_labels[excel_name] = vl
+            if vl:
+                _has_version_labels = True
+
         # ── Single shared period analytic for all sheets ──
         _needs_monthly = any(pt == "monthly" for pt in _prescan_sheet_ptypes.values())
         pt_list = list(all_period_types)
@@ -3069,6 +3171,32 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             )
         period_record_ids = await _create_period_hierarchy(db, pa_id, pt_list, start_d, end_d)
         period_analytic_id = pa_id
+
+        # ── Shared version analytic (Факт / План) ──
+        version_analytic_id = None
+        version_record_ids: dict[str, str] = {}
+        if _has_version_labels:
+            version_analytic_id = str(uuid.uuid4())
+            await db.execute(
+                """INSERT INTO analytics (id, model_id, name, code, icon, data_type, sort_order)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (version_analytic_id, model_id, "Версия", "version",
+                 "SwapHorizOutlined", "sum", _period_analytic_sort),
+            )
+            _period_analytic_sort += 1
+            await db.execute(
+                "INSERT INTO analytic_fields (id, analytic_id, name, code, data_type, sort_order) VALUES (?,?,?,?,?,?)",
+                (str(uuid.uuid4()), version_analytic_id, "Наименование", "name", "string", 0),
+            )
+            for v_sort, (v_name, v_code) in enumerate([("Факт", "fact"), ("План", "plan")]):
+                v_rid = str(uuid.uuid4())
+                await db.execute(
+                    "INSERT INTO analytic_records (id, analytic_id, parent_id, sort_order, data_json) VALUES (?,?,?,?,?)",
+                    (v_rid, version_analytic_id, None, v_sort,
+                     json.dumps({"name": v_name, "code": v_code})),
+                )
+                version_record_ids[v_code.replace("fact", "факт").replace("plan", "план")] = v_rid
+            log.info(f"[import] Created version analytic with records: Факт, План")
 
         # Detect min_period_level per sheet
         _sheet_min_period_level: dict[str, str | None] = {}
@@ -3228,7 +3356,10 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             _min_lvl = _sheet_min_period_level.get(excel_name)
             _vis_rids = _sheet_visible_rids.get(excel_name)
             _vis_json = json.dumps(sorted(_vis_rids)) if _vis_rids and len(_vis_rids) < len(period_record_ids) else None
-            for bind_idx, aid in enumerate([period_analytic_id, indicator_analytic_id]):
+            _analytics_to_bind = [period_analytic_id, indicator_analytic_id]
+            if version_analytic_id:
+                _analytics_to_bind.append(version_analytic_id)
+            for bind_idx, aid in enumerate(_analytics_to_bind):
                 is_main = 1 if aid == indicator_analytic_id else 0
                 min_pl = _min_lvl if aid == period_analytic_id else None
                 vis = _vis_json if aid == period_analytic_id else None
@@ -3454,10 +3585,22 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             rule = "manual"
                             formula_text = ""
 
+                    # Build coord_key: period|indicator[|version]
+                    if version_analytic_id:
+                        _sheet_vlabels = _prescan_version_labels.get(excel_name, {})
+                        _vlabel = _sheet_vlabels.get(col_num)
+                        if _vlabel:
+                            _ver_rid = version_record_ids[_vlabel]
+                        else:
+                            _ver_rid = version_record_ids.get("план", "")
+                        _coord_key = f"{period_rid}|{indicator_rid}|{_ver_rid}"
+                    else:
+                        _coord_key = f"{period_rid}|{indicator_rid}"
+
                     try:
                         await db.execute(
                             "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
-                            (str(uuid.uuid4()), pebble_sheet_id, f"{period_rid}|{indicator_rid}", str(val), "sum", rule, formula_text),
+                            (str(uuid.uuid4()), pebble_sheet_id, _coord_key, str(val), "sum", rule, formula_text),
                         )
                         cell_count += 1
                     except Exception:

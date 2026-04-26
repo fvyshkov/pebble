@@ -3,6 +3,20 @@
     "excel": "Doscredobank FinModel BaaS 2026-2028 v.12.xlsx",
     "sheet": "0",
     "results": {
+      "claude-sonnet": {
+        "total_indicators": 19,
+        "groups": 2,
+        "leaves": 17,
+        "formulas": 0,
+        "formula_ref_accuracy": 1.0,
+        "has_display_name": true,
+        "has_data_start_col": true,
+        "elapsed": 11.0,
+        "input_tokens": 3959,
+        "output_tokens": 1213,
+        "cost_usd": 0.0301,
+        "from_cache": false
+      },
       "qwen3-235b-together": {
         "total_indicators": 19,
         "groups": 2,
@@ -11,11 +25,45 @@
         "formula_ref_accuracy": 1.0,
         "has_display_name": true,
         "has_data_start_col": true,
-        "elapsed": "cached",
+        "vs_baseline_name_overlap": 0.895,
+        "vs_baseline_count_diff": 0,
+        "elapsed": 52.6,
         "input_tokens": 3994,
-        "output_tokens": 658,
-        "cost_usd": 0.0015,
-        "from_cache": true
+        "output_tokens": 1014,
+        "cost_usd": 0.0017,
+        "from_cache": false
+      },
+      "deepseek-v4-pro": {
+        "total_indicators": 19,
+        "groups": 2,
+        "leaves": 17,
+        "formulas": 0,
+        "formula_ref_accuracy": 1.0,
+        "has_display_name": true,
+        "has_data_start_col": true,
+        "vs_baseline_name_overlap": 1.0,
+        "vs_baseline_count_diff": 0,
+        "elapsed": 109.1,
+        "input_tokens": 3817,
+        "output_tokens": 4151,
+        "cost_usd": 0.0408,
+        "from_cache": false
+      },
+      "deepseek-v4-flash": {
+        "total_indicators": 19,
+        "groups": 2,
+        "leaves": 17,
+        "formulas": 0,
+        "formula_ref_accuracy": 1.0,
+        "has_display_name": true,
+        "has_data_start_col": true,
+        "vs_baseline_name_overlap": 1.0,
+        "vs_baseline_count_diff": 0,
+        "elapsed": 34.5,
+        "input_tokens": 3817,
+        "output_tokens": 2457,
+        "cost_usd": 0.0027,
+        "from_cache": false
       }
     }
   },
@@ -23,6 +71,20 @@
     "excel": "Doscredobank FinModel BaaS 2026-2028 v.12.xlsx",
     "sheet": "BaaS.1",
     "results": {
+      "claude-sonnet": {
+        "total_indicators": 119,
+        "groups": 7,
+        "leaves": 112,
+        "formulas": 73,
+        "formula_ref_accuracy": 0.964,
+        "has_display_name": true,
+        "has_data_start_col": true,
+        "elapsed": 107.2,
+        "input_tokens": 11134,
+        "output_tokens": 12224,
+        "cost_usd": 0.2168,
+        "from_cache": false
+      },
       "qwen3-235b-together": {
         "total_indicators": 119,
         "groups": 7,
@@ -31,11 +93,21 @@
         "formula_ref_accuracy": 0.97,
         "has_display_name": true,
         "has_data_start_col": true,
-        "elapsed": 257.5,
+        "vs_baseline_name_overlap": 0.244,
+        "vs_baseline_count_diff": 0,
+        "elapsed": 162.4,
         "input_tokens": 11269,
-        "output_tokens": 7846,
-        "cost_usd": 0.0073,
+        "output_tokens": 6968,
+        "cost_usd": 0.0069,
         "from_cache": false
+      },
+      "deepseek-v4-pro": {
+        "parse_error": true,
+        "raw_preview": "{\n  \"excel_name\": \"BaaS.1\",\n  \"display_name\": \"BaaS - Онлайн кредитование\",\n  \"data_start_col\": 4,\n  \"indicators\": [\n    {\n      \"name\": \"Итого\",\n      \"unit\": \"\",\n      \"row\": 7,\n      \"is_group\": tr"
+      },
+      "deepseek-v4-flash": {
+        "parse_error": true,
+        "raw_preview": "{\n  \"excel_name\": \"BaaS.1\",\n  \"display_name\": \"BaaS - Онлайн кредитование\",\n  \"data_start_col\": 4,\n  \"indicators\": [\n    {\n      \"name\": \"Итого\",\n      \"unit\": \"ЕИ\",\n      \"row\": 7,\n      \"is_group\": "
       }
     }
   }
