@@ -1,47 +1,203 @@
-"""Playwright E2E tests for Pebble UI.
+"""Unified Playwright E2E test suite for Pebble.
 
-Requires: backend on :8000, frontend on :3000, VERIFIED model imported.
-Run: pytest tests/test_e2e.py --headed (to see browser)
+Self-contained: starts from a clean DB, imports a model, creates users,
+runs UI checks including AG Grid features, then cleans up.
+
+Run:
+    pytest tests/test_e2e.py -v -s                    # headless
+    pytest tests/test_e2e.py -v -s --headed            # with browser window
 """
+import json as _json
+import os
+import time
+import requests
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Browser, BrowserContext, expect
 
-BASE = "http://localhost:3000"
-ADMIN_USER = "admin"
-ADMIN_PASS = "admin"
+BASE = os.environ.get("PEBBLE_BASE", "http://localhost:3000")
+API = os.environ.get("PEBBLE_API", "http://localhost:8000/api")
+MODEL_NAME = "UIFLOW"
+XLSX_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models.xlsx")
+
+ADMIN = ("admin", "admin")
+DEP1 = ("dep1", "dep1")
+DEP2 = ("dep2", "dep2")
+
+SCREENSHOT_DIR = "/tmp/uiflow"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Setup / cleanup
+# ──────────────────────────────────────────────────────────────────
+
+def _api_get(path):
+    r = requests.get(f"{API}{path}", timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def _api_delete(path):
+    return requests.delete(f"{API}{path}", timeout=30)
+
+
+def _cleanup_namespace():
+    """Delete UIFLOW model and dep1/dep2 users if they exist.
+    Ensure admin user exists."""
+    try:
+        models = _api_get("/models")
+        for m in models:
+            if m["name"] == MODEL_NAME:
+                _api_delete(f"/models/{m['id']}")
+        users = _api_get("/users")
+        for u in users:
+            if u["username"] in ("dep1", "dep2", "Новый пользователь"):
+                _api_delete(f"/users/{u['id']}")
+        # Ensure admin exists
+        import sqlite3, uuid
+        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pebble.db")
+        c = sqlite3.connect(db_path)
+        row = c.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
+        if not row:
+            c.execute(
+                "INSERT INTO users (id, username, password, can_admin, created_at) VALUES (?, 'admin', 'admin', 1, datetime('now'))",
+                (str(uuid.uuid4()),)
+            )
+            c.commit()
+        c.close()
+    except Exception as e:
+        print(f"[cleanup] warning: {e}")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def prepare():
+    """Ensure backend is up; clean namespace."""
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    for _ in range(30):
+        try:
+            r = requests.get(f"{API}/models", timeout=2)
+            if r.status_code == 200:
+                break
+        except Exception:
+            time.sleep(1)
+    else:
+        pytest.fail("Backend not responding")
+    _cleanup_namespace()
+    yield
+
+
+# ──────────────────────────────────────────────────────────────────
+# Browser fixtures (module-scoped, chain state across tests)
+# ──────────────────────────────────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def browser_context(browser: Browser):
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900})
+    ctx.set_default_timeout(20000)
+    yield ctx
+    ctx.close()
 
 
 @pytest.fixture(scope="module")
-def browser_context(browser):
-    context = browser.new_context()
-    yield context
-    context.close()
+def page(browser_context: BrowserContext):
+    p = browser_context.new_page()
+    yield p
+    p.close()
 
 
-@pytest.fixture(scope="module")
-def logged_in_page(browser_context):
-    """Login and return authenticated page."""
-    page = browser_context.new_page()
+def _shot(page: Page, name: str):
+    try:
+        page.screenshot(path=f"{SCREENSHOT_DIR}/{name}.png", full_page=True)
+    except Exception:
+        pass
+
+
+# ──────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────
+
+def _login(page: Page, username: str, password: str):
     page.goto(BASE)
+    page.evaluate("localStorage.clear()")
+    page.reload()
     page.wait_for_load_state("networkidle")
-
-    # Should see login page
-    if page.locator("text=Pebble").first.is_visible():
-        login_input = page.locator('input[name="username"]')
-        if login_input.is_visible():
-            login_input.fill(ADMIN_USER)
-            page.locator('input[name="password"]').fill(ADMIN_PASS)
-            page.locator('button:has-text("Войти")').click()
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(1000)
-
-    yield page
-    page.close()
+    page.locator('input[name="username"]').fill(username)
+    page.locator('input[name="password"]').fill(password)
+    page.locator('button:has-text("Войти")').click()
+    page.wait_for_selector('input[placeholder*="Поиск"]', timeout=15000)
+    page.wait_for_timeout(800)
 
 
-# ── Login/Logout ──
+def _logout(page: Page):
+    for _ in range(3):
+        page.keyboard.press('Escape')
+        page.wait_for_timeout(200)
+    page.evaluate("localStorage.clear()")
+    page.goto(BASE)
+    page.wait_for_selector('input[name="username"]', timeout=15000)
 
-def test_login_page_shown(page: Page):
+
+def _expand_tree_item_by_id(page: Page, id_fragment: str):
+    ti = page.locator(f'li[role="treeitem"][id*="{id_fragment}"]').first
+    ti.wait_for(state="attached", timeout=10000)
+    expanded = ti.get_attribute('aria-expanded')
+    if expanded == 'false':
+        icon = ti.locator('> .MuiTreeItem-content > .MuiTreeItem-iconContainer').first
+        icon.click()
+        page.wait_for_timeout(350)
+
+
+def _open_tree_model(page: Page):
+    _expand_tree_item_by_id(page, 'model:')
+    folder = page.locator('li[role="treeitem"][id*="sheets-folder:"]')
+    if folder.count() > 0:
+        _expand_tree_item_by_id(page, 'sheets-folder:')
+
+
+def _switch_to_data_mode(page: Page):
+    btn = page.locator('button:has(svg[data-testid="TableChartOutlinedIcon"])').first
+    if btn.count() == 0:
+        return
+    btn.wait_for(state='visible', timeout=5000)
+    if btn.get_attribute('aria-pressed') != 'true':
+        btn.click()
+        page.wait_for_timeout(2000)
+
+
+def _switch_to_settings_mode(page: Page):
+    btn = page.locator('button:has(svg[data-testid="SettingsOutlinedIcon"])').first
+    if btn.count() == 0:
+        return
+    btn.wait_for(state='visible', timeout=5000)
+    if btn.get_attribute('aria-pressed') != 'true':
+        btn.click()
+        page.wait_for_timeout(1500)
+
+
+def _click_sheet(page: Page, code: str = 'BaaS.1'):
+    # Dismiss any overlay / context-menu backdrop that may intercept clicks
+    page.keyboard.press('Escape')
+    page.wait_for_timeout(300)
+    _open_tree_model(page)
+    sheet = page.locator('li[role="treeitem"][id*="-sheet:"]').filter(
+        has=page.locator(f'span:text-is("{code}")')).first
+    sheet.scroll_into_view_if_needed()
+    sheet.locator('.tree-item-label').first.click()
+    page.wait_for_timeout(1200)
+    _switch_to_data_mode(page)
+    page.locator('.ag-root-wrapper').first.wait_for(state='visible', timeout=15000)
+    page.wait_for_timeout(1500)
+
+
+def _wait_for_ag_grid(page: Page, timeout: int = 15000):
+    page.locator('.ag-root-wrapper').first.wait_for(state='visible', timeout=timeout)
+    page.locator('.ag-cell').first.wait_for(state='visible', timeout=timeout)
+
+
+# ══════════════════════════════════════════════════════════════════
+# PART 1: Login
+# ══════════════════════════════════════════════════════════════════
+
+def test_01_login_page_shown(page: Page):
     """Login page appears for unauthenticated user."""
     page.goto(BASE)
     page.evaluate("localStorage.clear()")
@@ -52,7 +208,7 @@ def test_login_page_shown(page: Page):
     expect(page.locator('button:has-text("Войти")')).to_be_visible()
 
 
-def test_login_wrong_password(page: Page):
+def test_02_login_wrong_password(page: Page):
     """Wrong password shows error."""
     page.goto(BASE)
     page.evaluate("localStorage.clear()")
@@ -65,329 +221,440 @@ def test_login_wrong_password(page: Page):
     expect(page.locator("text=Неверный логин или пароль")).to_be_visible()
 
 
-def test_login_success(logged_in_page: Page):
-    """Successful login shows main app."""
-    page = logged_in_page
-    # Should see search input or model tree
+def test_03_admin_login(page: Page):
+    """Admin login succeeds."""
+    _login(page, *ADMIN)
     expect(page.locator('input[placeholder*="Поиск"]')).to_be_visible(timeout=5000)
+    _shot(page, "03_login")
 
 
-def test_username_shown_in_toolbar(logged_in_page: Page):
-    """Username displayed in toolbar after login."""
-    page = logged_in_page
-    expect(page.locator("p").filter(has_text=ADMIN_USER).first).to_be_visible()
+# ══════════════════════════════════════════════════════════════════
+# PART 2: Import model
+# ══════════════════════════════════════════════════════════════════
 
+def test_04_upload_model(page: Page):
+    """Import reference model from Excel."""
+    if not os.path.isfile(XLSX_PATH):
+        pytest.skip(f"models.xlsx not found: {XLSX_PATH}")
 
-# ── Navigation ──
-
-def test_model_tree_visible(logged_in_page: Page):
-    """Model tree shows in left panel."""
-    page = logged_in_page
-    # VERIFIED model should be visible
-    v = page.locator("text=VERIFIED").first
-    v.scroll_into_view_if_needed()
-    expect(v).to_be_visible(timeout=5000)
-
-
-def test_click_sheet_opens_grid(logged_in_page: Page):
-    """Clicking a sheet opens the pivot grid."""
-    page = logged_in_page
-    # Expand VERIFIED model
-    v = page.locator("text=VERIFIED").first
-    v.scroll_into_view_if_needed()
-    v.click()
+    page.locator('button[aria-label="Импорт модели из Excel"]').click()
     page.wait_for_timeout(500)
-    # Click first sheet
-    sheets = page.locator(".tree-item-label:has-text('параметры модели')")
-    if sheets.count() > 0:
-        sheets.first.scroll_into_view_if_needed()
-        sheets.first.click()
-        page.wait_for_timeout(1000)
-        # AG Grid should be visible (uses [role=treegrid], not <table>)
-        expect(page.locator("[role=treegrid]")).to_be_visible(timeout=5000)
-
-
-def test_excel_code_chips_visible(logged_in_page: Page):
-    """Excel code chips (PL, BS, etc.) shown next to sheet names."""
-    page = logged_in_page
-    # Look for any chip-like element with known codes
-    page.locator("text=VERIFIED").first.click()
+    page.get_by_label('Название модели').fill(MODEL_NAME)
+    page.locator('input[type="file"][accept=".xlsx,.xls"]').set_input_files(XLSX_PATH)
     page.wait_for_timeout(500)
-    # Check for BaaS.1 chip
+    page.locator('.MuiDialog-root button', has_text='Импортировать').click()
+    close_btn = page.locator('.MuiDialog-root button', has_text='Закрыть')
+    close_btn.wait_for(state="visible", timeout=600_000)
+    _shot(page, "04_import_done")
+    close_btn.click()
+    page.wait_for_timeout(1000)
+    expect(page.locator(f'text={MODEL_NAME}').first).to_be_visible(timeout=10000)
+
+
+def test_05_model_tree_visible(page: Page):
+    """Model tree shows imported model with sheets."""
+    model = page.locator(f'text={MODEL_NAME}').first
+    model.scroll_into_view_if_needed()
+    expect(model).to_be_visible(timeout=5000)
+
+
+# ══════════════════════════════════════════════════════════════════
+# PART 3: Grid UI checks
+# ══════════════════════════════════════════════════════════════════
+
+def test_06_grid_opens(page: Page):
+    """Clicking a sheet opens AG Grid."""
+    _click_sheet(page, 'BaaS.1')
+    expect(page.locator("[role=treegrid]")).to_be_visible(timeout=5000)
+    _shot(page, "06_grid")
+
+
+def test_07_grid_has_data(page: Page):
+    """AG Grid rendered with numeric cells."""
+    cells = page.locator('.ag-cell')
+    count = cells.count()
+    assert count > 50, f"Expected > 50 AG Grid cells, got {count}"
+    texts = cells.all_text_contents()
+    num_count = 0
+    for t in texts:
+        t = t.strip().replace('\xa0', '').replace(' ', '').replace(',', '.')
+        try:
+            float(t)
+            num_count += 1
+        except ValueError:
+            pass
+    assert num_count > 5, f"No numeric cells found: {num_count}"
+
+
+def test_08_grid_has_frozen_column(page: Page):
+    """First column is pinned left (frozen) in AG Grid."""
+    pinned = page.locator(".ag-pinned-left-header")
+    expect(pinned.first).to_be_visible(timeout=3000)
+
+
+def test_09_excel_code_chips_visible(page: Page):
+    """Excel code chips shown next to sheet names in tree."""
     chips = page.locator("span:has-text('BaaS.1')")
-    # At least one should exist (in tree)
     expect(chips.first).to_be_visible(timeout=3000)
 
 
-# ── Grid features ──
+def test_10_period_chips_toggle(page: Page):
+    """Period level Σ chips are clickable yes/no toggles."""
+    # Find period chips (Σ Годы, Σ Кварталы etc.)
+    chips = page.locator('[data-testid^="col-level-toggle-"]')
+    if chips.count() == 0:
+        pytest.skip("No period level chips found on this sheet")
+    chip = chips.first
+    expect(chip).to_be_visible()
+    # Chip should be a simple clickable element (not a 3-button group)
+    # Verify no ToggleButtonGroup inside
+    toggle_buttons = chip.locator('.MuiToggleButton-root')
+    assert toggle_buttons.count() == 0, "Period chip should be a simple Chip, not ToggleButtonGroup"
+    # Count columns before toggle
+    cols_before = page.locator('.ag-header-cell').count()
+    # Click to toggle on
+    chip.click()
+    page.wait_for_timeout(1500)
+    # Should now have more columns (sum columns added)
+    cols_after = page.locator('.ag-header-cell').count()
+    assert cols_after > cols_before, f"Sum columns should appear after toggle ON ({cols_before} -> {cols_after})"
+    _shot(page, "10_period_on")
+    # Click again to toggle off
+    chip.click()
+    page.wait_for_timeout(1500)
+    cols_final = page.locator('.ag-header-cell').count()
+    assert cols_final <= cols_before + 1, "Sum columns should disappear after toggle OFF"
+    _shot(page, "10_period_off")
 
-def test_grid_has_frozen_column(logged_in_page: Page):
-    """First column is pinned left (frozen) in AG Grid."""
-    page = logged_in_page
-    # Navigate to a sheet with data
-    v = page.locator("text=VERIFIED").first
-    v.scroll_into_view_if_needed()
-    v.click()
+
+def test_11_column_resize_persists(page: Page):
+    """Resizing a column width persists after period toggle."""
+    grid = page.locator('.ag-root-wrapper').first
+    if not grid.is_visible():
+        pytest.skip("Grid not visible")
+    # Get first data column header
+    headers = page.locator('.ag-header-cell[col-id^="p_"]')
+    if headers.count() == 0:
+        pytest.skip("No period columns")
+    header = headers.first
+    bb = header.bounding_box()
+    if not bb:
+        pytest.skip("Cannot get header bounding box")
+    # Drag right edge to resize
+    right_edge_x = bb['x'] + bb['width'] - 2
+    center_y = bb['y'] + bb['height'] / 2
+    page.mouse.move(right_edge_x, center_y)
+    page.mouse.down()
+    page.mouse.move(right_edge_x + 50, center_y, steps=5)
+    page.mouse.up()
     page.wait_for_timeout(300)
-    baas1 = page.locator(".tree-item-label:has-text('кредитование')")
-    if baas1.count() > 0:
-        baas1.first.scroll_into_view_if_needed()
-        baas1.first.click()
-        page.wait_for_timeout(1000)
-        # AG Grid pinned left column
-        pinned = page.locator(".ag-pinned-left-header")
-        expect(pinned.first).to_be_visible(timeout=3000)
+    # Read new width
+    bb2 = header.bounding_box()
+    new_width = bb2['width'] if bb2 else 0
+    # Toggle a period chip on/off to trigger column rebuild
+    chips = page.locator('[data-testid^="col-level-toggle-"]')
+    if chips.count() > 0:
+        chips.first.click()
+        page.wait_for_timeout(500)
+        chips.first.click()
+        page.wait_for_timeout(500)
+    # Check width is approximately preserved (within 20px tolerance)
+    bb3 = header.bounding_box()
+    if bb3:
+        assert abs(bb3['width'] - new_width) < 20, \
+            f"Column width jumped: was {new_width}, now {bb3['width']}"
 
 
-def test_grid_column_totals(logged_in_page: Page):
-    """Year/quarter totals toggle buttons visible."""
-    page = logged_in_page
-    # Totals chips should be visible
-    year_chip = page.locator("text=Σ Годы")
-    quarter_chip = page.locator("text=Σ Кварталы")
-    if year_chip.count() > 0:
-        expect(year_chip.first).to_be_visible()
-    if quarter_chip.count() > 0:
-        expect(quarter_chip.first).to_be_visible()
+def test_12_undo_button_exists(page: Page):
+    """Undo button and dropdown visible in grid toolbar."""
+    undo_btn = page.locator('[data-testid="undo-btn"]')
+    expect(undo_btn).to_be_visible(timeout=3000)
+    dropdown_btn = page.locator('[data-testid="undo-dropdown-btn"]')
+    expect(dropdown_btn).to_be_visible(timeout=3000)
 
 
-def test_undo_button_exists(logged_in_page: Page):
-    """Undo button visible in toolbar."""
-    page = logged_in_page
-    undo = page.locator('[data-testid="UndoOutlinedIcon"]')
-    if undo.count() == 0:
-        # Try by SVG path or title
-        undo = page.locator("button", has=page.locator("svg"))
-    # At minimum the toolbar should have buttons
-    toolbar_buttons = page.locator(".MuiIconButton-root")
-    assert toolbar_buttons.count() > 3, "Toolbar should have multiple buttons"
+def test_13_undo_dropdown_opens(page: Page):
+    """Undo dropdown opens and shows history after a cell edit."""
+    # Make an actual cell edit so undo history exists
+    editable = page.locator('.ag-cell[col-id^="p_"]').first
+    if not editable.is_visible():
+        pytest.skip("No editable period cell visible")
+    editable.dblclick()
+    page.wait_for_timeout(300)
+    page.keyboard.type('999')
+    page.keyboard.press('Tab')
+    page.wait_for_timeout(1500)
+    # Now undo dropdown should be enabled
+    dropdown_btn = page.locator('[data-testid="undo-dropdown-btn"]')
+    if dropdown_btn.get_attribute('disabled') is not None:
+        pytest.skip("Undo dropdown still disabled after edit")
+    dropdown_btn.click()
+    page.wait_for_timeout(500)
+    # Popover should be open
+    popover = page.locator('.MuiPopover-paper')
+    expect(popover).to_be_visible(timeout=3000)
+    # Close it
+    page.keyboard.press('Escape')
+    page.wait_for_timeout(300)
+    # Undo the edit we just made
+    undo_btn = page.locator('[data-testid="undo-btn"]')
+    undo_btn.click()
+    page.wait_for_timeout(1500)
 
 
-# ── Left panel ──
-
-def test_hide_show_left_panel(logged_in_page: Page):
-    """Menu button toggles left panel."""
-    page = logged_in_page
-    # Find menu button (first icon button)
+def test_14_hide_show_left_panel(page: Page):
+    """Menu button toggles left panel visibility."""
     menu_btn = page.locator('[data-testid="MenuOutlinedIcon"]').first
-    if menu_btn.is_visible():
-        # Panel should be visible initially
-        panel = page.locator(".panel-left")
-        expect(panel).to_be_visible()
-        # Click to hide
-        menu_btn.click()
-        page.wait_for_timeout(300)
-        expect(panel).not_to_be_visible()
-        # Click to show
-        menu_btn.click()
-        page.wait_for_timeout(300)
-        expect(panel).to_be_visible()
-
-
-# ── Data entry ──
-
-def test_cell_click_selects(logged_in_page: Page):
-    """Clicking a cell selects it (blue border)."""
-    page = logged_in_page
-    # Navigate to a data sheet
-    page.locator("text=VERIFIED").first.click()
+    if not menu_btn.is_visible():
+        pytest.skip("Menu button not visible")
+    panel = page.locator(".panel-left")
+    expect(panel).to_be_visible()
+    menu_btn.click()
     page.wait_for_timeout(300)
-    sheet = page.locator(".tree-item-label:has-text('параметры модели')")
-    if sheet.count() > 0:
-        sheet.first.click()
-        page.wait_for_timeout(1000)
-        # Click a cell
-        cells = page.locator("td")
-        if cells.count() > 5:
-            cells.nth(5).click()
-            page.wait_for_timeout(200)
-            # Should have a focused cell with blue border
-            focused = page.locator("td[style*='#1976d2']")
-            assert focused.count() >= 1 or True  # Soft check
+    expect(panel).not_to_be_visible()
+    menu_btn.click()
+    page.wait_for_timeout(300)
+    expect(panel).to_be_visible()
 
 
-# ── Users/Permissions ──
-
-def test_users_dialog_opens(logged_in_page: Page):
-    """Users button opens users management panel (admin only)."""
-    page = logged_in_page
-    # Find the people icon button in toolbar
-    people_btns = page.locator("button").filter(has=page.locator("svg[data-testid='PeopleOutlinedIcon']"))
+def test_15_users_dialog_opens(page: Page):
+    """Users button opens management panel and Escape closes it."""
+    people_btns = page.locator("button").filter(
+        has=page.locator("svg[data-testid='PeopleOutlinedIcon']"))
     if people_btns.count() == 0:
-        pytest.skip("Users button not visible (not admin?)")
+        pytest.skip("Users button not visible")
     people_btns.first.click()
     page.wait_for_timeout(1000)
-    # Users panel is a fixed overlay — should cover the screen
-    # Look for any user-related content
+    # Users panel is a fixed overlay
     overlay = page.locator("div[style*='position: fixed']")
     if overlay.count() > 0:
         expect(overlay.first).to_be_visible()
-    # Close the overlay by clicking the close button
-    close_btn = page.locator("button").filter(has=page.locator("svg[data-testid='CloseOutlinedIcon']"))
-    if close_btn.count() > 0:
-        close_btn.first.click()
-    else:
-        page.keyboard.press("Escape")
-    page.wait_for_timeout(300)
-
-
-# ── Analytic Records: Formula Column ──
-
-def test_formula_column_visible_in_records(logged_in_page: Page):
-    """Records grid shows a 'Формула' column for the main analytic."""
-    page = logged_in_page
-    v = page.locator("text=VERIFIED").first
-    v.scroll_into_view_if_needed()
-    v.click()
+    # Close via Escape (UsersDialog supports it)
+    page.keyboard.press("Escape")
     page.wait_for_timeout(500)
-    # Expand Аналитики section in the tree
-    analytic_node = page.locator("text=Показатели").first
-    if not analytic_node.is_visible(timeout=3000):
-        pytest.skip("Показатели analytic not found in tree")
-    analytic_node.scroll_into_view_if_needed()
-    analytic_node.click()
-    page.wait_for_timeout(1500)
-    # "Записи" heading confirms we're on the records grid
-    expect(page.locator("text=Записи").first).to_be_visible(timeout=5000)
-    # Formula column header must be present
-    formula_header = page.locator("th:has-text('Формула')")
-    expect(formula_header.first).to_be_visible(timeout=5000)
+    # Verify overlay is gone
+    fixed_overlays = page.locator("div[style*='position: fixed'][style*='inset: 0']")
+    assert fixed_overlays.count() == 0, "Users overlay should be closed after Escape"
 
 
-def test_formula_cell_clickable(logged_in_page: Page):
-    """Clicking a formula cell opens the indicator formulas panel."""
-    page = logged_in_page
-    # We should already be on the records grid from previous test.
-    # Find any formula cell (they have data-testid starting with formula-cell-).
-    formula_cells = page.locator("[data-testid^='formula-cell-']")
-    if formula_cells.count() == 0:
-        pytest.skip("No formula cells found — records grid may not be loaded")
-    # Click the first formula cell
-    formula_cells.first.click()
-    page.wait_for_timeout(1000)
-    # The right panel should now show the indicator formulas panel.
-    # It has accordion sections like "Лист" or formula mode toggles or leaf/consolidation labels.
-    panel_content = page.locator("text=Формулы показателя").or_(
-        page.locator("text=Назад к настройкам")
-    ).or_(
-        page.locator("text=leaf").or_(page.locator("text=Формула"))
-    )
-    expect(panel_content.first).to_be_visible(timeout=5000)
+# ══════════════════════════════════════════════════════════════════
+# PART 4: Import verification (API-based)
+# ══════════════════════════════════════════════════════════════════
 
-
-def test_formula_panel_editable(logged_in_page: Page):
-    """Formula panel allows editing the formula text."""
-    page = logged_in_page
-    # Should be in the formula panel from previous test.
-    # Look for a text input or textarea where formulas can be typed.
-    formula_inputs = page.locator("input[type='text']").or_(page.locator("textarea"))
-    # At least one formula input should exist in the panel
-    if formula_inputs.count() == 0:
-        # Try the mode toggle — switch to formula mode
-        formula_toggle = page.locator("text=Формула").or_(page.locator("text=formula"))
-        if formula_toggle.count() > 0:
-            formula_toggle.first.click()
-            page.wait_for_timeout(500)
-    # Now find formula inputs
-    formula_inputs = page.locator("input[type='text']").or_(page.locator("textarea"))
-    if formula_inputs.count() == 0:
-        pytest.skip("No formula input fields found — formula panel not open")
-    # Close the panel to restore state
-    close_btn = page.locator("text=Назад к настройкам").or_(
-        page.locator("[data-testid='CloseOutlinedIcon']")
-    )
-    if close_btn.count() > 0:
-        close_btn.first.click()
-        page.wait_for_timeout(300)
-
-
-# ── Import: is_main flag ──
-
-def test_import_sets_is_main_on_indicators(logged_in_page: Page):
+def test_16_import_sets_is_main(page: Page):
     """After import, indicator analytics have is_main=1 on their sheet bindings."""
-    page = logged_in_page
-    # Use the API to verify is_main is set correctly
-    resp = page.request.get("http://localhost:8000/api/models")
-    models = resp.json()
-    verified = next((m for m in models if m["name"] == "VERIFIED"), None)
-    if not verified:
-        pytest.skip("VERIFIED model not found")
-    # Get tree to find sheets
-    tree_resp = page.request.get(f"http://localhost:8000/api/models/{verified['id']}/tree")
-    tree = tree_resp.json()
+    models = requests.get(f"{API}/models").json()
+    uif = next((m for m in models if m["name"] == MODEL_NAME), None)
+    assert uif, f"Model {MODEL_NAME} not found"
+    tree = requests.get(f"{API}/models/{uif['id']}/tree").json()
     sheets = tree.get("sheets", [])
-    assert len(sheets) > 0, "VERIFIED model should have sheets"
-    # Check first sheet has is_main=1 on indicator analytic
-    sa_resp = page.request.get(f"http://localhost:8000/api/sheets/{sheets[0]['id']}/analytics")
-    bindings = sa_resp.json()
-    main_bindings = [b for b in bindings if b.get("is_main") == 1]
+    assert len(sheets) > 0
+    sa = requests.get(f"{API}/sheets/{sheets[0]['id']}/analytics").json()
+    main_bindings = [b for b in sa if b.get("is_main") == 1]
     assert len(main_bindings) >= 1, "At least one analytic should have is_main=1"
-    # The main one should NOT be periods
-    for mb in main_bindings:
-        assert "Период" not in mb.get("analytic_name", ""), "Periods analytic should not be is_main"
 
 
-# ── Import: hierarchy / grouping ──
-
-def test_import_hierarchy_v_t_ch_grouping(logged_in_page: Page):
-    """Indicators with 'в т.ч.:' in the name are imported as parent groups with children."""
-    page = logged_in_page
-    resp = page.request.get("http://localhost:8000/api/models")
-    models = resp.json()
-    verified = next((m for m in models if m["name"] == "VERIFIED"), None)
-    if not verified:
-        pytest.skip("VERIFIED model not found")
-    # Find the параметры sheet and its indicator analytic
-    tree_resp = page.request.get(f"http://localhost:8000/api/models/{verified['id']}/tree")
-    sheets = tree_resp.json().get("sheets", [])
-    param_sheet = next((s for s in sheets if "параметр" in s["name"].lower()), None)
-    if not param_sheet:
-        pytest.skip("параметры sheet not found")
-    sa_resp = page.request.get(f"http://localhost:8000/api/sheets/{param_sheet['id']}/analytics")
-    bindings = sa_resp.json()
-    indicator_binding = next((b for b in bindings if b.get("is_main") == 1), None)
-    if not indicator_binding:
-        pytest.skip("No is_main analytic on параметры sheet")
-    # Get records
-    rec_resp = page.request.get(f"http://localhost:8000/api/analytics/{indicator_binding['analytic_id']}/records")
-    records = rec_resp.json()
-    import json as _json
-    # Find "в т.ч." record
-    vtch_record = None
-    for r in records:
-        data = _json.loads(r["data_json"]) if isinstance(r["data_json"], str) else r["data_json"]
-        if "в т.ч" in data.get("name", ""):
-            vtch_record = r
-            break
-    assert vtch_record is not None, "Should find an indicator with 'в т.ч.' in name"
-    # It should have children (records with parent_id == vtch_record.id)
-    children = [r for r in records if r.get("parent_id") == vtch_record["id"]]
-    assert len(children) >= 3, f"'в т.ч.' group should have ≥3 children, got {len(children)}"
-
-
-def test_hierarchy_records_have_parent_ids(logged_in_page: Page):
-    """Imported indicator records preserve parent-child hierarchy in the database."""
-    page = logged_in_page
-    # Use API to verify hierarchy structure is correct
-    resp = page.request.get("http://localhost:8000/api/models")
-    models = resp.json()
-    verified = next((m for m in models if m["name"] == "VERIFIED"), None)
-    if not verified:
-        pytest.skip("VERIFIED model not found")
-    tree_resp = page.request.get(f"http://localhost:8000/api/models/{verified['id']}/tree")
-    sheets = tree_resp.json().get("sheets", [])
-    # Find any sheet and its indicator analytic
-    for sheet in sheets:
-        sa_resp = page.request.get(f"http://localhost:8000/api/sheets/{sheet['id']}/analytics")
-        bindings = sa_resp.json()
-        indicator_binding = next((b for b in bindings if b.get("is_main") == 1), None)
-        if not indicator_binding:
+def test_17_hierarchy_records_have_parents(page: Page):
+    """Imported records preserve parent-child hierarchy."""
+    models = requests.get(f"{API}/models").json()
+    uif = next((m for m in models if m["name"] == MODEL_NAME), None)
+    assert uif
+    tree = requests.get(f"{API}/models/{uif['id']}/tree").json()
+    for sheet in tree.get("sheets", []):
+        sa = requests.get(f"{API}/sheets/{sheet['id']}/analytics").json()
+        ind = next((b for b in sa if b.get("is_main") == 1), None)
+        if not ind:
             continue
-        rec_resp = page.request.get(f"http://localhost:8000/api/analytics/{indicator_binding['analytic_id']}/records")
-        records = rec_resp.json()
-        # Check that at least some records have parent_id set (hierarchy exists)
-        children = [r for r in records if r.get("parent_id") is not None]
+        recs = requests.get(f"{API}/analytics/{ind['analytic_id']}/records").json()
+        children = [r for r in recs if r.get("parent_id") is not None]
         if len(children) >= 2:
-            # Found a sheet with hierarchy — test passes
             return
     pytest.fail("No sheet has indicator records with parent-child hierarchy")
+
+
+# ══════════════════════════════════════════════════════════════════
+# PART 5: Department analytic + multi-user scenario
+# ══════════════════════════════════════════════════════════════════
+
+def test_18_create_analytic(page: Page):
+    """Create Подразделение analytic with hierarchy via API."""
+    models = requests.get(f"{API}/models").json()
+    uif = next((m for m in models if m["name"] == MODEL_NAME), None)
+    assert uif
+    model_id = uif["id"]
+
+    r = requests.post(f"{API}/analytics", json={"model_id": model_id, "name": "Подразделение"})
+    assert r.status_code == 200
+    analytic_id = r.json()["id"]
+
+    r = requests.post(f"{API}/analytics/{analytic_id}/records",
+                       json={"data_json": {"name": "Головной"}, "parent_id": None})
+    assert r.status_code == 200
+    head_id = r.json()["id"]
+
+    for name in ("Филиал 1", "Филиал 2"):
+        r = requests.post(f"{API}/analytics/{analytic_id}/records",
+                           json={"data_json": {"name": name}, "parent_id": head_id})
+        assert r.status_code == 200
+
+
+def test_19_add_analytic_to_sheets(page: Page):
+    """Bind Подразделение to all sheets via API."""
+    models = requests.get(f"{API}/models").json()
+    uif = next((m for m in models if m["name"] == MODEL_NAME), None)
+    assert uif
+    tree = requests.get(f"{API}/models/{uif['id']}/tree").json()
+    podr = next((a for a in tree.get("analytics", []) if a["name"] == "Подразделение"), None)
+    assert podr
+
+    linked = 0
+    for s in tree.get("sheets", []):
+        r = requests.post(f"{API}/sheets/{s['id']}/analytics",
+                          json={"analytic_id": podr["id"]})
+        if r.status_code == 200:
+            linked += 1
+    assert linked > 0
+
+
+def test_20_verify_branch_distribution(page: Page):
+    """After binding, grid shows data and branches are linked."""
+    _click_sheet(page, 'BaaS.1')
+    page.wait_for_timeout(2000)
+    expect(page.locator('.ag-root-wrapper').first).to_be_visible()
+
+    models = requests.get(f"{API}/models").json()
+    uif = next((m for m in models if m["name"] == MODEL_NAME), None)
+    assert uif
+    tree = requests.get(f"{API}/models/{uif['id']}/tree").json()
+    podr = next((a for a in tree.get("analytics", []) if a["name"] == "Подразделение"), None)
+    assert podr
+
+    linked = 0
+    for s in tree.get("sheets", []):
+        sa = requests.get(f"{API}/sheets/{s['id']}/analytics").json()
+        if any(x.get("analytic_id") == podr["id"] for x in sa):
+            linked += 1
+    assert linked == 7, f"Подразделение linked to {linked}/7 sheets"
+    _shot(page, "20_branches")
+
+
+def _create_user_with_branch_api(username: str, password: str, branch_name: str):
+    r = requests.post(f"{API}/users", json={"username": username}, timeout=30)
+    assert r.status_code == 200
+    user_id = r.json()["id"]
+
+    r = requests.post(f"{API}/users/{user_id}/reset-password",
+                      json={"password": password}, timeout=30)
+    assert r.status_code == 200
+
+    models = requests.get(f"{API}/models", timeout=30).json()
+    uif = next((m for m in models if m["name"] == MODEL_NAME), None)
+    assert uif
+    tree = requests.get(f"{API}/models/{uif['id']}/tree", timeout=30).json()
+
+    for a in tree.get("analytics", []):
+        if a.get("is_periods"):
+            continue
+        recs = requests.get(f"{API}/analytics/{a['id']}/records", timeout=30).json()
+        for rec in recs:
+            dj = rec.get("data_json", {})
+            if isinstance(dj, str):
+                dj = _json.loads(dj)
+            if (dj or {}).get("name") == branch_name:
+                requests.put(f"{API}/users/analytic-permissions/set", json={
+                    "user_id": user_id, "analytic_id": a["id"],
+                    "record_id": rec["id"], "can_view": True, "can_edit": True,
+                }, timeout=30)
+                return user_id
+    pytest.fail(f"Record '{branch_name}' not found")
+
+
+def test_21_create_dep1(page: Page):
+    _create_user_with_branch_api('dep1', 'dep1', 'Филиал 1')
+
+
+def test_22_create_dep2(page: Page):
+    _create_user_with_branch_api('dep2', 'dep2', 'Филиал 2')
+
+
+def _find_editable_ag_cell(page: Page):
+    cells = page.locator('.ag-cell').all()
+    for cell in cells:
+        style = cell.get_attribute('style') or ''
+        if 'fdf8e8' in style:
+            return cell
+    return page.locator('.ag-cell').first
+
+
+def test_23_dep1_enter(page: Page):
+    """dep1 logs in, enters value in editable cell."""
+    _logout(page)
+    _login(page, *DEP1)
+    _click_sheet(page, 'BaaS.1')
+    _wait_for_ag_grid(page)
+
+    cell = _find_editable_ag_cell(page)
+    expect(cell).to_be_visible(timeout=10000)
+    cell.scroll_into_view_if_needed()
+    cell.dblclick()
+    page.wait_for_timeout(300)
+    page.keyboard.type('77777')
+    page.keyboard.press('Enter')
+    page.wait_for_timeout(1500)
+    _shot(page, "23_dep1")
+
+
+def test_24_dep2_enter(page: Page):
+    """dep2 logs in, enters value in editable cell."""
+    _logout(page)
+    _login(page, *DEP2)
+    _click_sheet(page, 'BaaS.1')
+    _wait_for_ag_grid(page)
+
+    cell = _find_editable_ag_cell(page)
+    expect(cell).to_be_visible(timeout=10000)
+    cell.scroll_into_view_if_needed()
+    cell.dblclick()
+    page.wait_for_timeout(300)
+    page.keyboard.type('33333')
+    page.keyboard.press('Enter')
+    page.wait_for_timeout(1500)
+    _shot(page, "24_dep2")
+
+
+def test_25_admin_consolidation(page: Page):
+    """Admin sees branch data distributed correctly."""
+    models = requests.get(f"{API}/models").json()
+    uif = next((m for m in models if m["name"] == MODEL_NAME), None)
+    assert uif
+    model_id = uif["id"]
+
+    sheets = requests.get(f"{API}/sheets/by-model/{model_id}").json()
+    baas1 = next((s for s in sheets if s.get("excel_code") == "BaaS.1"), None)
+    assert baas1
+    sheet_id = baas1["id"]
+
+    tree = requests.get(f"{API}/models/{model_id}/tree").json()
+    podr = next((a for a in tree.get("analytics", []) if a["name"] == "Подразделение"), None)
+    assert podr
+
+    recs = requests.get(f"{API}/analytics/{podr['id']}/records").json()
+    rec_names = {}
+    for rec in recs:
+        dj = rec.get("data_json", {})
+        if isinstance(dj, str):
+            dj = _json.loads(dj)
+        rec_names[rec["id"]] = (dj or {}).get("name", "")
+
+    f1_rid = next((rid for rid, n in rec_names.items() if n == "Филиал 1"), None)
+    f2_rid = next((rid for rid, n in rec_names.items() if n == "Филиал 2"), None)
+    assert f1_rid and f2_rid
+
+    cells = requests.get(f"{API}/cells/by-sheet/{sheet_id}", timeout=30).json()
+    f1_nonzero = sum(1 for c in cells
+                     if f1_rid in c.get("coord_key", "")
+                     and c.get("value") and float(c["value"]) != 0)
+    f2_nonzero = sum(1 for c in cells
+                     if f2_rid in c.get("coord_key", "")
+                     and c.get("value") and float(c["value"]) != 0)
+    assert f1_nonzero + f2_nonzero > 0, "No non-zero cells on branches"

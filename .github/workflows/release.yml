@@ -126,7 +126,7 @@ jobs:
         env:
           PEBBLE_BASE: http://localhost:8000
           PEBBLE_API: http://localhost:8000/api
-        run: pytest tests/test_full_ui_flow.py -v -s --tb=short
+        run: pytest tests/test_e2e.py -v -s --tb=short
 
       - name: Upload screenshots on failure
         if: failure()
