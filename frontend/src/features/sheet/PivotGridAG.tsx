@@ -775,7 +775,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
               // Single child — no need for group wrapper
               result.push(children[0])
             } else {
-              result.push({ headerName: recordLabel(leaf), children } as ColGroupDef)
+              result.push({ headerName: recordLabel(leaf), headerClass: 'ag-center-header', children } as ColGroupDef)
             }
           }
           return result
@@ -784,6 +784,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         const children = buildNested(0, baseTuple)
         return [{
           headerName: recordLabel(primaryLeaf),
+          headerClass: 'ag-center-header',
           children,
         } as ColGroupDef]
       }
@@ -1117,12 +1118,12 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           const tuple = [...parentTuple, { recId: leaf.record.id, label: recordLabel(leaf) }]
           const children = buildNested(extraIdx + 1, tuple)
           if (children.length === 1 && !('children' in children[0])) result.push(children[0])
-          else result.push({ headerName: recordLabel(leaf), children } as ColGroupDef)
+          else result.push({ headerName: recordLabel(leaf), headerClass: 'ag-center-header', children } as ColGroupDef)
         }
         return result
       }
       const baseTuple: RColTuple = [{ recId: primaryLeaf.record.id, label: recordLabel(primaryLeaf) }]
-      return [{ headerName: recordLabel(primaryLeaf), children: buildNested(0, baseTuple) } as ColGroupDef]
+      return [{ headerName: recordLabel(primaryLeaf), headerClass: 'ag-center-header', children: buildNested(0, baseTuple) } as ColGroupDef]
     }
 
     const rebuild = (nodes: RecordNode[], lvl: number): (ColDef | ColGroupDef)[] => {
@@ -1413,7 +1414,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       headerName: label,
       field,
       headerClass: 'ag-center-header',
-      width: autoWidth,
+      initialWidth: autoWidth,
       minWidth: 90,
       wrapText: true,
       autoHeight: true,
@@ -1619,7 +1620,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       colId,
       headerName: label,
       headerClass: 'ag-center-header',
-      width: Math.max(100, label.length * 9 + 24),
+      initialWidth: Math.max(100, label.length * 9 + 24),
       minWidth: 80,
       editable: false,
       valueGetter: (p: any) => {
@@ -1680,6 +1681,22 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       tooltipComponent: FormulaTooltip,
     }
   }
+
+  const defaultColDef = useMemo<ColDef>(() => ({
+    resizable: true,
+    sortable: false,
+    filter: false,
+    headerClass: 'ag-center-header',
+    suppressKeyboardEvent: (params: any) => {
+      if (!params.editing) return false
+      const k = params.event?.key
+      if (k === 'ArrowUp' || k === 'ArrowDown' || k === 'ArrowLeft' || k === 'ArrowRight') {
+        params.api.stopEditing(false)
+        return false
+      }
+      return false
+    },
+  }), [])
 
   const getDataPath = useCallback((data: RowDatum) => data.path, [])
 
@@ -2378,23 +2395,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
             recalcStatusPanel: RecalcStatusPanel,
             selectionStatusPanel: SelectionStatusPanel,
           }}
-          defaultColDef={{
-            resizable: true,
-            sortable: false,
-            filter: false,
-            headerClass: 'ag-center-header',
-            // Commit edit on arrow keys — AG Grid will navigate to the next
-            // cell naturally after stopEditing.
-            suppressKeyboardEvent: (params: any) => {
-              if (!params.editing) return false
-              const k = params.event?.key
-              if (k === 'ArrowUp' || k === 'ArrowDown' || k === 'ArrowLeft' || k === 'ArrowRight') {
-                params.api.stopEditing(false)
-                return false // let grid consume the arrow for navigation
-              }
-              return false
-            },
-          }}
+          defaultColDef={defaultColDef}
         />
       </Box>
 

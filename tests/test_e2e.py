@@ -307,23 +307,31 @@ def test_10_period_chips_toggle(page: Page):
     chip = chips.first
     expect(chip).to_be_visible()
     # Chip should be a simple clickable element (not a 3-button group)
-    # Verify no ToggleButtonGroup inside
     toggle_buttons = chip.locator('.MuiToggleButton-root')
     assert toggle_buttons.count() == 0, "Period chip should be a simple Chip, not ToggleButtonGroup"
-    # Count columns before toggle
-    cols_before = page.locator('.ag-header-cell').count()
-    # Click to toggle on
+    # Chips default to ON (filled). Turn off first, then verify toggle adds columns.
+    is_on = chip.evaluate("el => el.className.includes('MuiChip-filled')")
+    if is_on:
+        chip.click()
+        page.wait_for_timeout(1500)
+    cols_off = page.evaluate(
+        "() => window.__pebbleGridApi ? window.__pebbleGridApi.getColumns().length : 0"
+    )
+    # Click to toggle ON — sum columns should appear
     chip.click()
     page.wait_for_timeout(1500)
-    # Should now have more columns (sum columns added)
-    cols_after = page.locator('.ag-header-cell').count()
-    assert cols_after > cols_before, f"Sum columns should appear after toggle ON ({cols_before} -> {cols_after})"
+    cols_on = page.evaluate(
+        "() => window.__pebbleGridApi ? window.__pebbleGridApi.getColumns().length : 0"
+    )
+    assert cols_on > cols_off, f"Sum columns should appear after toggle ON ({cols_off} -> {cols_on})"
     _shot(page, "10_period_on")
-    # Click again to toggle off
+    # Click to toggle OFF — sum columns should disappear
     chip.click()
     page.wait_for_timeout(1500)
-    cols_final = page.locator('.ag-header-cell').count()
-    assert cols_final <= cols_before + 1, "Sum columns should disappear after toggle OFF"
+    cols_final = page.evaluate(
+        "() => window.__pebbleGridApi ? window.__pebbleGridApi.getColumns().length : 0"
+    )
+    assert cols_final < cols_on, f"Sum columns should disappear after toggle OFF ({cols_on} -> {cols_final})"
     _shot(page, "10_period_off")
 
 
