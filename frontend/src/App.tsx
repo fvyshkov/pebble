@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import {
   IconButton, Tooltip, Badge, Select, MenuItem, FormControl,
   Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, CircularProgress,
-  ToggleButton, ToggleButtonGroup, Typography, Box, Chip,
+  ToggleButton, ToggleButtonGroup, Typography, Box, Chip, Popover, List, ListItem, ListItemIcon, ListItemText,
 } from '@mui/material'
 import RefreshOutlined from '@mui/icons-material/RefreshOutlined'
 import MenuOutlined from '@mui/icons-material/MenuOutlined'
@@ -22,6 +22,10 @@ import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import WarningAmberOutlined from '@mui/icons-material/WarningAmberOutlined'
 import DeleteSweepOutlined from '@mui/icons-material/DeleteSweepOutlined'
 import TranslateOutlined from '@mui/icons-material/TranslateOutlined'
+import UndoOutlined from '@mui/icons-material/UndoOutlined'
+import ArrowDropDownOutlined from '@mui/icons-material/ArrowDropDownOutlined'
+import FormatListNumberedOutlined from '@mui/icons-material/FormatListNumberedOutlined'
+import DragIndicatorOutlined from '@mui/icons-material/DragIndicatorOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
@@ -29,7 +33,7 @@ import CenterPanel from './panels/CenterPanel'
 import Splitter from './components/Splitter'
 import UsersDialog from './components/UsersDialog'
 // PivotGrid removed — AG Grid is the only grid
-import PivotGridAG from './features/sheet/PivotGridAG'
+import PivotGridAG, { type PivotGridAGHandle } from './features/sheet/PivotGridAG'
 import ChatPanel from './features/chat/ChatPanel'
 import ChartPanel, { type ChartConfig } from './features/chart/ChartPanel'
 import PresentationPanel from './features/presentation/PresentationPanel'
@@ -271,6 +275,20 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   })
   useEffect(() => { localStorage.setItem('pebble_chatWidth', String(chatWidth)) }, [chatWidth])
   const [chatImportFile, setChatImportFile] = useState<File | null>(null)
+  // ── Undo state ──
+  const gridRef = useRef<PivotGridAGHandle>(null)
+  const [hasUndo, setHasUndo] = useState(false)
+  const [undoAnchor, setUndoAnchor] = useState<HTMLElement | null>(null)
+  const [undoItems, setUndoItems] = useState<any[]>([])
+  const [undoHoverIdx, setUndoHoverIdx] = useState<number | null>(null)
+
+  // ── Analytics order dialog ──
+  const [reorderOpen, setReorderOpen] = useState(false)
+  const [reorderItems, setReorderItems] = useState<string[]>([])
+  const [reorderNames, setReorderNames] = useState<Record<string, string>>({})
+  const reorderDragIdx = useRef<number | null>(null)
+  const [reorderDragOver, setReorderDragOver] = useState<number | null>(null)
+
   // AG Grid is the only grid mode now.
   const [chartConfig, setChartConfig] = useState<ChartConfig | null>(null)
   const [presentation, setPresentation] = useState<{ html: string; title: string } | null>(null)
@@ -364,7 +382,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
         setChatOpen(v => !v)
         return
       }
-      // Cmd/Ctrl+Z → history undo
+      // Cmd/Ctrl+Z → history undo (point update, no full reload)
       if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && ev.key.toLowerCase() === 'z') {
         if (isEditable()) return
         const modelId = selection?.modelId
@@ -373,8 +391,14 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
         try {
           const hist = await api.getModelHistory(modelId, 1)
           if (hist.length > 0) {
-            await api.undoChanges(modelId, hist[0].id)
-            setRefreshKey(k => k + 1)
+            const result = await api.undoChanges(modelId, hist[0].id)
+            if (result.all_cells && gridRef.current) {
+              gridRef.current.applyCellUpdates(result.all_cells)
+            } else {
+              setRefreshKey(k => k + 1)
+            }
+            // Refresh undo state
+            api.getModelHistory(modelId, 1).then(h => setHasUndo(h.length > 0)).catch(() => {})
           }
         } catch { /* ignore */ }
       }
@@ -518,6 +542,118 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             </Tooltip>
           )}
 
+          {/* Analytics order button */}
+          {isSheetSelected && (
+            <Tooltip title={t('app.analyticsOrder', 'Порядок аналитик')}>
+              <IconButton size="small" onClick={() => {
+                const info = gridRef.current?.getAnalyticsInfo()
+                if (info) {
+                  setReorderItems(info.order)
+                  setReorderNames(info.names)
+                  setReorderOpen(true)
+                }
+              }}>
+                <FormatListNumberedOutlined fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
+
+          {/* Undo button + dropdown */}
+          {isSheetSelected && (
+            <>
+              <Tooltip title={t('app.undo', 'Отменить')}>
+                <span>
+                  <IconButton size="small" disabled={!hasUndo} data-testid="undo-btn" onClick={async () => {
+                    const modelId = selection?.modelId
+                    if (!modelId) return
+                    try {
+                      const hist = await api.getModelHistory(modelId, 1)
+                      if (hist.length > 0) {
+                        const result = await api.undoChanges(modelId, hist[0].id)
+                        if (result.all_cells && gridRef.current) {
+                          gridRef.current.applyCellUpdates(result.all_cells)
+                        } else {
+                          setRefreshKey(k => k + 1)
+                        }
+                        api.getModelHistory(modelId, 1).then(h => setHasUndo(h.length > 0)).catch(() => {})
+                      }
+                    } catch { /* ignore */ }
+                  }}>
+                    <UndoOutlined fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title={t('app.undoHistory', 'История изменений')}>
+                <span>
+                  <IconButton size="small" disabled={!hasUndo} data-testid="undo-dropdown-btn" onClick={async (e) => {
+                    const modelId = selection?.modelId
+                    if (!modelId) return
+                    try {
+                      const items = await api.getModelHistory(modelId, 20)
+                      setUndoItems(items)
+                      setUndoHoverIdx(null)
+                      setUndoAnchor(e.currentTarget)
+                    } catch { /* ignore */ }
+                  }}>
+                    <ArrowDropDownOutlined fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Popover
+                open={!!undoAnchor}
+                anchorEl={undoAnchor}
+                onClose={() => setUndoAnchor(null)}
+                anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+                transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+              >
+                <Box sx={{ maxHeight: 320, overflowY: 'auto', minWidth: 300 }}>
+                  {undoItems.length === 0 && (
+                    <Typography sx={{ p: 2, fontSize: 12, color: '#999' }}>{t('app.noHistory', 'Нет истории')}</Typography>
+                  )}
+                  {undoItems.map((item, i) => (
+                    <Box
+                      key={item.id}
+                      sx={{
+                        px: 1.5, py: 0.7, cursor: 'pointer', fontSize: 12, borderBottom: '1px solid #f0f0f0',
+                        bgcolor: undoHoverIdx !== null && i <= undoHoverIdx ? '#e3f2fd' : 'transparent',
+                        '&:hover': { bgcolor: '#e3f2fd' },
+                      }}
+                      onMouseEnter={() => setUndoHoverIdx(i)}
+                      onMouseLeave={() => setUndoHoverIdx(null)}
+                      onClick={async () => {
+                        setUndoAnchor(null)
+                        const modelId = selection?.modelId
+                        if (!modelId) return
+                        try {
+                          const result = await api.undoChanges(modelId, item.id)
+                          if (result.all_cells && gridRef.current) {
+                            gridRef.current.applyCellUpdates(result.all_cells)
+                          } else {
+                            setRefreshKey(k => k + 1)
+                          }
+                          api.getModelHistory(modelId, 1).then(h => setHasUndo(h.length > 0)).catch(() => {})
+                        } catch { /* ignore */ }
+                      }}
+                    >
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1 }}>
+                        <Typography sx={{ fontSize: 12, fontWeight: 500, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {item.description || item.sheet_name || '?'}
+                        </Typography>
+                        <Typography sx={{ fontSize: 11, color: '#999', whiteSpace: 'nowrap' }}>
+                          {item.created_at?.slice(11, 16) || ''}
+                        </Typography>
+                      </Box>
+                      <Typography sx={{ fontSize: 11, color: '#666' }}>
+                        {item.old_value ?? '∅'} → {item.new_value ?? '∅'}
+                        {item.username ? ` · ${item.username}` : ''}
+                      </Typography>
+                    </Box>
+                  ))}
+                </Box>
+              </Popover>
+            </>
+          )}
+
           <div style={{ flex: 1 }} />
 
           <LanguageSwitcher />
@@ -584,11 +720,13 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               <CenterPanel selection={selection} onRefresh={onRefresh} />
             ) : isSheetSelected ? (
               <PivotGridAG
+                ref={gridRef}
                 key={`ag-${selection.id}-${refreshKey}-${mode}`}
                 sheetId={selection.id} modelId={selection.modelId}
                 currentUserId={currentUserId}
                 calcProgress={calcProgress}
                 mode={mode === 'formulas' ? 'formulas' : 'data'}
+                onUndoStateChange={setHasUndo}
               />
             ) : (
               <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
@@ -629,6 +767,39 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
         </div>
 
         <UsersDialog open={showUsers} onClose={() => setShowUsers(false)} />
+
+        {/* Analytics reorder dialog */}
+        <Dialog open={reorderOpen} onClose={() => setReorderOpen(false)} maxWidth="xs" fullWidth>
+          <DialogTitle>{t('app.analyticsOrder', 'Порядок аналитик')}</DialogTitle>
+          <DialogContent>
+            <Typography variant="caption" color="textSecondary" sx={{ mb: 1, display: 'block' }}>
+              {t('app.analyticsOrderHint', 'Первая = столбцы, остальные = строки (вложенность по порядку)')}
+            </Typography>
+            <List dense>
+              {reorderItems.map((id, i) => (
+                <ListItem key={id} draggable
+                  onDragStart={() => { reorderDragIdx.current = i }}
+                  onDragOver={e => { e.preventDefault(); setReorderDragOver(i) }}
+                  onDrop={() => {
+                    const from = reorderDragIdx.current
+                    if (from !== null && from !== i) {
+                      const n = [...reorderItems]
+                      const [m] = n.splice(from, 1)
+                      n.splice(i, 0, m)
+                      setReorderItems(n)
+                      gridRef.current?.applyAnalyticsOrder(n)
+                    }
+                    reorderDragIdx.current = null; setReorderDragOver(null)
+                  }}
+                  onDragEnd={() => { reorderDragIdx.current = null; setReorderDragOver(null) }}
+                  sx={{ cursor: 'grab', borderTop: reorderDragOver === i ? '2px solid #1976d2' : '2px solid transparent' }}>
+                  <ListItemIcon sx={{ minWidth: 28 }}><DragIndicatorOutlined sx={{ fontSize: 16, color: '#bbb' }} /></ListItemIcon>
+                  <ListItemText primary={`${i + 1}. ${reorderNames[id] || id}`} />
+                </ListItem>
+              ))}
+            </List>
+          </DialogContent>
+        </Dialog>
 
         <Dialog open={confirmDeleteAll} onClose={() => setConfirmDeleteAll(false)}>
           <DialogTitle>{t('app.deleteAllTitle')}</DialogTitle>

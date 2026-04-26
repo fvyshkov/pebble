@@ -366,7 +366,7 @@ def test_11_column_resize_persists(page: Page):
 
 
 def test_12_undo_button_exists(page: Page):
-    """Undo button and dropdown visible in grid toolbar."""
+    """Undo button and dropdown visible in main toolbar."""
     undo_btn = page.locator('[data-testid="undo-btn"]')
     expect(undo_btn).to_be_visible(timeout=3000)
     dropdown_btn = page.locator('[data-testid="undo-dropdown-btn"]')

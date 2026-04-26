@@ -7,11 +7,9 @@
  * rows. We feed AG Grid a flat list of rows with explicit `path: string[]`
  * and `treeData={true}`.
  */
-import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef, forwardRef, useImperativeHandle } from 'react'
 import { Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, LinearProgress, Popover, Snackbar, Tooltip, Typography, Button as MUIButton, IconButton } from '@mui/material'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
-import UndoOutlined from '@mui/icons-material/UndoOutlined'
-import ArrowDropDownOutlined from '@mui/icons-material/ArrowDropDownOutlined'
 import * as am5 from '@amcharts/amcharts5'
 import * as am5xy from '@amcharts/amcharts5/xy'
 import * as am5percent from '@amcharts/amcharts5/percent'
@@ -140,6 +138,18 @@ interface Props {
   calcProgress?: CalcProgress | null
   /** 'data' — values; 'formulas' — show rule label or formula text (admin). */
   mode?: 'data' | 'formulas'
+  /** Called when undo availability changes (true = has history to undo). */
+  onUndoStateChange?: (hasUndo: boolean) => void
+}
+
+/** Methods exposed to parent via ref. */
+export interface PivotGridAGHandle {
+  /** Apply point cell updates from undo — allCells is a map of coord_key → value. */
+  applyCellUpdates: (allCells: Record<string, string | null>) => void
+  /** Get current analytics order + names for reorder dialog. */
+  getAnalyticsInfo: () => { order: string[]; names: Record<string, string> } | null
+  /** Apply a new analytics display order and reload the grid. */
+  applyAnalyticsOrder: (newOrder: string[]) => void
 }
 
 interface RowDatum {
@@ -323,7 +333,7 @@ function CalcProgressChip({ calcProgress, localRunning }: {
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgress, mode = 'data' }: Props) {
+const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ sheetId, modelId, currentUserId, calcProgress, mode = 'data', onUndoStateChange }, ref) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -398,50 +408,15 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
   const mainAnalyticIdRef = useRef<string | null>(null)
   const mainAnalyticIdxRef = useRef<number>(-1)
 
-  // Undo toolbar state
-  const [undoAnchor, setUndoAnchor] = useState<HTMLElement | null>(null)
-  const [undoItems, setUndoItems] = useState<any[]>([])
-  const [hasUndo, setHasUndo] = useState(false)
-  const [undoHoverIdx, setUndoHoverIdx] = useState<number | null>(null)
-  // loadRef holds reference to the load() function (declared later via useCallback)
-  // so undo handlers can trigger a full grid reload.
-  const loadRef = useRef<() => Promise<void>>(() => Promise.resolve())
-
   const refreshUndoState = useCallback(() => {
-    api.getModelHistory(modelId, 1).then(h => setHasUndo(h.length > 0)).catch(() => {})
-  }, [modelId])
+    api.getModelHistory(modelId, 1).then(h => onUndoStateChange?.(h.length > 0)).catch(() => {})
+  }, [modelId, onUndoStateChange])
 
   // Check undo availability on mount
   useEffect(() => { refreshUndoState() }, [refreshUndoState])
 
-  const handleUndo = useCallback(async () => {
-    try {
-      const hist = await api.getModelHistory(modelId, 1)
-      if (hist.length > 0) {
-        await api.undoChanges(modelId, hist[0].id)
-        await loadRef.current()
-        refreshUndoState()
-      }
-    } catch { /* ignore */ }
-  }, [modelId, refreshUndoState])
-
-  const openUndoDropdown = useCallback(async (el: HTMLElement) => {
-    try {
-      const items = await api.getModelHistory(modelId, 20)
-      setUndoItems(items)
-      setUndoHoverIdx(null)
-      setUndoAnchor(el)
-    } catch { /* ignore */ }
-  }, [modelId])
-
-  const handleUndoTo = useCallback(async (idx: number) => {
-    setUndoAnchor(null)
-    try {
-      await api.undoChanges(modelId, undoItems[idx].id)
-      await loadRef.current()
-      refreshUndoState()
-    } catch { /* ignore */ }
-  }, [modelId, undoItems, refreshUndoState])
+  // Ref to current analytics order + names (populated by load())
+  const analyticsInfoRef = useRef<{ order: string[]; names: Record<string, string> } | null>(null)
 
   // Chart overlay + history dialog
   const [chartOverlay, setChartOverlay] = useState<{ type: string; labels: string[]; datasets: { label: string; data: number[] }[] } | null>(null)
@@ -687,6 +662,11 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       }
       pinnedRef.current = effectivePinned
 
+      // Populate analytics info for reorder dialog
+      const aNames: Record<string, string> = {}
+      for (const aid of curOrder) aNames[aid] = aMap[aid]?.name || aid.slice(0, 8)
+      analyticsInfoRef.current = { order: curOrder, names: aNames }
+
       const colAId = curOrder[0]
       colAIdRef.current = colAId
       const rowAIds = curOrder.slice(1).filter(id => !effectivePinned[id])
@@ -912,9 +892,68 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
     }
   }, [sheetId, currentUserId, lookupCell, pinned, recordLabel, t])
 
-  // Keep loadRef in sync so undo handlers can trigger reload
-  loadRef.current = load
   useEffect(() => { load() }, [load])
+
+  // Expose imperative methods to parent via ref
+  useImperativeHandle(ref, () => ({
+    applyCellUpdates(allCells: Record<string, string | null>) {
+      // Update cellMapRef with new values
+      for (const [k, v] of Object.entries(allCells)) {
+        cellMapRef.current[k] = v ?? ''
+      }
+      // Walk all AG Grid rows and update matching cells in-place
+      const g = gridApiRef.current
+      if (!g) return
+      const leafIds = colLeafIdsRef.current
+      g.forEachNode(node => {
+        if (!node.data?.isLeaf) return
+        let changed = false
+        for (const leafId of leafIds) {
+          const coordKey: string | undefined = node.data[`__coord_${leafId}`]
+          if (coordKey && coordKey in allCells) {
+            const newVal = allCells[coordKey] ?? ''
+            node.data[`p_${leafId}`] = newVal
+            changed = true
+          }
+        }
+        if (changed) {
+          g.refreshCells({ rowNodes: [node], force: true })
+        }
+      })
+      // Also recompute parent (sum) rows
+      g.forEachNode(node => {
+        if (!node.data || node.data.isLeaf) return
+        let anyChange = false
+        for (const leafId of leafIds) {
+          let sum = 0
+          let hasChild = false
+          node.allLeafChildren?.forEach(child => {
+            if (child.data?.isLeaf) {
+              const v = parseFloat(child.data[`p_${leafId}`])
+              if (!isNaN(v)) { sum += v; hasChild = true }
+            }
+          })
+          if (hasChild) {
+            node.data[`p_${leafId}`] = sum
+            anyChange = true
+          }
+        }
+        if (anyChange) g.refreshCells({ rowNodes: [node], force: true })
+      })
+    },
+    getAnalyticsInfo() {
+      return analyticsInfoRef.current
+    },
+    applyAnalyticsOrder(newOrder: string[]) {
+      // Save to view settings and reload
+      const vs: any = { order: newOrder, pinned, colLevelToggles }
+      if (savedColumnStateRef.current) vs.columnState = savedColumnStateRef.current
+      vs._user_id = currentUserId
+      api.saveViewSettings(sheetId, vs).catch(() => {})
+      // Force reload by calling load
+      load()
+    },
+  }), [sheetId, currentUserId, pinned, colLevelToggles, load])
 
   // In formulas mode, resolve indicator-rule formulas for all known coord keys
   // (so HEAD cells driven by consolidation/scoped rules show their formula +
@@ -2152,64 +2191,7 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
             })}
           </Box>
         )}
-        {/* Spacer to push undo to the right */}
         <Box sx={{ flex: 1 }} />
-        {/* Undo button + dropdown */}
-        <Box sx={{ display: 'flex', alignItems: 'center', ml: 1 }}>
-          <Tooltip title={t('grid.undo', 'Отменить')}>
-            <span>
-              <IconButton size="small" disabled={!hasUndo} onClick={handleUndo} data-testid="undo-btn">
-                <UndoOutlined sx={{ fontSize: 18 }} />
-              </IconButton>
-            </span>
-          </Tooltip>
-          <Tooltip title={t('grid.undoHistory', 'История изменений')}>
-            <span>
-              <IconButton size="small" disabled={!hasUndo} onClick={e => openUndoDropdown(e.currentTarget)} data-testid="undo-dropdown-btn">
-                <ArrowDropDownOutlined sx={{ fontSize: 18 }} />
-              </IconButton>
-            </span>
-          </Tooltip>
-          <Popover
-            open={!!undoAnchor}
-            anchorEl={undoAnchor}
-            onClose={() => setUndoAnchor(null)}
-            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-          >
-            <Box sx={{ maxHeight: 320, overflowY: 'auto', minWidth: 280 }}>
-              {undoItems.length === 0 && (
-                <Typography sx={{ p: 2, fontSize: 12, color: '#999' }}>{t('grid.noHistory', 'Нет истории')}</Typography>
-              )}
-              {undoItems.map((item, i) => (
-                <Box
-                  key={item.id}
-                  sx={{
-                    px: 1.5, py: 0.7, cursor: 'pointer', fontSize: 12, borderBottom: '1px solid #f0f0f0',
-                    bgcolor: undoHoverIdx !== null && i <= undoHoverIdx ? '#e3f2fd' : 'transparent',
-                    '&:hover': { bgcolor: '#e3f2fd' },
-                  }}
-                  onMouseEnter={() => setUndoHoverIdx(i)}
-                  onMouseLeave={() => setUndoHoverIdx(null)}
-                  onClick={() => handleUndoTo(i)}
-                >
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1 }}>
-                    <Typography sx={{ fontSize: 12, fontWeight: 500 }}>
-                      {item.coord_key?.split('|').pop() || '?'}
-                    </Typography>
-                    <Typography sx={{ fontSize: 11, color: '#999', whiteSpace: 'nowrap' }}>
-                      {item.created_at?.slice(11, 16) || ''}
-                    </Typography>
-                  </Box>
-                  <Typography sx={{ fontSize: 11, color: '#666' }}>
-                    {item.old_value ?? '∅'} → {item.new_value ?? '∅'}
-                    {item.username ? ` · ${item.username}` : ''}
-                  </Typography>
-                </Box>
-              ))}
-            </Box>
-          </Popover>
-        </Box>
       </Box>
       <Box sx={{ flex: 1, minHeight: 0 }} ref={gridContainerRef}>
         <AgGridReact
@@ -2411,4 +2393,6 @@ export default function PivotGridAG({ sheetId, modelId, currentUserId, calcProgr
       />
     </Box>
   )
-}
+})
+
+export default PivotGridAG

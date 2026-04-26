@@ -337,7 +337,18 @@ async def get_model_history(model_id: str, limit: int = 10):
         return []
     sheet_names = {r["id"]: r["name"] for r in sheet_rows}
 
-    # Get ALL recent history and filter in Python
+    # Build a lookup: record_id → record name for all records in this model
+    rec_names: dict[str, str] = {}
+    name_rows = await db.execute_fetchall(
+        """SELECT ar.id, json_extract(ar.data_json, '$.name') as name
+           FROM analytic_records ar
+           JOIN analytics a ON a.id = ar.analytic_id
+           WHERE a.model_id = ?""",
+        (model_id,),
+    )
+    for nr in name_rows:
+        rec_names[nr["id"]] = nr["name"] or nr["id"][:8]
+
     # Fetch history for each sheet individually (workaround for aiosqlite query issues)
     rows = []
     for sid in sheet_names:
@@ -349,11 +360,18 @@ async def get_model_history(model_id: str, limit: int = 10):
             (sid, limit),
         )
         rows.extend(sheet_rows)
+    # Sort all rows by created_at DESC across sheets
+    rows.sort(key=lambda r: r["created_at"], reverse=True)
     result = []
     for r in rows:
         if r["sheet_id"] in sheet_names:
             d = dict(r)
             d["sheet_name"] = sheet_names[r["sheet_id"]]
+            # Resolve coord_key parts to human-readable names
+            parts = (r["coord_key"] or "").split("|")
+            d["description"] = " · ".join(
+                rec_names.get(p, p[:8]) for p in parts if p
+            )
             result.append(d)
             if len(result) >= limit:
                 break
@@ -388,19 +406,32 @@ async def undo(model_id: str, body: UndoIn):
         return {"error": "No changes to undo"}
 
     undone = 0
+    changes = []
     for r in rows:
         await db.execute(
             "UPDATE cell_data SET value = ? WHERE sheet_id = ? AND coord_key = ?",
             (r["old_value"], r["sheet_id"], r["coord_key"]),
         )
         await db.execute("DELETE FROM cell_history WHERE id = ?", (r["id"],))
+        changes.append({"sheet_id": r["sheet_id"], "coord_key": r["coord_key"], "value": r["old_value"]})
         undone += 1
 
     # Recalc
     sheet_id = rows[0]["sheet_id"]
     computed = await _recalc_model(db, sheet_id)
     await db.commit()
-    return {"undone": undone, "computed": computed}
+
+    # After recalc, read back all cell values for affected sheets so frontend
+    # can apply computed changes too (formulas may have cascaded).
+    affected_sheets = {c["sheet_id"] for c in changes}
+    all_cells: dict[str, str | None] = {}
+    for sid in affected_sheets:
+        cell_rows = await db.execute_fetchall(
+            "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (sid,))
+        for cr in cell_rows:
+            all_cells[cr["coord_key"]] = cr["value"]
+
+    return {"undone": undone, "computed": computed, "changes": changes, "all_cells": all_cells}
 
 
 @router.delete("/model-history/{model_id}")
