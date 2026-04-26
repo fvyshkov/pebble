@@ -8,8 +8,37 @@ permissions:
   contents: write
 
 jobs:
+  # ── Build pebble_calc Rust module (shared by test jobs) ──
+  build-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-calc
+
+      - name: Build wheel
+        run: |
+          pip install maturin
+          cd rust-calc
+          maturin build --release -o ../dist-wheels
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pebble-calc-wheel
+          path: dist-wheels/*.whl
+
   # ── Fast backend unit tests (in-memory DB, no server needed) ──
   unit-tests:
+    needs: build-rust
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -20,10 +49,16 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: pebble-calc-wheel
+          path: dist-wheels
+
       - name: Install deps
         run: |
           pip install -r requirements.txt
           pip install pytest pytest-asyncio httpx
+          pip install dist-wheels/*.whl
 
       - name: Run backend API tests
         env:
@@ -32,6 +67,7 @@ jobs:
 
   # ── Excel import + recalc verification ──
   xls-tests:
+    needs: build-rust
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -42,10 +78,16 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: pebble-calc-wheel
+          path: dist-wheels
+
       - name: Install deps
         run: |
           pip install -r requirements.txt
           pip install pytest requests openpyxl
+          pip install dist-wheels/*.whl
 
       - name: Start backend
         run: |
@@ -76,6 +118,7 @@ jobs:
 
   # ── E2E UI tests (Playwright) ──
   e2e-tests:
+    needs: build-rust
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -92,10 +135,16 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package.json
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: pebble-calc-wheel
+          path: dist-wheels
+
       - name: Install backend deps
         run: |
           pip install -r requirements.txt
           pip install pytest pytest-playwright requests
+          pip install dist-wheels/*.whl
 
       - name: Install Playwright browser
         run: python -m playwright install --with-deps chromium
