@@ -2335,6 +2335,18 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     ]
   }, [showHistory, buildChartFromSelection, t])
 
+  // Dynamic CSS for analytic header colors (injected as <style> tag).
+  // Must be before early returns to satisfy React hooks rules.
+  const analyticColorCss = useMemo(() => {
+    const rules: string[] = []
+    for (const [aid, color] of Object.entries(analyticColorsRef.current)) {
+      if (!color) continue
+      const cls = `peb-ahdr-${aid.slice(0, 8)}`
+      rules.push(`.${cls} { background: ${color} !important; }`)
+    }
+    return rules.join('\n')
+  }, [analyticsMap])
+
   // ── Render ─────────────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -2349,17 +2361,6 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   }
 
   const pinnedEntries = Object.keys(pinned).filter(aId => !!pinned[aId])
-
-  // Dynamic CSS for analytic header colors (injected as <style> tag).
-  const analyticColorCss = useMemo(() => {
-    const rules: string[] = []
-    for (const [aid, color] of Object.entries(analyticColorsRef.current)) {
-      if (!color) continue
-      const cls = `peb-ahdr-${aid.slice(0, 8)}`
-      rules.push(`.${cls} { background: ${color} !important; }`)
-    }
-    return rules.join('\n')
-  }, [analyticsMap])
 
   return (
     <Box sx={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
