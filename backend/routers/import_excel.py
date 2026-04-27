@@ -228,16 +228,11 @@ def _extract_sheet_text(ws, sheet_name: str, max_rows: int = 500) -> str:
                     formula_m1 = str(cv)[:20]
                     continue
 
-        # Outline (group) level from Excel row grouping
-        outline_level = ws.row_dimensions[r].outline_level if hasattr(ws.row_dimensions[r], 'outline_level') else 0
-
         flags = []
         if is_bold:
             flags.append("BOLD")
         if indent:
             flags.append(f"indent={int(indent)}")
-        if outline_level:
-            flags.append(f"outline={outline_level}")
         if has_data:
             flags.append("HAS_DATA")
         if has_formula:
