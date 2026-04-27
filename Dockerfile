@@ -1,3 +1,18 @@
+# ── Stage 1: build Rust pebble_calc wheel ──
+FROM python:3.12-slim AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl build-essential \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+COPY rust-calc/ ./rust-calc/
+RUN pip install maturin && cd rust-calc && maturin build --release -o /wheels
+
+# ── Stage 2: final image ──
 FROM python:3.12-slim
 
 # Install Node.js (for frontend build) and curl
@@ -12,6 +27,10 @@ WORKDIR /app
 # Python deps (cached separately from source)
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt uvicorn
+
+# Install Rust wheel from builder stage
+COPY --from=rust-builder /wheels/*.whl /tmp/
+RUN pip install /tmp/*.whl && rm -f /tmp/*.whl
 
 # Frontend deps (cached separately from source)
 COPY frontend/package.json frontend/package-lock.json* ./frontend/
