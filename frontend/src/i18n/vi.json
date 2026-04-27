@@ -182,7 +182,8 @@
     "removeFromAll": "Xóa khỏi tất cả trang tính",
     "name": "Tên",
     "code": "Mã",
-    "formulasSuggested": ", công thức: {{count}}"
+    "formulasSuggested": ", công thức: {{count}}",
+    "color": "Màu sắc"
   },
   "fields": {
     "title": "Trường",
@@ -270,6 +271,7 @@
     "delete": "Xóa",
     "close": "Đóng",
     "error": "Lỗi",
-    "loading": "Đang tải…"
+    "loading": "Đang tải…",
+    "reset": "Đặt lại"
   }
 }

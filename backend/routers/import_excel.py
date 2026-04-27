@@ -2198,6 +2198,32 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
             if item.get("children"):
                 await insert_items(item["children"], rid)
 
+    # Deduplicate indicator names: scan all names, number duplicates (#2, #3, …).
+    # This makes names globally unique so formula references are unambiguous.
+    def _dedup_names(items: list[dict]):
+        """Collect all names, then rename duplicates with #N suffix."""
+        all_names: list[tuple[str, dict]] = []
+        def _collect(lst):
+            for item in lst:
+                if item.get("name"):
+                    all_names.append((item["name"].lower(), item))
+                if item.get("children"):
+                    _collect(item["children"])
+        _collect(items)
+        # Count occurrences per lowercase name
+        from collections import Counter
+        counts = Counter(n for n, _ in all_names)
+        # Assign sequential numbers to duplicates
+        seen: dict[str, int] = {}
+        for name_lower, item in all_names:
+            if counts[name_lower] <= 1:
+                continue  # unique — no renaming needed
+            idx = seen.get(name_lower, 0) + 1
+            seen[name_lower] = idx
+            if idx >= 2:
+                item["name"] = f"{item['name']} #{idx}"
+    _dedup_names(indicators)
+
     await insert_items(indicators, None)
 
     # Build row_to_name and row_to_parent_name mappings for formula translator

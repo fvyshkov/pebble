@@ -263,13 +263,20 @@ def _translate_ref(
     if name is None:
         return ref["original"]  # Can't resolve — keep original
 
-    # Check if name is duplicate in the row map — if so, disambiguate with #rowN
-    # Always use #row hint (not parent/child combo) because the engine resolves
-    # #row hints via excel_row matching, which is reliable and unambiguous.
+    # Check if name is duplicate in the row map — if so, disambiguate with
+    # parent path: "Parent/Indicator". The calc engine resolves Parent/Child
+    # by filtering candidates whose parent record name matches.
     name_lower = name.lower()
     duplicates = sum(1 for r, n in rmap.items() if n.lower() == name_lower)
     if duplicates > 1:
-        name = f"{name}#row{row}"
+        # Try parent name disambiguation
+        pmap_key = sheet_name if sheet_name else "__self__"
+        parent_map = row_to_parent_names.get(pmap_key, {}) if row_to_parent_names else {}
+        parent_name = parent_map.get(row)
+        if parent_name:
+            name = f"{parent_name}/{name}"
+        else:
+            name = f"{name}#row{row}"
 
     # Determine period modifier using period index alignment
     # Use col_to_period_idx mapping if available (skips total columns)

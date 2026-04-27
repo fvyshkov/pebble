@@ -182,7 +182,8 @@
     "removeFromAll": "Удалить со всех листов",
     "name": "Название",
     "code": "Код",
-    "formulasSuggested": ", формул: {{count}}"
+    "formulasSuggested": ", формул: {{count}}",
+    "color": "Цвет"
   },
   "fields": {
     "title": "Поля",
@@ -270,6 +271,7 @@
     "delete": "Удалить",
     "close": "Закрыть",
     "error": "Ошибка",
-    "loading": "Загрузка…"
+    "loading": "Загрузка…",
+    "reset": "Сбросить"
   }
 }

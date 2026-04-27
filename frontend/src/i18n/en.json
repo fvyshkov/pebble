@@ -182,7 +182,8 @@
     "removeFromAll": "Remove from all sheets",
     "name": "Name",
     "code": "Code",
-    "formulasSuggested": ", formulas: {{count}}"
+    "formulasSuggested": ", formulas: {{count}}",
+    "color": "Color"
   },
   "fields": {
     "title": "Fields",
@@ -270,6 +271,7 @@
     "delete": "Delete",
     "close": "Close",
     "error": "Error",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "reset": "Reset"
   }
 }
