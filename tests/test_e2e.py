@@ -100,6 +100,11 @@ def browser_context(browser: Browser):
 @pytest.fixture(scope="module")
 def page(browser_context: BrowserContext):
     p = browser_context.new_page()
+    # Capture browser console errors for debugging CI failures.
+    console_errors: list[str] = []
+    p.on("console", lambda msg: console_errors.append(f"[{msg.type}] {msg.text}") if msg.type in ("error", "warning") else None)
+    p.on("pageerror", lambda exc: console_errors.append(f"[PAGE_ERROR] {exc}"))
+    p._console_errors = console_errors  # type: ignore[attr-defined]
     yield p
     p.close()
 
@@ -178,13 +183,24 @@ def _click_sheet(page: Page, code: str = 'BaaS.1'):
     page.keyboard.press('Escape')
     page.wait_for_timeout(300)
     _open_tree_model(page)
-    sheet = page.locator('li[role="treeitem"][id*="-sheet:"]').filter(
+    sheet = page.locator('li[role="treeitem"][id*="sheet:"]').filter(
         has=page.locator(f'span:text-is("{code}")')).first
     sheet.scroll_into_view_if_needed()
     sheet.locator('.tree-item-label').first.click()
     page.wait_for_timeout(1200)
     _switch_to_data_mode(page)
-    page.locator('.ag-root-wrapper').first.wait_for(state='visible', timeout=15000)
+    _shot(page, f"_click_sheet_{code}")
+    try:
+        page.locator('.ag-root-wrapper').first.wait_for(state='visible', timeout=15000)
+    except Exception:
+        # Dump console errors for debugging
+        errors = getattr(page, '_console_errors', [])
+        if errors:
+            print(f"  [CONSOLE ERRORS before grid timeout]:")
+            for err in errors[-20:]:
+                print(f"    {err}")
+        _shot(page, f"_click_sheet_{code}_FAIL")
+        raise
     page.wait_for_timeout(1500)
 
 
