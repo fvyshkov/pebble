@@ -3726,67 +3726,70 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 yield event(_m("consol_rules", n=total_rules))
 
         # ── Post-import: translate all names to ru/en/ky/vi ──
-        yield event(_m("translating"))
-        try:
-            from backend.translation_service import batch_translate, save_translations, SUPPORTED_LANGS
+        if os.environ.get("PEBBLE_SKIP_TRANSLATE"):
+            yield event(_m("translating") + " (skipped)")
+        else:
+            yield event(_m("translating"))
+            try:
+                from backend.translation_service import batch_translate, save_translations, SUPPORTED_LANGS
 
-            # Collect all names that need translation
-            names_to_translate: list[str] = []
-            entity_map: list[tuple[str, str, str]] = []  # (entity_type, entity_id, name)
+                # Collect all names that need translation
+                names_to_translate: list[str] = []
+                entity_map: list[tuple[str, str, str]] = []  # (entity_type, entity_id, name)
 
-            # Model name
-            names_to_translate.append(model_name_final)
-            entity_map.append(("model", model_id, model_name_final))
+                # Model name
+                names_to_translate.append(model_name_final)
+                entity_map.append(("model", model_id, model_name_final))
 
-            # Sheet names
-            sheets_rows = await db.execute_fetchall(
-                "SELECT id, name FROM sheets WHERE model_id = ?", (model_id,))
-            for sr in sheets_rows:
-                if sr["name"]:
-                    names_to_translate.append(sr["name"])
-                    entity_map.append(("sheet", sr["id"], sr["name"]))
+                # Sheet names
+                sheets_rows = await db.execute_fetchall(
+                    "SELECT id, name FROM sheets WHERE model_id = ?", (model_id,))
+                for sr in sheets_rows:
+                    if sr["name"]:
+                        names_to_translate.append(sr["name"])
+                        entity_map.append(("sheet", sr["id"], sr["name"]))
 
-            # Analytic names
-            analytics_rows = await db.execute_fetchall(
-                "SELECT id, name FROM analytics WHERE model_id = ?", (model_id,))
-            for ar in analytics_rows:
-                if ar["name"]:
-                    names_to_translate.append(ar["name"])
-                    entity_map.append(("analytic", ar["id"], ar["name"]))
+                # Analytic names
+                analytics_rows = await db.execute_fetchall(
+                    "SELECT id, name FROM analytics WHERE model_id = ?", (model_id,))
+                for ar in analytics_rows:
+                    if ar["name"]:
+                        names_to_translate.append(ar["name"])
+                        entity_map.append(("analytic", ar["id"], ar["name"]))
 
-            # Analytic record names (indicator names, period names)
-            record_rows = await db.execute_fetchall(
-                """SELECT r.id, r.data_json FROM analytic_records r
-                   JOIN analytics a ON r.analytic_id = a.id
-                   WHERE a.model_id = ?""", (model_id,))
-            for rr in record_rows:
-                try:
-                    dj = json.loads(rr["data_json"]) if isinstance(rr["data_json"], str) else rr["data_json"]
-                    name = dj.get("name", "")
-                    if name:
-                        names_to_translate.append(name)
-                        entity_map.append(("analytic_record", rr["id"], name))
-                except Exception:
-                    pass
+                # Analytic record names (indicator names, period names)
+                record_rows = await db.execute_fetchall(
+                    """SELECT r.id, r.data_json FROM analytic_records r
+                       JOIN analytics a ON r.analytic_id = a.id
+                       WHERE a.model_id = ?""", (model_id,))
+                for rr in record_rows:
+                    try:
+                        dj = json.loads(rr["data_json"]) if isinstance(rr["data_json"], str) else rr["data_json"]
+                        name = dj.get("name", "")
+                        if name:
+                            names_to_translate.append(name)
+                            entity_map.append(("analytic_record", rr["id"], name))
+                    except Exception:
+                        pass
 
-            # Batch translate (deduplicated inside)
-            unique_names = list(dict.fromkeys(names_to_translate))
-            # Translate in chunks of 50 to avoid token limits
-            all_translations: dict[str, dict[str, str]] = {}
-            for i in range(0, len(unique_names), 50):
-                chunk = unique_names[i:i+50]
-                chunk_result = await batch_translate(chunk)
-                all_translations.update(chunk_result)
+                # Batch translate (deduplicated inside)
+                unique_names = list(dict.fromkeys(names_to_translate))
+                # Translate in chunks of 50 to avoid token limits
+                all_translations: dict[str, dict[str, str]] = {}
+                for i in range(0, len(unique_names), 50):
+                    chunk = unique_names[i:i+50]
+                    chunk_result = await batch_translate(chunk)
+                    all_translations.update(chunk_result)
 
-            # Save translations
-            for etype, eid, name in entity_map:
-                tr = all_translations.get(name, {lang: name for lang in SUPPORTED_LANGS})
-                await save_translations(etype, eid, "name", tr, db=db)
+                # Save translations
+                for etype, eid, name in entity_map:
+                    tr = all_translations.get(name, {lang: name for lang in SUPPORTED_LANGS})
+                    await save_translations(etype, eid, "name", tr, db=db)
 
-            await db.commit()
-            yield event(_m("translated_ok", n=len(unique_names), langs=len(SUPPORTED_LANGS)))
-        except Exception as e:
-            yield event(_m("translate_fail", err=e))
+                await db.commit()
+                yield event(_m("translated_ok", n=len(unique_names), langs=len(SUPPORTED_LANGS)))
+            except Exception as e:
+                yield event(_m("translate_fail", err=e))
 
         # ── Post-import: verify values against Excel ──
         try:
