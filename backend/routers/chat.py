@@ -1012,26 +1012,18 @@ async def _exec_tool(name: str, inp: dict, ctx: ChatContext, client_actions: lis
         if name == "delete_model":
             mid = inp["model_id"]
             print(f"[delete_model] Deleting model {mid}")
-            # Gather all sheets
-            sheets = await db.execute_fetchall("SELECT id FROM sheets WHERE model_id = ?", (mid,))
-            sheet_ids = [s["id"] for s in sheets]
-            # Delete cells, formula rules, sheet_analytics, view settings for each sheet
-            for sid in sheet_ids:
-                await db.execute("DELETE FROM cell_data WHERE sheet_id = ?", (sid,))
-                await db.execute("DELETE FROM indicator_formula_rules WHERE sheet_id = ?", (sid,))
-                await db.execute("DELETE FROM sheet_analytics WHERE sheet_id = ?", (sid,))
-                await db.execute("DELETE FROM sheet_view_settings WHERE sheet_id = ?", (sid,))
-            # Delete sheets
+            sheet_sub = "SELECT id FROM sheets WHERE model_id = ?"
+            analytic_sub = "SELECT id FROM analytics WHERE model_id = ?"
+            await db.execute(f"DELETE FROM cell_data WHERE sheet_id IN ({sheet_sub})", (mid,))
+            await db.execute(f"DELETE FROM indicator_formula_rules WHERE sheet_id IN ({sheet_sub})", (mid,))
+            await db.execute(f"DELETE FROM sheet_analytics WHERE sheet_id IN ({sheet_sub})", (mid,))
+            await db.execute(f"DELETE FROM sheet_view_settings WHERE sheet_id IN ({sheet_sub})", (mid,))
             await db.execute("DELETE FROM sheets WHERE model_id = ?", (mid,))
-            # Delete analytics and their records
-            analytics = await db.execute_fetchall("SELECT id FROM analytics WHERE model_id = ?", (mid,))
-            for a in analytics:
-                await db.execute("DELETE FROM analytic_records WHERE analytic_id = ?", (a["id"],))
+            await db.execute(f"DELETE FROM analytic_records WHERE analytic_id IN ({analytic_sub})", (mid,))
             await db.execute("DELETE FROM analytics WHERE model_id = ?", (mid,))
-            # Delete model
             await db.execute("DELETE FROM models WHERE id = ?", (mid,))
             await db.commit()
-            print(f"[delete_model] Done — deleted {len(sheet_ids)} sheets")
+            print(f"[delete_model] Done")
             client_actions.append({"type": "reload_model", "model_id": mid})
             return json.dumps({"ok": True, "deleted_sheets": len(sheet_ids)}, ensure_ascii=False)
 
