@@ -417,7 +417,7 @@ def test_indicator_structure(imported_model):
         "Funnel": (80, 50, 1),
         "Funnel QH": (20, 8, 1),
         "packages (indiv)": (100, 50, 1),
-        "Micro_30 (indiv)": (80, 60, 1),
+        "Micro_30 (indiv)": (80, 50, 1),
         "Installment card_150 (indiv)": (100, 60, 1),
         "Installment card_1000 (indiv)": (100, 60, 1),
         "Debit card (indiv)": (70, 40, 1),

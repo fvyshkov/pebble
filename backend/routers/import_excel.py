@@ -484,16 +484,25 @@ async def _analyze_sheet_with_claude(client, sheet_text: str, retries: int = 3) 
     provider = _get_import_llm_provider()
 
     if provider == "openai-compat":
-        try:
-            result = await _analyze_sheet_with_openai_compat(sheet_text)
-            await _llm_cache_set(sheet_text, result, provider="openai-compat")
-            return result
-        except Exception as e:
-            log.warning("OpenAI-compat provider failed, falling back to Claude: %s", e)
-            # Fallback to Claude
+        import asyncio as _aio
+        last_err = None
+        for attempt in range(retries):
+            try:
+                result = await _analyze_sheet_with_openai_compat(sheet_text)
+                await _llm_cache_set(sheet_text, result, provider="openai-compat")
+                return result
+            except Exception as e:
+                last_err = e
+                log.warning("OpenAI-compat attempt %d/%d failed: %s", attempt + 1, retries, e)
+                if attempt < retries - 1:
+                    await _aio.sleep(2 ** attempt)
+        # All retries failed — try Claude fallback if available
+        if os.environ.get("ANTHROPIC_API_KEY") and client is not None:
+            log.warning("Falling back to Claude after %d failures", retries)
             result = await _analyze_sheet_with_claude_direct(client, sheet_text, retries)
             await _llm_cache_set(sheet_text, result, provider="claude-fallback")
             return result
+        raise RuntimeError(f"LLM analysis failed after {retries} retries: {last_err}")
 
     # Explicit Claude mode
     result = await _analyze_sheet_with_claude_direct(client, sheet_text, retries)
