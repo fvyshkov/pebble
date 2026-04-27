@@ -371,6 +371,7 @@ async def _llm_cache_get(key: str):
             "SELECT response FROM llm_cache WHERE cache_key = ?", (h,)
         )
         if rows:
+            log.info("LLM cache HIT (db) key=%s", h[:12])
             return json.loads(rows[0]["response"])
     except Exception:
         pass
@@ -379,6 +380,7 @@ async def _llm_cache_get(key: str):
     h16 = hashlib.sha256(key.encode()).hexdigest()[:16]
     path = os.path.join(_LLM_CACHE_DIR, f"{h16}.json")
     if os.path.exists(path):
+        log.info("LLM cache HIT (file) key=%s path=%s", h16, path)
         with open(path) as f:
             data = json.load(f)
         # Migrate to DB
@@ -387,6 +389,7 @@ async def _llm_cache_get(key: str):
         except Exception:
             pass
         return data
+    log.info("LLM cache MISS key=%s file=%s", h[:12], h16)
     return None
 
 
