@@ -3078,20 +3078,36 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             yield event(_m("analyzing_n", n=len(sheet_names)))
 
             async def analyze_one(sn):
-                """Analyze one sheet: Claude (with cache+retry) → heuristic fallback."""
+                """Analyze one sheet: cache(full sheet) → Claude(chunked) → heuristic fallback."""
+                full_text = sheet_texts[sn]
+                # Check sheet-level cache first (survives chunking changes)
+                cached = await _llm_cache_get(full_text)
+                if cached:
+                    cached["excel_name"] = sn
+                    if len(cached.get("indicators", [])) > 0:
+                        return cached
+                # Try LLM analysis (chunks have their own cache inside)
                 for attempt in range(2):
                     try:
-                        cfg = await _analyze_sheet_chunked(client, sheet_texts[sn])
+                        cfg = await _analyze_sheet_chunked(client, full_text)
                         cfg["excel_name"] = sn
                         if len(cfg.get("indicators", [])) > 0:
+                            # Cache merged result at sheet level for future runs
+                            try:
+                                await _llm_cache_set(full_text, cfg)
+                            except Exception:
+                                pass
                             return cfg
                     except Exception:
                         pass
-                # Fallback — and cache the result
+                # Fallback — and cache the result at sheet level
                 fb = await loop.run_in_executor(None, lambda: _fallback_heuristic_analysis(wb_formulas))
                 for fb_sheet in fb.get("sheets", []):
                     if fb_sheet["excel_name"] == sn:
-                        _llm_cache_set(sheet_texts[sn], fb_sheet)
+                        try:
+                            await _llm_cache_set(full_text, fb_sheet)
+                        except Exception:
+                            pass
                         return fb_sheet
                 return None
 
