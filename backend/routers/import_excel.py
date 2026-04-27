@@ -354,6 +354,7 @@ _LLM_CACHE_DIR = os.path.join(
     os.environ.get("PEBBLE_DB", "").rsplit("/", 1)[0] or os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     ".llm_cache"
 )
+print(f"[llm_cache] _LLM_CACHE_DIR={_LLM_CACHE_DIR} exists={os.path.isdir(_LLM_CACHE_DIR)} files={len(os.listdir(_LLM_CACHE_DIR)) if os.path.isdir(_LLM_CACHE_DIR) else 0}")
 
 
 def _cache_hash(key: str) -> str:
@@ -3064,8 +3065,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
 
         # Analyze with Claude (per-sheet with progress)
+        # Create client lazily — cache may satisfy all requests without an API key
         try:
             client = _get_claude_client()
+        except Exception:
+            client = None
+
+        try:
             sheets_config = []
 
             # Launch ALL sheets in parallel for speed
