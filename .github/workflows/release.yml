@@ -89,19 +89,6 @@ jobs:
           pip install pytest requests openpyxl
           pip install dist-wheels/*.whl
 
-      - name: Seed LLM cache
-        run: |
-          python -c "
-          import json, os
-          cache = 'tests/fixtures/llm_cache.json'
-          if not os.path.exists(cache): exit(0)
-          os.makedirs('.llm_cache', exist_ok=True)
-          with open(cache) as f: entries = json.load(f)
-          for k, v in entries.items():
-              with open(f'.llm_cache/{k}.json', 'w') as out: json.dump(v, out)
-          print(f'Seeded {len(entries)} LLM cache entries')
-          "
-
       - name: Start backend
         run: |
           rm -f pebble.db pebble.db-shm pebble.db-wal
@@ -117,6 +104,19 @@ jobs:
           echo "Backend failed to start"
           cat /tmp/backend.log
           exit 1
+
+      - name: Seed LLM cache
+        run: |
+          python -c "
+          import json, os
+          cache = 'tests/fixtures/llm_cache.json'
+          if not os.path.exists(cache): exit(0)
+          os.makedirs('.llm_cache', exist_ok=True)
+          with open(cache) as f: entries = json.load(f)
+          for k, v in entries.items():
+              with open(f'.llm_cache/{k}.json', 'w') as out: json.dump(v, out)
+          print(f'Seeded {len(entries)} LLM cache entries')
+          "
 
       - name: Run XLS model tests
         run: pytest tests/test_xls_models.py -v -s --tb=short
