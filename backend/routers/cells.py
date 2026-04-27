@@ -175,19 +175,23 @@ async def _recalc_model(db, sheet_id: str,
     else:
         result = await calculate_model(db, model_id)
     total = 0
+    import uuid as _uuid
     for sid, changes in result.items():
+        if not changes:
+            continue
+        rows = []
         for ck, val in changes.items():
-            # __empty__ cells: rule='empty', value=''
             rule = 'empty' if val == '__empty__' else 'formula'
             db_val = '' if val == '__empty__' else val
-            # Never overwrite manually-entered values — only create/update formula cells
-            await db.execute(
-                """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule
-                   WHERE rule != 'manual'""",
-                (str(__import__('uuid').uuid4()), sid, ck, db_val, rule),
-            )
+            rows.append((str(_uuid.uuid4()), sid, ck, db_val, rule))
+        # Batch upsert — never overwrite manually-entered values
+        await db.executemany(
+            """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule
+               WHERE rule != 'manual'""",
+            rows,
+        )
         total += len(changes)
     return total
 
