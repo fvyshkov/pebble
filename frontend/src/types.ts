@@ -18,6 +18,7 @@ export interface Analytic {
   period_start: string | null
   period_end: string | null
   sort_order: number
+  color: string | null
 }
 
 export interface AnalyticField {

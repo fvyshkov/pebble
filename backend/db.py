@@ -196,6 +196,7 @@ MIGRATIONS = [
         provider    TEXT NOT NULL DEFAULT '',
         created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     )""",
+    "ALTER TABLE analytics ADD COLUMN color TEXT DEFAULT NULL",
 ]
 
 

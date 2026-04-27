@@ -90,6 +90,7 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
         period_start: updated.period_start,
         period_end: updated.period_end,
         sort_order: updated.sort_order,
+        color: updated.color || null,
       },
     })
   }
@@ -117,6 +118,7 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
       period_start: data.period_start,
       period_end: data.period_end,
       sort_order: data.sort_order,
+      color: data.color || null,
     })
     await api.generatePeriods(analyticId)
     onRefresh()
@@ -192,6 +194,39 @@ export default function AnalyticSettings({ analyticId, modelId, onRefresh }: Pro
           <MenuItem value="string">{t('analytic.string')}</MenuItem>
         </Select>
       </FormControl>
+
+      {/* Color swatch — click to pick a custom color for this analytic */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
+        <Typography variant="body2">{t('analytic.color')}</Typography>
+        <Box
+          sx={{
+            position: 'relative',
+            width: 48, height: 28,
+            border: '2px solid',
+            borderColor: data.color ? 'primary.main' : '#ccc',
+            borderRadius: 1,
+            bgcolor: data.color || '#ffffff',
+            cursor: 'pointer',
+            '&:hover': { borderColor: 'primary.main' },
+          }}
+          onClick={() => {
+            const input = document.createElement('input')
+            input.type = 'color'
+            input.value = data.color || '#e8eaf6'
+            input.addEventListener('input', (e) => {
+              change({ color: (e.target as HTMLInputElement).value } as any)
+            })
+            input.click()
+          }}
+        />
+        {data.color && (
+          <Button size="small" variant="text" sx={{ textTransform: 'none', fontSize: 12, minWidth: 0 }}
+            onClick={() => change({ color: null } as any)}
+          >
+            {t('common.reset')}
+          </Button>
+        )}
+      </Box>
 
       {isPeriods && (
         <Box sx={{ ml: 1, mb: 2 }}>

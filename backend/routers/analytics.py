@@ -40,6 +40,7 @@ class AnalyticIn(BaseModel):
     period_start: str | None = None
     period_end: str | None = None
     sort_order: int = 0
+    color: str | None = None
 
 
 class FieldIn(BaseModel):
@@ -73,10 +74,10 @@ async def create_analytic(body: AnalyticIn):
     code = body.code or transliterate(body.name)
     await db.execute(
         """INSERT INTO analytics (id, model_id, name, code, icon, is_periods, data_type, period_types,
-           period_start, period_end, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           period_start, period_end, sort_order, color)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (aid, body.model_id, body.name, code, body.icon, int(body.is_periods), body.data_type,
-         json.dumps(body.period_types), body.period_start, body.period_end, body.sort_order),
+         json.dumps(body.period_types), body.period_start, body.period_end, body.sort_order, body.color),
     )
     if body.is_periods:
         await _ensure_period_fields(db, aid)
@@ -107,10 +108,10 @@ async def update_analytic(analytic_id: str, body: AnalyticIn):
     code = body.code or transliterate(body.name)
     await db.execute(
         """UPDATE analytics SET name=?, code=?, icon=?, is_periods=?, data_type=?, period_types=?,
-           period_start=?, period_end=?, sort_order=?, updated_at=datetime('now')
+           period_start=?, period_end=?, sort_order=?, color=?, updated_at=datetime('now')
            WHERE id=?""",
         (body.name, code, body.icon, int(body.is_periods), body.data_type, json.dumps(body.period_types),
-         body.period_start, body.period_end, body.sort_order, analytic_id),
+         body.period_start, body.period_end, body.sort_order, body.color, analytic_id),
     )
     if body.is_periods:
         await _ensure_period_fields(db, analytic_id)

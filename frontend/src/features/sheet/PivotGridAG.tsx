@@ -362,7 +362,12 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   // colId → leafIds it sums. Used to flash Σ-columns whenever one of their
   // underlying leaf period cells changes.
   const sumColLeavesRef = useRef<Record<string, string[]>>({})
+  // First period column with data — used to auto-scroll after load.
+  const firstDataColIdRef = useRef<string | null>(null)
   useEffect(() => { colLevelTogglesRef.current = colLevelToggles }, [colLevelToggles])
+  // Analytic color map: analyticId → CSS color string.
+  // Auto-assigned for non-period, non-main analytics; overrideable by user.
+  const analyticColorsRef = useRef<Record<string, string | null>>({})
   const [analyticsMap, setAnalyticsMap] = useState<Record<string, Analytic>>({})
   const [recordNames, setRecordNames] = useState<Record<string, string>>({})
   const vsLoadedRef = useRef(false)
@@ -614,6 +619,35 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       setAnalyticsMap(aMap)
       setRecordNames(recNameMap)
 
+      // Build analytic color map. Periods and main (indicators) stay white (null).
+      // Others get auto-assigned soft pastel colors unless user set a custom color.
+      const SOFT_PALETTE = [
+        '#e8eaf6', // indigo-50
+        '#e0f2f1', // teal-50
+        '#fff3e0', // orange-50
+        '#f3e5f5', // purple-50
+        '#e1f5fe', // lightblue-50
+        '#fce4ec', // pink-50
+        '#e8f5e9', // green-50
+        '#fffde7', // yellow-50
+      ]
+      const mainAid = sa.find(b => b.is_main)?.analytic_id
+      const colorMap: Record<string, string | null> = {}
+      let paletteIdx = 0
+      for (const b of sa) {
+        const a = aMap[b.analytic_id]
+        if (!a) continue
+        if (a.color) {
+          colorMap[a.id] = a.color
+        } else if (a.is_periods || a.id === mainAid) {
+          colorMap[a.id] = null // white
+        } else {
+          colorMap[a.id] = SOFT_PALETTE[paletteIdx % SOFT_PALETTE.length]
+          paletteIdx++
+        }
+      }
+      analyticColorsRef.current = colorMap
+
       // Build root record map: for each analytic, if there's a single root node
       // with children, store its ID. Used to fill missing analytics in Σ column keys.
       const rootMap: Record<string, string> = {}
@@ -767,6 +801,12 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
             const lastLabel = parentTuple[parentTuple.length - 1].label
             return [makePeriodColDef(lastLabel, key)]
           }
+          // Color for this extra column analytic's header
+          const extraAId = colAIds[1 + extraIdx]
+          const extraColor = extraAId ? colorMap[extraAId] : null
+          const hdrClass = extraColor
+            ? `ag-center-header peb-ahdr-${extraAId.slice(0, 8)}`
+            : 'ag-center-header'
           const result: (ColDef | ColGroupDef)[] = []
           for (const leaf of extraColLeafArrays[extraIdx]) {
             const tuple = [...parentTuple, { recId: leaf.record.id, label: recordLabel(leaf) }]
@@ -775,7 +815,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
               // Single child — no need for group wrapper
               result.push(children[0])
             } else {
-              result.push({ headerName: recordLabel(leaf), headerClass: 'ag-center-header', children } as ColGroupDef)
+              result.push({ headerName: recordLabel(leaf), headerClass: hdrClass, children } as ColGroupDef)
             }
           }
           return result
@@ -977,6 +1017,16 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
             const s = sumFor(i, field)
             if (s != null) rows[i][field] = String(s)
           }
+        }
+      }
+
+      // Detect first period column with any non-empty cell data.
+      firstDataColIdRef.current = null
+      for (const leafKey of allLeafKeys) {
+        const field = `p_${leafKey}`
+        if (rows.some(r => r[field] !== '' && r[field] != null)) {
+          firstDataColIdRef.current = field
+          break
         }
       }
 
@@ -1740,8 +1790,14 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     },
     cellStyle: (p: any) => {
       const isGroup = !p.data?.isLeaf
+      // Color based on analytic the row belongs to.
+      const path: string[] = p.data?.path || []
+      const lastStep = path[path.length - 1] || ''
+      const colonIdx = lastStep.indexOf(':')
+      const aId = colonIdx > 0 ? lastStep.slice(0, colonIdx) : ''
+      const aColor = aId ? analyticColorsRef.current[aId] : null
       return {
-        background: isGroup ? '#fafafa' : '#fff',
+        background: aColor || (isGroup ? '#fafafa' : '#fff'),
         fontWeight: isGroup ? 600 : 400,
       }
     },
@@ -1785,6 +1841,13 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         if (filtered.length > 0) {
           g.applyColumnState({ state: filtered, applyOrder: true })
         }
+      }
+      // Auto-scroll to the first period column that has data, so the user
+      // doesn't see empty leading columns (e.g. 2023 when data starts in 2025).
+      if (firstDataColIdRef.current) {
+        const colId = firstDataColIdRef.current
+        firstDataColIdRef.current = null  // only scroll once
+        g.ensureColumnVisible(colId)
       }
     })
     return () => cancelAnimationFrame(raf)
@@ -2287,8 +2350,20 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
 
   const pinnedEntries = Object.keys(pinned).filter(aId => !!pinned[aId])
 
+  // Dynamic CSS for analytic header colors (injected as <style> tag).
+  const analyticColorCss = useMemo(() => {
+    const rules: string[] = []
+    for (const [aid, color] of Object.entries(analyticColorsRef.current)) {
+      if (!color) continue
+      const cls = `peb-ahdr-${aid.slice(0, 8)}`
+      rules.push(`.${cls} { background: ${color} !important; }`)
+    }
+    return rules.join('\n')
+  }, [analyticsMap])
+
   return (
     <Box sx={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {analyticColorCss && <style>{analyticColorCss}</style>}
       {/* Toolbar / drop zone for analytic pinning. Always visible so users can
           drop rows here; shows hint when empty. */}
       <Box
