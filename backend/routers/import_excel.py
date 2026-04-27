@@ -354,7 +354,6 @@ _LLM_CACHE_DIR = os.path.join(
     os.environ.get("PEBBLE_DB", "").rsplit("/", 1)[0] or os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     ".llm_cache"
 )
-print(f"[llm_cache] _LLM_CACHE_DIR={_LLM_CACHE_DIR} exists={os.path.isdir(_LLM_CACHE_DIR)} files={len(os.listdir(_LLM_CACHE_DIR)) if os.path.isdir(_LLM_CACHE_DIR) else 0}")
 
 
 def _cache_hash(key: str) -> str:
@@ -372,7 +371,6 @@ async def _llm_cache_get(key: str):
             "SELECT response FROM llm_cache WHERE cache_key = ?", (h,)
         )
         if rows:
-            print(f"[llm_cache] HIT (db) key={h[:12]}")
             return json.loads(rows[0]["response"])
     except Exception:
         pass
@@ -381,7 +379,6 @@ async def _llm_cache_get(key: str):
     h16 = hashlib.sha256(key.encode()).hexdigest()[:16]
     path = os.path.join(_LLM_CACHE_DIR, f"{h16}.json")
     if os.path.exists(path):
-        print(f"[llm_cache] HIT (file) key={h16}")
         with open(path) as f:
             data = json.load(f)
         # Migrate to DB
@@ -390,7 +387,6 @@ async def _llm_cache_get(key: str):
         except Exception:
             pass
         return data
-    print(f"[llm_cache] MISS key={h[:12]} file={h16}")
     return None
 
 
