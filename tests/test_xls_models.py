@@ -308,7 +308,10 @@ def imported_model(request):
     }
 
     print(f"  Cleaning up model {model_id}...")
-    requests.delete(f"{API}/models/{model_id}", timeout=30)
+    try:
+        requests.delete(f"{API}/models/{model_id}", timeout=120)
+    except Exception as e:
+        print(f"  Cleanup warning: {e}")
 
 
 # ──────────────────────────────────────────────
