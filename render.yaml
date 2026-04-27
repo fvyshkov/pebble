@@ -17,6 +17,12 @@ services:
     envVars:
       - key: PEBBLE_DB
         value: /data/pebble.db
+      - key: PEBBLE_IMPORT_LLM_API_KEY
+        sync: false              # set manually in Render dashboard
+      - key: PEBBLE_IMPORT_LLM_BASE_URL
+        value: https://api.together.xyz/v1
+      - key: PEBBLE_IMPORT_LLM_MODEL
+        value: Qwen/Qwen3-235B-A22B-Instruct-2507-tput
 
   # Preview service for AG Grid migration branch. Shares no disk with main
   # so it can freely be blown away / rebuilt.
@@ -35,3 +41,9 @@ services:
     envVars:
       - key: PEBBLE_DB
         value: /data/pebble.db
+      - key: PEBBLE_IMPORT_LLM_API_KEY
+        sync: false              # set manually in Render dashboard
+      - key: PEBBLE_IMPORT_LLM_BASE_URL
+        value: https://api.together.xyz/v1
+      - key: PEBBLE_IMPORT_LLM_MODEL
+        value: Qwen/Qwen3-235B-A22B-Instruct-2507-tput

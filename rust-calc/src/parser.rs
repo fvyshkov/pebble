@@ -8,7 +8,8 @@ pub struct RefParsed {
     pub params: HashMap<String, String>,
 }
 
-/// Parse a reference token like "[name]" or "[Sheet::name](key=value, ...)".
+/// Parse a reference token like "[name]", "[Sheet::name](key=value, ...)",
+/// or parent-qualified "[parent][child]" / "[parent][child](params)".
 pub fn parse_ref(token: &str) -> RefParsed {
     // Strip outer brackets
     let inner = if token.starts_with('[') {
@@ -39,11 +40,40 @@ pub fn parse_ref(token: &str) -> RefParsed {
         return RefParsed { name: token.to_string(), sheet: None, params: HashMap::new() };
     };
 
-    let (name_str, params_str) = inner;
+    let (first_name, rest) = inner;
+
+    // Parent-qualified: [parent][child] — rest starts with "[child]..."
+    let (name_str, params_rest) = if rest.starts_with('[') {
+        // Extract child name from [child]
+        let child_bytes = rest.as_bytes();
+        let mut d = 0i32;
+        let mut child_end = 0;
+        for (i, &b) in child_bytes.iter().enumerate() {
+            match b {
+                b'[' => d += 1,
+                b']' => {
+                    d -= 1;
+                    if d == 0 { child_end = i; break; }
+                }
+                _ => {}
+            }
+        }
+        if child_end > 1 {
+            let child_name = &rest[1..child_end];
+            let after_child = &rest[child_end + 1..];
+            // Combine as "parent/child" — resolver already handles this split
+            let combined = format!("{}/{}", first_name, child_name);
+            (combined, after_child.to_string())
+        } else {
+            (first_name.to_string(), rest.to_string())
+        }
+    } else {
+        (first_name.to_string(), rest.to_string())
+    };
 
     // Parse params from (...) if present
-    let params = if params_str.starts_with('(') && params_str.ends_with(')') {
-        parse_params(&params_str[1..params_str.len() - 1])
+    let params = if params_rest.starts_with('(') && params_rest.ends_with(')') {
+        parse_params(&params_rest[1..params_rest.len() - 1])
     } else {
         HashMap::new()
     };
@@ -55,7 +85,7 @@ pub fn parse_ref(token: &str) -> RefParsed {
         let n = parts.next().unwrap_or("").trim().to_string();
         (Some(s), n)
     } else {
-        (None, name_str.to_string())
+        (None, name_str)
     };
 
     RefParsed { name, sheet, params }
@@ -175,5 +205,21 @@ mod tests {
         let r = parse_ref("[ind](периоды=Январь, подразделения=Москва)");
         assert_eq!(r.params.get("периоды").map(|s| s.as_str()), Some("Январь"));
         assert_eq!(r.params.get("подразделения").map(|s| s.as_str()), Some("Москва"));
+    }
+
+    #[test]
+    fn test_parent_qualified() {
+        // [parent][child] → name = "parent/child" (resolver handles split)
+        let r = parse_ref("[Факторинг][прибыль]");
+        assert_eq!(r.name, "Факторинг/прибыль");
+        assert!(r.sheet.is_none());
+        assert!(r.params.is_empty());
+    }
+
+    #[test]
+    fn test_parent_qualified_with_params() {
+        let r = parse_ref("[parent][child](периоды=предыдущий)");
+        assert_eq!(r.name, "parent/child");
+        assert_eq!(r.params.get("периоды").map(|s| s.as_str()), Some("предыдущий"));
     }
 }

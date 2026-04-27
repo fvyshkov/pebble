@@ -227,6 +227,23 @@ def _replace_cell_refs(
     return result
 
 
+def _format_ref(name: str, display: str | None = None) -> str:
+    """Format an indicator reference with optional parent qualifier.
+
+    parent/child → [parent][child]
+    plain name   → [name]
+    With display (cross-sheet): display::parent/child → [display::parent][child]
+    """
+    if "/" in name:
+        parent, child = name.split("/", 1)
+        if display:
+            return f"[{display}::{parent}][{child}]"
+        return f"[{parent}][{child}]"
+    if display:
+        return f"[{display}::{name}]"
+    return f"[{name}]"
+
+
 def _translate_ref(
     ref: dict,
     base_col: int,
@@ -264,7 +281,7 @@ def _translate_ref(
         return ref["original"]  # Can't resolve — keep original
 
     # Check if name is duplicate in the row map — if so, disambiguate with
-    # parent path: "Parent/Indicator". The calc engine resolves Parent/Child
+    # parent qualifier: [Parent][Indicator]. The calc engine resolves this
     # by filtering candidates whose parent record name matches.
     name_lower = name.lower()
     duplicates = sum(1 for r, n in rmap.items() if n.lower() == name_lower)
@@ -274,6 +291,9 @@ def _translate_ref(
         parent_map = row_to_parent_names.get(pmap_key, {}) if row_to_parent_names else {}
         parent_name = parent_map.get(row)
         if parent_name:
+            # Use [parent][child] bracket format — the wrapping []
+            # will be added by the caller, so encode as "parent/child"
+            # internally; the Rust parser converts [parent][child] → parent/child
             name = f"{parent_name}/{name}"
         else:
             name = f"{name}#row{row}"
@@ -353,7 +373,7 @@ def _translate_ref(
                 s = f"{starting_val:.10f}".rstrip("0").rstrip(".")
                 return s
             return "0"
-        ref_name = f"[{display}::{name}]" if display else f"[{name}]"
+        ref_name = _format_ref(name, display)
         if n_back == 1:
             return f'{ref_name}(периоды="предыдущий")'
         else:
@@ -361,7 +381,7 @@ def _translate_ref(
     elif period_diff > 0:
         # Forward reference — use absolute period key
         target_pk = target_pk_map.get(col)
-        ref_name = f"[{display}::{name}]" if display else f"[{name}]"
+        ref_name = _format_ref(name, display)
         if target_pk:
             return f'{ref_name}(периоды="{target_pk}")'
         else:
@@ -369,9 +389,7 @@ def _translate_ref(
             return f'{ref_name}(период=период.вперед({period_diff}))'
     else:
         # Same period (period_diff == 0)
-        if display:
-            return f"[{display}::{name}]"
-        return f"[{name}]"
+        return _format_ref(name, display)
 
 
 # ── Batch translation ─────────────────────────────────────────────────────

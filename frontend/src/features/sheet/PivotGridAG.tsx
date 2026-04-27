@@ -899,9 +899,10 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
             const isGroup = hasChildren || !isLastAnalytic
             const pathStep = `${aId}:${node.record.id}`
             const path = [...currentPath, pathStep]
+            const nodeName = recordLabel(node)
             const row: RowDatum = {
               path,
-              label: recordLabel(node),
+              label: nodeName,
               isLeaf: !isGroup,
               recordIds: recIds,
               unit: node.data?.unit,
@@ -2317,6 +2318,15 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     const coordKey = node?.data?.[`__coord_${colId.replace('p_', '')}`] || ''
     return [
       'copy', 'copyWithHeaders', 'paste', 'separator', 'export',
+      'separator',
+      {
+        name: t('grid.expandAll'),
+        action: () => { gridApiRef.current?.expandAll() },
+      },
+      {
+        name: t('grid.collapseAll'),
+        action: () => { gridApiRef.current?.collapseAll() },
+      },
       'separator',
       {
         name: t('grid.history'),

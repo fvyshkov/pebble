@@ -105,6 +105,8 @@
     "oldValue": "Before",
     "newValue": "After",
     "close": "Close",
+    "expandAll": "Expand all",
+    "collapseAll": "Collapse all",
     "chart": "Chart",
     "barChart": "Bar",
     "lineChart": "Line",

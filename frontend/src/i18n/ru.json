@@ -105,6 +105,8 @@
     "oldValue": "Было",
     "newValue": "Стало",
     "close": "Закрыть",
+    "expandAll": "Развернуть все",
+    "collapseAll": "Свернуть все",
     "chart": "График",
     "barChart": "Столбчатая",
     "lineChart": "Линейная",

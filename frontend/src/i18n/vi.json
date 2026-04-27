@@ -105,6 +105,8 @@
     "oldValue": "Trước",
     "newValue": "Sau",
     "close": "Đóng",
+    "expandAll": "Mở rộng tất cả",
+    "collapseAll": "Thu gọn tất cả",
     "chart": "Biểu đồ",
     "barChart": "Cột",
     "lineChart": "Đường",

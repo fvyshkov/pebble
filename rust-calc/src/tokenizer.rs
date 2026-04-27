@@ -111,7 +111,29 @@ fn scan_reference(chars: &[char], start: usize) -> Option<(String, usize)> {
     // pos is now just after the closing ']'
     let bracket_end = pos;
 
+    // Parent-qualified ref: [parent][child] → single token "[parent][child]"
+    // The second [...] immediately follows the first ']' with no space.
+    let mut final_end = bracket_end;
+    if pos < len && chars[pos] == '[' {
+        // Scan the second bracket pair
+        let inner_start = pos;
+        pos += 1;
+        let mut d2 = 1;
+        while pos < len && d2 > 0 {
+            match chars[pos] {
+                '[' => d2 += 1,
+                ']' => d2 -= 1,
+                _ => {}
+            }
+            pos += 1;
+        }
+        if d2 == 0 {
+            final_end = pos;
+        }
+    }
+
     // Check for optional params (...) — supports one level of nesting
+    pos = final_end;
     if pos < len && chars[pos] == '(' {
         pos += 1;
         let mut pdepth = 1;
@@ -128,8 +150,8 @@ fn scan_reference(chars: &[char], start: usize) -> Option<(String, usize)> {
         return Some((full, pos));
     }
 
-    let full: String = chars[start..bracket_end].iter().collect();
-    Some((full, bracket_end))
+    let full: String = chars[start..final_end].iter().collect();
+    Some((full, final_end))
 }
 
 #[cfg(test)]
@@ -209,5 +231,28 @@ mod tests {
     fn test_nested_brackets() {
         let tokens = tokenize("[name[sub]]");
         assert_eq!(tokens, vec![Token::Ref("[name[sub]]".to_string())]);
+    }
+
+    #[test]
+    fn test_parent_qualified_ref() {
+        // [parent][child] should be a single token
+        let tokens = tokenize("[Факторинг][прибыль]");
+        assert_eq!(tokens, vec![Token::Ref("[Факторинг][прибыль]".to_string())]);
+    }
+
+    #[test]
+    fn test_parent_qualified_with_params() {
+        let tokens = tokenize("[parent][child](периоды=\"предыдущий\")");
+        assert_eq!(tokens, vec![Token::Ref("[parent][child](периоды=\"предыдущий\")".to_string())]);
+    }
+
+    #[test]
+    fn test_parent_qualified_in_expression() {
+        let tokens = tokenize("[A][B] + [C]");
+        assert_eq!(tokens, vec![
+            Token::Ref("[A][B]".to_string()),
+            Token::Op('+'),
+            Token::Ref("[C]".to_string()),
+        ]);
     }
 }

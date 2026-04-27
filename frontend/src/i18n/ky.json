@@ -105,6 +105,8 @@
     "oldValue": "Мурунку",
     "newValue": "Жаңы",
     "close": "Жабуу",
+    "expandAll": "Баарын жайуу",
+    "collapseAll": "Баарын жыйуу",
     "chart": "Диаграмма",
     "barChart": "Тилкелүү",
     "lineChart": "Сызыктуу",

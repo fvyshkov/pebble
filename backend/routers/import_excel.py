@@ -228,11 +228,16 @@ def _extract_sheet_text(ws, sheet_name: str, max_rows: int = 500) -> str:
                     formula_m1 = str(cv)[:20]
                     continue
 
+        # Outline (group) level from Excel row grouping
+        outline_level = ws.row_dimensions[r].outline_level if hasattr(ws.row_dimensions[r], 'outline_level') else 0
+
         flags = []
         if is_bold:
             flags.append("BOLD")
         if indent:
             flags.append(f"indent={int(indent)}")
+        if outline_level:
+            flags.append(f"outline={outline_level}")
         if has_data:
             flags.append("HAS_DATA")
         if has_formula:
@@ -544,9 +549,33 @@ def _split_sheet_into_chunks(sheet_text: str) -> list[str]:
     if current_group:
         groups.append(current_group)
 
-    # If only 1-2 groups, no benefit in chunking
+    # If only 1-2 groups, split by row-number gaps or fixed size
     if len(groups) <= 2:
-        return [sheet_text]
+        import re
+        _MAX_ROWS_PER_CHUNK = 30
+        segments: list[list[str]] = []
+        seg: list[str] = []
+        prev_row = 0
+        for line in body_lines:
+            m = re.match(r'\s*Row\s+(\d+)', line)
+            cur_row = int(m.group(1)) if m else prev_row
+            # Split at row gaps (skipped Excel rows = section break) if segment is big enough
+            if m and cur_row > prev_row + 1 and len(seg) >= _MAX_ROWS_PER_CHUNK:
+                segments.append(seg)
+                seg = []
+            seg.append(line)
+            prev_row = cur_row
+        if seg:
+            segments.append(seg)
+        # If still too few segments, split every _MAX_ROWS_PER_CHUNK lines
+        if len(segments) < 3:
+            segments = []
+            for i in range(0, len(body_lines), _MAX_ROWS_PER_CHUNK):
+                segments.append(body_lines[i:i + _MAX_ROWS_PER_CHUNK])
+        if len(segments) >= 2:
+            groups = segments
+        else:
+            return [sheet_text]
 
     # Build chunks: header + each group
     header_text = "\n".join(header_lines)
@@ -1756,7 +1785,13 @@ def _enrich_with_indent(indicators: list[dict], ws) -> None:
             if row:
                 cell = ws.cell(row, label_col)
                 indent = cell.alignment.indent if cell.alignment and cell.alignment.indent else 0
+                outline = ws.row_dimensions[row].outline_level if hasattr(ws.row_dimensions[row], 'outline_level') else 0
+                # Use outline_level as indent when cell indent is 0 but outline differs
+                # outline=0 means top-level (group header), outline=1+ means nested
+                if indent == 0 and outline > 0:
+                    indent = outline
                 item["_indent"] = int(indent)
+                item["_outline"] = int(outline)
             if item.get("children"):
                 _walk(item["children"])
     _walk(indicators)
@@ -1879,6 +1914,102 @@ def _fix_indicator_hierarchy(indicators: list[dict]) -> list[dict]:
     # If item at indent=N is followed by items at indent>N, make it a group.
     result = _fix_indent_grouping(result)
 
+    # Hard constraint: rows with outline > 0 cannot be groups (they are children in Excel)
+    result = _enforce_outline_constraint(result)
+
+    # Re-run indent grouping to absorb orphaned children back into their parent groups
+    result = _fix_indent_grouping(result)
+
+    return result
+
+
+def _regroup_by_outline(indicators: list[dict]) -> list[dict]:
+    """Fix hierarchy based on Excel outline levels.
+
+    After heuristic analysis + indent enrichment, some outline=1 rows
+    may be at root level (or wrong parent) because the heuristic
+    incorrectly created groups from rows whose names match group patterns
+    (e.g. 'сумма ...'). This function:
+    1. Absorbs root-level outline>0 items into preceding outline=0 group
+    2. Flattens false groups (outline>0 with children) before absorbing
+    """
+    has_outline = any(item.get("_outline") is not None for item in indicators)
+    if not has_outline:
+        return indicators
+
+    # Recursively fix children of existing groups first
+    for item in indicators:
+        if item.get("children"):
+            item["children"] = _regroup_by_outline(item["children"])
+
+    result: list[dict] = []
+    last_outline0_group = None  # pointer to the last outline=0 group in result
+
+    for item in indicators:
+        outline = item.get("_outline", 0)
+        children = item.get("children", [])
+
+        if outline == 0:
+            # This is a top-level item — add to result
+            result.append(item)
+            if children:
+                last_outline0_group = item
+            else:
+                # Even a non-group outline=0 item resets the "absorb" target
+                # (subsequent outline>0 items shouldn't jump over non-group outline=0 items)
+                last_outline0_group = None
+        elif last_outline0_group is not None:
+            # outline > 0 at root level → absorb into last_outline0_group
+            if children:
+                # False group: flatten it, add self + children to parent
+                item_copy = dict(item)
+                item_copy["children"] = []
+                item_copy["is_group"] = False
+                if item_copy.get("rule") == "sum_children":
+                    item_copy["rule"] = "manual"
+                last_outline0_group["children"].append(item_copy)
+                for ch in children:
+                    last_outline0_group["children"].append(ch)
+            else:
+                last_outline0_group["children"].append(item)
+        else:
+            # outline > 0 but no preceding group — just keep as-is
+            result.append(item)
+
+    return result
+
+
+def _enforce_outline_constraint(indicators: list[dict]) -> list[dict]:
+    """Demote any group whose Excel outline_level > 0 back to a leaf.
+
+    outline=0 means top-level header in Excel; outline>0 means nested/child row.
+    If the LLM or indent-grouping incorrectly promoted such a row to a group,
+    flatten its children back as siblings.
+    """
+    has_outline = any(item.get("_outline") is not None for item in indicators)
+    if not has_outline:
+        # Also check children
+        for item in indicators:
+            if item.get("children"):
+                item["children"] = _enforce_outline_constraint(item["children"])
+        return indicators
+
+    result: list[dict] = []
+    for item in indicators:
+        outline = item.get("_outline", 0)
+        children = item.get("children", [])
+        if outline > 0 and children:
+            # This row is nested in Excel — cannot be a group. Flatten children as siblings.
+            item["children"] = []
+            item["is_group"] = False
+            if item.get("rule") == "sum_children":
+                item["rule"] = "manual"
+            result.append(item)
+            result.extend(_enforce_outline_constraint(children))
+        else:
+            if children:
+                item["children"] = _enforce_outline_constraint(children)
+            result.append(item)
     return result
 
 
@@ -1907,7 +2038,9 @@ def _fix_indent_grouping(indicators: list[dict]) -> list[dict]:
             continue
 
         # Look ahead: if next item has deeper indent, this is a group header
-        if i + 1 < len(indicators):
+        # But never promote a row with outline > 0 (it's a child row in Excel)
+        can_be_group = item.get("_outline", 0) == 0
+        if i + 1 < len(indicators) and can_be_group:
             next_indent = indicators[i + 1].get("_indent", 0)
             if next_indent > cur_indent and not already_group:
                 # Collect all items with deeper indent as children
@@ -2159,12 +2292,13 @@ def _recover_missing_rows(indicators: list[dict], ws, data_start_col: int) -> li
 
 # ── Indicator records creation (recursive) ─────────────────────────────────
 
-async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]) -> tuple[dict, dict]:
+async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]) -> tuple[dict, dict, dict, dict]:
     """Create hierarchical indicator records.
-    Returns (row_to_rid: {excel_row: record_id}, rid_to_formula: {record_id: {rule, formula, formula_first}})
+    Returns (row_to_rid, rid_to_formula, row_to_name, row_to_parent_name)
     """
     row_to_rid = {}
     rid_to_formula = {}
+    sum_children_rids: set[str] = set()
     sort_idx = 0
 
     async def insert_items(items: list[dict], parent_id: str | None):
@@ -2184,9 +2318,11 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
             )
             row_to_rid[item["row"]] = rid
 
-            # Store formula info
+            # Store formula info and track sum_children groups
             rule = item.get("rule", "manual")
-            if rule == "formula":
+            if rule == "sum_children":
+                sum_children_rids.add(rid)
+            elif rule == "formula":
                 rid_to_formula[rid] = {
                     "rule": "formula",
                     "formula": item.get("formula", ""),
@@ -2198,31 +2334,27 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
             if item.get("children"):
                 await insert_items(item["children"], rid)
 
-    # Deduplicate indicator names: scan all names, number duplicates (#2, #3, …).
-    # This makes names globally unique so formula references are unambiguous.
-    def _dedup_names(items: list[dict]):
-        """Collect all names, then rename duplicates with #N suffix."""
-        all_names: list[tuple[str, dict]] = []
-        def _collect(lst):
-            for item in lst:
-                if item.get("name"):
-                    all_names.append((item["name"].lower(), item))
-                if item.get("children"):
-                    _collect(item["children"])
-        _collect(items)
-        # Count occurrences per lowercase name
+    # Deduplicate indicator names within each parent group only.
+    # Names may repeat across groups (e.g. "комиссия партнеру" in each product)
+    # — that's fine, formulas use [parent/name] to disambiguate.
+    # Only add #N suffix when names collide within the SAME parent.
+    def _dedup_names_per_parent(items: list[dict]):
+        """Rename duplicates within each sibling list with #N suffix."""
         from collections import Counter
-        counts = Counter(n for n, _ in all_names)
-        # Assign sequential numbers to duplicates
+        names = [item.get("name", "").lower() for item in items]
+        counts = Counter(names)
         seen: dict[str, int] = {}
-        for name_lower, item in all_names:
-            if counts[name_lower] <= 1:
-                continue  # unique — no renaming needed
-            idx = seen.get(name_lower, 0) + 1
-            seen[name_lower] = idx
-            if idx >= 2:
-                item["name"] = f"{item['name']} #{idx}"
-    _dedup_names(indicators)
+        for item in items:
+            name_lower = (item.get("name") or "").lower()
+            if counts[name_lower] > 1:
+                idx = seen.get(name_lower, 0) + 1
+                seen[name_lower] = idx
+                if idx >= 2:
+                    item["name"] = f"{item['name']} #{idx}"
+            # Recurse into children
+            if item.get("children"):
+                _dedup_names_per_parent(item["children"])
+    _dedup_names_per_parent(indicators)
 
     await insert_items(indicators, None)
 
@@ -2239,7 +2371,7 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
                 collect_names(item["children"], item.get("name"))
     collect_names(indicators)
 
-    return row_to_rid, rid_to_formula, row_to_name, row_to_parent_name
+    return row_to_rid, rid_to_formula, row_to_name, row_to_parent_name, sum_children_rids
 
 
 # ── Main import endpoint ───────────────────────────────────────────────────
@@ -2316,14 +2448,12 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             pt.add("year")
         period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
 
-    # ── Step 2b: Analyze sheet structure with Claude API ──
+    # ── Step 2b: Analyze sheet structure with LLM ──
     try:
         analysis = await _analyze_workbook_with_claude(sheet_texts, all_dates)
         sheets_config = analysis["sheets"]
     except Exception as e:
-        log.warning("Claude API analysis failed, falling back to heuristics: %s", e)
-        fb = _fallback_heuristic_analysis(wb_formulas)
-        sheets_config = fb.get("sheets", [])
+        raise HTTPException(status_code=500, detail=f"LLM analysis failed: {e}. Check PEBBLE_IMPORT_LLM_API_KEY.")
 
     # ── Step 3: Create model ──
     model_id = str(uuid.uuid4())
@@ -2599,11 +2729,12 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             )
 
         _enrich_with_indent(indicators, ws_d)
+        indicators = _regroup_by_outline(indicators)
         indicators = _validate_hierarchy_by_indent(indicators)
         indicators = _fix_indicator_hierarchy(indicators)
         _verify_group_rules(indicators, ws_d, data_start_col)
         indicators = _recover_missing_rows(indicators, ws_d, data_start_col)
-        row_to_rid, rid_to_formula, row_to_name, row_to_parent_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
+        row_to_rid, rid_to_formula, row_to_name, row_to_parent_name, sum_children_rids = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
         # Create Pebble sheet
         pebble_sheet_id = str(uuid.uuid4())
@@ -2681,6 +2812,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
             "rid_to_formula": rid_to_formula,
             "row_to_name": row_to_name,
             "row_to_parent_name": row_to_parent_name,
+            "sum_children_rids": sum_children_rids,
             "data_start_col": data_start_col,
         })
 
@@ -2693,6 +2825,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         rid_to_formula = meta["rid_to_formula"]
         row_to_name = meta["row_to_name"]
         row_to_parent_name = meta.get("row_to_parent_name", {})
+        sum_children_rids = meta.get("sum_children_rids", set())
         data_start_col = meta["data_start_col"]
 
         ws_f = wb_formulas[excel_name]
@@ -2880,6 +3013,11 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                        'предыдущий' in ft or 'назад' in ft:
                         rule = "manual"
                         formula_text = ""
+
+                # Group indicators → sum_children rule (engine will compute)
+                if indicator_rid in sum_children_rids:
+                    rule = "sum_children"
+                    formula_text = ""
 
                 cid = str(uuid.uuid4())
                 try:
@@ -3096,15 +3234,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             return cfg
                     except Exception:
                         pass
-                # Fallback — and cache the result at sheet level
-                fb = await loop.run_in_executor(None, lambda: _fallback_heuristic_analysis(wb_formulas))
-                for fb_sheet in fb.get("sheets", []):
-                    if fb_sheet["excel_name"] == sn:
-                        try:
-                            await _llm_cache_set(full_text, fb_sheet)
-                        except Exception:
-                            pass
-                        return fb_sheet
+                # No fallback — LLM is required
                 return None
 
             tasks = [analyze_one(sn) for sn in sheet_names]
@@ -3124,9 +3254,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             analysis = {"period_config": period_config, "sheets": sheets_config}
         except Exception as e:
             yield event(_m("claude_unavail", err=e))
-            fb = _fallback_heuristic_analysis(wb_formulas)
-            # Only take sheets from fallback; keep period_config from date detection
-            analysis = {"period_config": period_config, "sheets": fb.get("sheets", [])}
+            yield event(_m("error", msg=f"LLM analysis failed: {e}. Check PEBBLE_IMPORT_LLM_API_KEY."))
+            return
 
         sheets_config = analysis["sheets"]
 
@@ -3387,12 +3516,13 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
             if excel_name in wb_data.sheetnames:
                 _enrich_with_indent(indicators, wb_data[excel_name])
+            indicators = _regroup_by_outline(indicators)
             indicators = _validate_hierarchy_by_indent(indicators)
             indicators = _fix_indicator_hierarchy(indicators)
             if excel_name in wb_data.sheetnames:
                 _verify_group_rules(indicators, wb_data[excel_name], data_start_col)
                 indicators = _recover_missing_rows(indicators, wb_data[excel_name], data_start_col)
-            row_to_rid, rid_to_formula, row_to_name, row_to_parent_name = await _create_indicator_records(db, indicator_analytic_id, indicators)
+            row_to_rid, rid_to_formula, row_to_name, row_to_parent_name, sum_children_rids = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
             await db.execute("INSERT INTO sheets (id, model_id, name, sort_order, excel_code) VALUES (?,?,?,?,?)",
@@ -3468,6 +3598,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 "rid_to_formula": rid_to_formula,
                 "row_to_name": row_to_name,
                 "row_to_parent_name": row_to_parent_name,
+                "sum_children_rids": sum_children_rids,
                 "data_start_col": data_start_col,
                 "sheet_indicators": sheet_indicators,
             })
@@ -3483,6 +3614,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             rid_to_formula = meta["rid_to_formula"]
             row_to_name = meta["row_to_name"]
             row_to_parent_name = meta.get("row_to_parent_name", {})
+            sum_children_rids = meta.get("sum_children_rids", set())
             data_start_col = meta["data_start_col"]
 
             ws_f = wb_formulas[excel_name]
@@ -3644,6 +3776,11 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     else:
                         _coord_key = f"{period_rid}|{indicator_rid}"
 
+                    # Group indicators → sum_children rule (engine will compute)
+                    if indicator_rid in sum_children_rids:
+                        rule = "sum_children"
+                        formula_text = ""
+
                     try:
                         await db.execute(
                             "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
@@ -3790,7 +3927,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         # ── Post-import: verify values against Excel ──
         try:
             yield event(_m("verifying"))
-            mismatches = await _verify_import_against_excel(db, model_id, wb, created_sheets, tolerance=0.01)
+            mismatches = await _verify_import_against_excel(db, model_id, wb_data, created_sheets, tolerance=0.01)
             if mismatches:
                 yield event(_m("verify_warn", n=len(mismatches)))
                 for mm in mismatches[:5]:  # show first 5
