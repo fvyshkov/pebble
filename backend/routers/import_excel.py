@@ -9,6 +9,7 @@ Flow:
 5. Import cell values (manual vs formula detection by theme color)
 """
 
+import asyncio
 import uuid
 import json
 import io
@@ -405,6 +406,16 @@ async def _llm_cache_set(key: str, value, provider: str = ""):
         log.warning("Failed to cache LLM response: %s", e)
 
 
+# Limit concurrent LLM requests to avoid API throttling (503s, timeouts)
+_LLM_REQUEST_SEM: asyncio.Semaphore | None = None
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    global _LLM_REQUEST_SEM
+    if _LLM_REQUEST_SEM is None:
+        _LLM_REQUEST_SEM = asyncio.Semaphore(5)
+    return _LLM_REQUEST_SEM
+
+
 async def _analyze_sheet_with_openai_compat(sheet_text: str) -> dict:
     """Analyze one sheet via OpenAI-compatible API (Together AI, etc.)."""
     import httpx, asyncio
@@ -436,7 +447,8 @@ async def _analyze_sheet_with_openai_compat(sheet_text: str) -> dict:
             resp.raise_for_status()
             return resp.json()
 
-    data = await loop.run_in_executor(None, _do_request)
+    async with _get_llm_semaphore():
+        data = await loop.run_in_executor(None, _do_request)
     raw_text = data["choices"][0]["message"]["content"]
     # Strip <think> tags from Qwen3
     raw_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
@@ -3212,7 +3224,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         try:
             sheets_config = []
 
-            # Launch ALL sheets in parallel for speed
+            # Launch sheets in parallel — concurrency is limited at the LLM request level
             yield event(_m("analyzing_n", n=len(sheet_names)))
 
             async def analyze_one(sn):
