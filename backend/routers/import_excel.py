@@ -2276,6 +2276,48 @@ def _verify_group_rules(indicators: list[dict], ws, data_start_col: int) -> None
     _walk(indicators)
 
 
+def _flatten_empty_parents(indicators: list[dict], ws, data_start_col: int) -> list[dict]:
+    """Detach children from parents whose Excel row is blank in every data column.
+
+    Indent-based grouping sometimes promotes a section heading (e.g. "Итого",
+    "DCB ID / DCB BIO") into a sum_children parent even though Excel has the row
+    fully empty — it's a label, not a sum. Letting the engine consolidate such
+    parents produces values where Excel intends nothing. Flatten them: keep the
+    label as a childless leaf, lift the children up to the same level.
+    """
+    max_col = min(ws.max_column or 1, 200)
+
+    def _row_is_empty(row: int | None) -> bool:
+        if not row:
+            return False
+        for c in range(data_start_col, max_col + 1):
+            if ws.cell(row, c).value is not None:
+                return False
+        return True
+
+    def _walk(items: list[dict]) -> list[dict]:
+        result: list[dict] = []
+        for item in items:
+            if item.get("children"):
+                item["children"] = _walk(item["children"])
+            if (
+                item.get("is_group")
+                and item.get("children")
+                and _row_is_empty(item.get("row"))
+            ):
+                kids = item.pop("children")
+                item["is_group"] = False
+                if item.get("rule") == "sum_children":
+                    item["rule"] = "manual"
+                result.append(item)
+                result.extend(kids)
+            else:
+                result.append(item)
+        return result
+
+    return _walk(indicators)
+
+
 def _recover_missing_rows(indicators: list[dict], ws, data_start_col: int) -> list[dict]:
     """Scan Excel sheet for data rows that Claude's analysis missed.
 
@@ -2853,6 +2895,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         indicators = _validate_hierarchy_by_indent(indicators)
         indicators = _fix_indicator_hierarchy(indicators)
         _verify_group_rules(indicators, ws_d, data_start_col)
+        indicators = _flatten_empty_parents(indicators, ws_d, data_start_col)
         indicators = _recover_missing_rows(indicators, ws_d, data_start_col)
         row_to_rid, rid_to_formula, row_to_name, row_to_parent_name, sum_children_rids = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
@@ -3762,6 +3805,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             indicators = _fix_indicator_hierarchy(indicators)
             if excel_name in wb_data.sheetnames:
                 _verify_group_rules(indicators, wb_data[excel_name], data_start_col)
+                indicators = _flatten_empty_parents(indicators, wb_data[excel_name], data_start_col)
                 indicators = _recover_missing_rows(indicators, wb_data[excel_name], data_start_col)
             row_to_rid, rid_to_formula, row_to_name, row_to_parent_name, sum_children_rids = await _create_indicator_records(db, indicator_analytic_id, indicators)
 

@@ -524,21 +524,13 @@ fn resolve_single_cell(
         return;
     }
 
-    // No formula — check for default SUM consolidation
-    // skip_default_sum logic (v2 lines 144-155)
-    let mut skip_default_sum = false;
-    let is_original = model.sheets[si].original_cell_keys.contains(&coord);
-    if !is_original {
-        if let Some(ma) = model.sheets[si].main_axis {
-            let ind_rid = coord.get(ma);
-            if model.sheets[si].children.contains_key(&ind_rid) {
-                skip_default_sum = true;
-            }
-        }
-    }
-
+    // No formula — default SUM consolidation for any parent-coord cell that has
+    // children with actual data. We deliberately do NOT skip when the coord wasn't
+    // in the original input: synthesized parent cells created during fan-out (new
+    // department/version added) need to consolidate the leaves on their slice too.
+    // The original `is_manual` check below still preserves user-typed values.
     let is_manual = cell_flags & FLAG_MANUAL != 0;
-    if !skip_default_sum && !is_manual && is_consolidating(model, si, &coord) {
+    if !is_manual && is_consolidating(model, si, &coord) {
         let child_ids = expand_children_to_ids(model, si, &coord, cells, values, lookup);
         cells[idx].eval_kind = EvalKind::ConsolidationSum { children: child_ids };
         return;
