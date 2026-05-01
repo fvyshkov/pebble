@@ -102,6 +102,7 @@ async def generate_model(model_id: str):
     Returns SSE stream with progress."""
     from backend.formula_engine import calculate_model, invalidate_engine
     from backend.routers.cells import _materialize_sums
+    from backend.coord_key import from_uuid_coord_key_intern as _ck_to_seq_intern
 
     async def event_stream():
         db = get_db()
@@ -134,7 +135,8 @@ async def generate_model(model_id: str):
 
             result = await calculate_model(db, model_id)
 
-            # Write results to DB
+            # Write results to DB. Engine emits uuid-form coord_keys; intern them
+            # to seq_id form for storage (matches the boundary contract in coord_key.py).
             total = 0
             for sid, changes in result.items():
                 if not changes:
@@ -143,7 +145,8 @@ async def generate_model(model_id: str):
                 for ck, val in changes.items():
                     rule = 'empty' if val == '__empty__' else 'formula'
                     db_val = '' if val == '__empty__' else val
-                    rows.append((str(uuid.uuid4()), sid, ck, db_val, rule))
+                    seq_ck = await _ck_to_seq_intern(db, ck)
+                    rows.append((str(uuid.uuid4()), sid, seq_ck, db_val, rule))
                 await db.executemany(
                     """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
                        VALUES (?, ?, ?, ?, ?)
