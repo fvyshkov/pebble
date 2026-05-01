@@ -114,6 +114,18 @@ def _compare_with_excel_row(model_id: str, excel_path: str) -> dict:
     wb = openpyxl.load_workbook(excel_path, data_only=True)
     db = sqlite3.connect(str(DB_PATH))
 
+    # cell_data.coord_key is stored as seq_id|seq_id form to save space.
+    # Build seq_id → uuid map so we can translate coord_keys back to record ids.
+    _seq_to_uuid = {
+        str(row[1]): row[0]
+        for row in db.execute(
+            "SELECT id, seq_id FROM analytic_records WHERE seq_id IS NOT NULL"
+        )
+    }
+
+    def _ck_part_to_uuid(p: str) -> str:
+        return _seq_to_uuid.get(p, p)
+
     sheets = db.execute(
         "SELECT id, name, excel_code FROM sheets WHERE model_id = ? ORDER BY sort_order",
         (model_id,),
@@ -197,7 +209,7 @@ def _compare_with_excel_row(model_id: str, excel_path: str) -> dict:
         ).fetchall()
         cell_map = {}
         for ck, val in cells:
-            parts = ck.split("|")
+            parts = [_ck_part_to_uuid(p) for p in ck.split("|")]
             if len(parts) != len(ordered_aids):
                 continue
             period_rid = ind_rid = None
