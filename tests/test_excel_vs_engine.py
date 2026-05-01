@@ -138,6 +138,16 @@ def _get_pebble_data(model_id: str) -> dict:
     }
     """
     db = sqlite3.connect(str(DB_PATH))
+
+    # cell_data.coord_key is stored as seq_id|seq_id form (interned).
+    # Build seq_id → uuid map so we can match coord_key parts to record ids.
+    _seq_to_uuid = {
+        str(row[1]): row[0]
+        for row in db.execute(
+            "SELECT id, seq_id FROM analytic_records WHERE seq_id IS NOT NULL"
+        )
+    }
+
     sheets = db.execute(
         "SELECT id, name FROM sheets WHERE model_id = ? ORDER BY created_at",
         (model_id,),
@@ -202,7 +212,7 @@ def _get_pebble_data(model_id: str) -> dict:
         cell_map = {}
         rule_map = {}
         for ck, val, rule in cells:
-            parts = ck.split("|")
+            parts = [_seq_to_uuid.get(p, p) for p in ck.split("|")]
             if len(parts) != len(ordered_aids):
                 continue
 

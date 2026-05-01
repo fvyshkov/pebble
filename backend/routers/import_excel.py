@@ -21,7 +21,7 @@ import logging
 from datetime import datetime, date
 from calendar import monthrange
 
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
@@ -847,8 +847,15 @@ async def _verify_import_against_excel(
 
 
 async def _analyze_workbook_with_claude(sheet_texts: dict[str, str], period_dates: list) -> dict:
-    """Analyze entire workbook: detect periods from dates, analyze each sheet with Claude."""
-    client = _get_claude_client()
+    """Analyze entire workbook: detect periods from dates, analyze each sheet with the configured LLM."""
+    # Only build a Claude client if it's the active provider (or available as fallback);
+    # otherwise the openai-compat path inside _analyze_sheet_with_claude is fine with client=None.
+    client = None
+    if _get_import_llm_provider() == "claude" or os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            client = _get_claude_client()
+        except Exception as e:
+            log.info("Claude client unavailable (%s); using openai-compat only", e)
 
     # Period config from detected dates (deterministic, no AI needed)
     if period_dates:

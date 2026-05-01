@@ -125,9 +125,20 @@ def test_sheet_cell_values_match_excel(db, model_id, wb_data, period_map, key, e
                     c2p[c] = period_map[pn]
                 break
 
-    db_cells = {c["coord_key"]: c["value"] for c in db.execute(
-        "SELECT coord_key, value FROM cell_data WHERE sheet_id=?", (sheet["id"],)
-    ).fetchall()}
+    # cell_data.coord_key is stored as seq_id|seq_id form (interned).
+    # Translate seq_id parts back to uuid form for comparison against record ids.
+    _seq_to_uuid = {
+        str(row["seq_id"]): row["id"]
+        for row in db.execute(
+            "SELECT id, seq_id FROM analytic_records WHERE seq_id IS NOT NULL"
+        ).fetchall()
+    }
+    db_cells = {
+        "|".join(_seq_to_uuid.get(p, p) for p in c["coord_key"].split("|")): c["value"]
+        for c in db.execute(
+            "SELECT coord_key, value FROM cell_data WHERE sheet_id=?", (sheet["id"],)
+        ).fetchall()
+    }
 
     # Get records with excel_row (dedup)
     ind_aids = [r["analytic_id"] for r in db.execute(
@@ -138,14 +149,18 @@ def test_sheet_cell_values_match_excel(db, model_id, wb_data, period_map, key, e
     for ia in ind_aids:
         recs_raw.extend(db.execute("SELECT id, excel_row FROM analytic_records WHERE analytic_id=?", (ia,)).fetchall())
 
+    # uuid → seq_id (reverse of _seq_to_uuid built above)
+    _uuid_to_seq = {v: k for k, v in _seq_to_uuid.items()}
     seen = {}
     for rec in recs_raw:
         erow = rec["excel_row"]
         if not erow:
             continue
+        # coord_key suffix in DB is the seq_id of the indicator record
+        suffix = _uuid_to_seq.get(rec["id"], rec["id"])
         has_cells = db.execute(
             "SELECT COUNT(*) as c FROM cell_data WHERE sheet_id=? AND coord_key LIKE ?",
-            (sheet["id"], f'%|{rec["id"]}')
+            (sheet["id"], f'%|{suffix}')
         ).fetchone()["c"]
         if erow not in seen or has_cells > seen[erow][1]:
             seen[erow] = (rec, has_cells)
