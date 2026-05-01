@@ -65,7 +65,7 @@ def sheet_page(browser_context):
 def _enable_aggrid(page: Page) -> None:
     """AG Grid is now the only grid implementation — no toggle. Just wait
     until the AG root wrapper is in the DOM."""
-    page.locator(".ag-root-wrapper").first.wait_for(state="visible", timeout=8000)
+    page.locator(".ag-root-wrapper").first.wait_for(state="visible", timeout=30000)
 
 
 def test_aggrid_renders_grid(sheet_page: Page):

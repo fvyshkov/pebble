@@ -61,7 +61,10 @@
     "delete": "Delete",
     "lockSheet": "Lock sheet",
     "unlockSheet": "Unlock sheet",
-    "sheetLocked": "Sheet is locked"
+    "sheetLocked": "Sheet is locked",
+    "generate": "Generate",
+    "needsGeneration": "Generation required",
+    "generationError": "Generation error"
   },
   "grid": {
     "selected": "Selected",

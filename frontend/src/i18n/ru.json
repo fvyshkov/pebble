@@ -61,7 +61,10 @@
     "delete": "Удалить",
     "lockSheet": "Заблокировать лист",
     "unlockSheet": "Разблокировать лист",
-    "sheetLocked": "Лист заблокирован"
+    "sheetLocked": "Лист заблокирован",
+    "generate": "Сгенерировать",
+    "needsGeneration": "Требуется генерация",
+    "generationError": "Ошибка генерации"
   },
   "grid": {
     "selected": "Выделено",

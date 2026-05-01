@@ -61,7 +61,10 @@
     "delete": "Xóa",
     "lockSheet": "Khóa trang tính",
     "unlockSheet": "Mở khóa trang tính",
-    "sheetLocked": "Trang tính đã khóa"
+    "sheetLocked": "Trang tính đã khóa",
+    "generate": "Tạo",
+    "needsGeneration": "Cần tạo lại",
+    "generationError": "Lỗi tạo"
   },
   "grid": {
     "selected": "Đã chọn",

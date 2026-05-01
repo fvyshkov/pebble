@@ -459,11 +459,11 @@ fn resolve_local_ref(model: &mut Model, sheet_idx: usize,
         }
     }
 
-    // If name not found and contains '/', try parent/child split
+    // If name not found and contains \x1f sentinel, try parent/child split
     if target_rid.is_none() {
         let name_str = model.interner.get_str(name_id).to_string();
-        if name_str.contains('/') {
-            let parts: Vec<&str> = name_str.splitn(2, '/').collect();
+        if name_str.contains('\x1f') {
+            let parts: Vec<&str> = name_str.splitn(2, '\x1f').collect();
             let child_name = model.interner.intern_lower(parts[1].trim());
             let parent_name = model.interner.intern_lower(parts[0].trim());
             let sheet = &model.sheets[sheet_idx];

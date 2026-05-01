@@ -378,6 +378,8 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
 
   // Translation map for analytic records (fetched from server per model/lang)
   const [trMap, setTrMap] = useState<Record<string, string>>({})
+  const trMapRef = useRef<Record<string, string>>({})
+  trMapRef.current = trMap
 
   // Fetch translations on mount and on language change
   useEffect(() => {
@@ -394,12 +396,13 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     return () => window.removeEventListener('pebble:langChange', handler)
   }, [modelId])
 
-  /** recordLabel: check trMap for translated name, then fallback to data.name */
+  /** recordLabel: check trMapRef for translated name, then fallback to data.name.
+   *  Uses ref to avoid re-creating load() when translations arrive. */
   const recordLabel = useCallback((n: RecordNode): string => {
     const trKey = `analytic_record:${n.record.id}:name`
-    if (trMap[trKey]) return trMap[trKey]
+    if (trMapRef.current[trKey]) return trMapRef.current[trKey]
     return (n.data && n.data.name) || n.record.id.slice(0, 8)
-  }, [trMap])
+  }, [])
 
   // Formula editor dialog state (opened from hover ⋮ button on a cell).
   const [formulaEditorOpen, setFormulaEditorOpen] = useState(false)
@@ -551,6 +554,8 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   const analyticsRef = useRef<Record<string, Analytic>>({})
   /** For each row analytic, the single root record ID (if exactly one root with children exists). */
   const rootRecordByAidRef = useRef<Record<string, string>>({})
+  /** Track which group paths have had their children cells loaded (lazy loading). */
+  const loadedGroupsRef = useRef<Set<string>>(new Set())
 
   // Build coord key for (row × period) using DB order and right-truncation
   // lookup against cellMapRef.
@@ -564,17 +569,63 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     return { value: '', rule: 'manual', key: parts.join('|') }
   }, [])
 
+  /** Bottom-up sum_children for group rows that have loaded children. */
+  const computeSumChildren = useCallback((rows: RowDatum[], leafKeys: string[]) => {
+    const pathIdx: Record<string, number[]> = {}
+    rows.forEach((r, i) => {
+      const parentKey = r.path.slice(0, -1).join('|')
+      ;(pathIdx[parentKey] ||= []).push(i)
+    })
+    const sumFor = (rowIdx: number, field: string): number | null => {
+      const row = rows[rowIdx]
+      const leafId = field.slice(2)
+      const rule = row[`__rule_${leafId}`]
+      if (rule === 'empty') return null
+      if (row.isLeaf) {
+        const v = row[field]
+        if (v == null || v === '') return null
+        const n = parseFloat(String(v))
+        return Number.isNaN(n) ? null : n
+      }
+      const kids = pathIdx[row.path.join('|')] || []
+      if (kids.length === 0) return null
+      // Only sum if children have been loaded (have cell values)
+      const anyChildLoaded = kids.some(ci => {
+        for (const lk of leafKeys) {
+          if (rows[ci][`p_${lk}`] !== undefined) return true
+        }
+        return false
+      })
+      if (!anyChildLoaded) return null
+      let s = 0, has = false
+      for (const ci of kids) {
+        const sv = sumFor(ci, field)
+        if (sv != null) { s += sv; has = true }
+      }
+      return has ? s : null
+    }
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].isLeaf) continue
+      for (const leafKey of leafKeys) {
+        const field = `p_${leafKey}`
+        const rule = rows[i][`__rule_${leafKey}`]
+        if (rule === 'empty') { rows[i][field] = ''; continue }
+        if ((rows[i][field] === '' || rows[i][field] == null) && rule === 'sum_children') {
+          const s = sumFor(i, field)
+          if (s != null) rows[i][field] = String(s)
+        }
+      }
+    }
+  }, [])
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      // Fetch sheet locked state + analytics in parallel
-      const [sa, sheets] = await Promise.all([
-        api.listSheetAnalytics(sheetId),
-        api.listSheets(modelId),
-      ])
-      const sheetRecord = sheets.find(s => s.id === sheetId)
-      setLocked(!!sheetRecord?.locked)
+      // Single bundled request: sheet + analytics + records + view settings
+      const bundle = await api.loadBundle(sheetId, currentUserId)
+      const sa = bundle.sheet_analytics as (SheetAnalytic & { is_main?: boolean | number })[]
+      setLocked(!!bundle.sheet?.locked)
       if (sa.length < 2) throw new Error(t('grid.needMin2'))
 
       const aMap: Record<string, Analytic> = {}
@@ -589,22 +640,20 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
             visibleSets[b.analytic_id] = new Set(ids)
           } catch { visibleSets[b.analytic_id] = null }
         } else if (b.min_period_level) {
-          visibleSets[b.analytic_id] = null // will use level filter
+          visibleSets[b.analytic_id] = null
         }
       }
       const periodLevelByAid: Record<string, string | null> = {}
       for (const b of sa) periodLevelByAid[b.analytic_id] = b.min_period_level ?? null
-      await Promise.all(sa.map(async b => {
-        const [analytic, recs] = await Promise.all([
-          api.getAnalytic(b.analytic_id),
-          api.listRecords(b.analytic_id),
-        ])
+      for (const b of sa) {
+        const analytic = bundle.analytics[b.analytic_id]
+        if (!analytic) continue
         aMap[b.analytic_id] = analytic
+        let recs = bundle.records[b.analytic_id] || []
         let filteredRecs = recs
         const visSet = visibleSets[b.analytic_id]
         if (visSet) {
-          // Filter by exact visible record IDs
-          filteredRecs = recs.filter(r => visSet.has(r.id))
+          filteredRecs = recs.filter((r: any) => visSet.has(r.id))
         } else {
           const minLvl = periodLevelByAid[b.analytic_id]
           if (minLvl) filteredRecs = filterFlatRecordsByLevel(recs, minLvl)
@@ -614,7 +663,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           const d = typeof r.data_json === 'string' ? JSON.parse(r.data_json) : r.data_json
           recNameMap[r.id] = (d && d.name) || r.id.slice(0, 6)
         }
-      }))
+      }
       analyticsRef.current = aMap
       setAnalyticsMap(aMap)
       setRecordNames(recNameMap)
@@ -640,7 +689,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         if (a.color) {
           colorMap[a.id] = a.color
         } else if (a.is_periods || a.id === mainAid) {
-          colorMap[a.id] = null // white
+          colorMap[a.id] = null // periods + main (indicators) stay white
         } else {
           colorMap[a.id] = SOFT_PALETTE[paletteIdx % SOFT_PALETTE.length]
           paletteIdx++
@@ -670,10 +719,10 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
 
       // View settings — read once per mount. Subsequent reloads reuse state.
       let curOrder = [...dbOrd]
-      let effectivePinned = pinned
+      let effectivePinned = pinnedRef.current
       if (!vsLoadedRef.current) {
         try {
-          const vs: any = await api.getViewSettings(sheetId, currentUserId)
+          const vs: any = bundle.view_settings
           if (vs?.order?.length) {
             const valid = new Set(dbOrd)
             curOrder = vs.order.filter((id: string) => valid.has(id))
@@ -812,8 +861,11 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
             const tuple = [...parentTuple, { recId: leaf.record.id, label: recordLabel(leaf) }]
             const children = buildNested(extraIdx + 1, tuple)
             if (children.length === 1 && !('children' in children[0])) {
-              // Single child — no need for group wrapper
-              result.push(children[0])
+              // Single child — apply color class directly to the leaf ColDef
+              const col = { ...children[0] } as ColDef
+              col.headerName = recordLabel(leaf)
+              col.headerClass = hdrClass
+              result.push(col)
             } else {
               result.push({ headerName: recordLabel(leaf), headerClass: hdrClass, children } as ColGroupDef)
             }
@@ -866,22 +918,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         return result
       }
 
-      // ── Cells (full prefetch) ───────────────────────────────────────────
-      cellMapRef.current = {}
-      cellRuleRef.current = {}
-      formulaMapRef.current = {}
-      const cellData: CellData[] = await api.getCells(sheetId, currentUserId)
-      for (const c of cellData) {
-        cellMapRef.current[c.coord_key] = c.value ?? ''
-        if (c.rule) cellRuleRef.current[c.coord_key] = c.rule as CellRule
-        if (c.formula) formulaMapRef.current[c.coord_key] = c.formula
-      }
-
-      // ── Build rows (hierarchical, matching legacy PivotGrid) ────────────
-      // We walk each row-analytic in order; within an analytic, we traverse
-      // the parent_id tree; a node becomes a group row if it has children OR
-      // if there's a sub-analytic below. Leaf rows (terminal, last analytic)
-      // carry cell values.
+      // ── Build rows (hierarchical) with coord_keys but WITHOUT cell values ──
       const rows: RowDatum[] = []
       const buildLevel = (
         ai: number,
@@ -908,13 +945,11 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
               unit: node.data?.unit,
               format: node.data?.format,
             }
-            // Populate cell values for each column leaf (cross-product when colCount>1).
             for (const primaryLeaf of colLeaves) {
               const tuples = buildCrossProduct(primaryLeaf)
               for (const tuple of tuples) {
                 const leafKey = tupleKey(tuple)
                 const parts: string[] = []
-                // Build coord_key: one entry per analytic in dbOrd
                 const colRecMap: Record<string, string> = {}
                 for (let ci = 0; ci < colAIds.length; ci++) {
                   colRecMap[colAIds[ci]] = tuple[ci].recId
@@ -923,17 +958,13 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
                   if (colRecMap[a]) parts.push(colRecMap[a])
                   else if (effectivePinned[a]) parts.push(effectivePinned[a])
                   else if (recIds[a]) parts.push(recIds[a])
-                  else if (rootMap[a]) parts.push(rootMap[a])
+                  // Skip analytics not yet resolved — shorter key matched
+                  // via lookupCell prefix fallback or DB prefix keys.
                 }
                 if (parts.length >= 2) {
-                  const lookup = lookupCell(parts)
-                  row[`p_${leafKey}`] = lookup.value
                   row[`__coord_${leafKey}`] = parts.join('|')
                   row[`__parts_${leafKey}`] = parts
-                  const fullRule = cellRuleRef.current[parts.join('|')]
-                  row[`__rule_${leafKey}`] = fullRule
-                    ?? (lookup.key !== parts.join('|') && lookup.value !== '' ? lookup.rule : undefined)
-                    ?? (isGroup ? 'sum_children' : 'manual')
+                  row[`__rule_${leafKey}`] = isGroup ? 'sum_children' : 'manual'
                 }
               }
             }
@@ -948,6 +979,41 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       }
       buildLevel(0, {}, [])
 
+      // ── Lazy cell fetch: only top-level rows (sums materialized in DB) ──
+      cellMapRef.current = {}
+      cellRuleRef.current = {}
+      formulaMapRef.current = {}
+      loadedGroupsRef.current = new Set(['__root__'])
+      const topLevelKeys: string[] = []
+      for (const row of rows) {
+        if (row.path.length !== 1) continue  // only top-level
+        for (const leafKey of allLeafKeys) {
+          const ck = row[`__coord_${leafKey}`] as string | undefined
+          if (ck) topLevelKeys.push(ck)
+        }
+      }
+      if (topLevelKeys.length > 0) {
+        const topCells: CellData[] = await api.getCellsPartial(sheetId, topLevelKeys, currentUserId)
+        for (const c of topCells) {
+          cellMapRef.current[c.coord_key] = c.value ?? ''
+          if (c.rule) cellRuleRef.current[c.coord_key] = c.rule as CellRule
+          if (c.formula) formulaMapRef.current[c.coord_key] = c.formula
+        }
+      }
+      // Populate values for top-level rows from materialized sums
+      for (const row of rows) {
+        for (const leafKey of allLeafKeys) {
+          const parts = row[`__parts_${leafKey}`] as string[] | undefined
+          if (!parts || parts.length < 2) continue
+          const lookup = lookupCell(parts)
+          row[`p_${leafKey}`] = lookup.value
+          const fullRule = cellRuleRef.current[parts.join('|')]
+          row[`__rule_${leafKey}`] = fullRule
+            ?? (lookup.key !== parts.join('|') && lookup.value !== '' ? lookup.rule : undefined)
+            ?? (row.isLeaf ? 'manual' : 'sum_children')
+        }
+      }
+
       // ── If ALL row analytics are pinned, buildLevel produced no rows.
       //    Render a single summary row so pinned values are still visible. ──
       if (rowAIds.length === 0 && Object.keys(effectivePinned).length > 0) {
@@ -960,6 +1026,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           isLeaf: true,
           recordIds: { ...effectivePinned },
         }
+        const pinnedCoordKeys: string[] = []
         for (const primaryLeaf of colLeaves) {
           for (const tuple of buildCrossProduct(primaryLeaf)) {
             const leafKey = tupleKey(tuple)
@@ -971,55 +1038,32 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
               else if (effectivePinned[a]) parts.push(effectivePinned[a])
             }
             if (parts.length >= 2) {
-              const lookup = lookupCell(parts)
-              row[`p_${leafKey}`] = lookup.value
               row[`__coord_${leafKey}`] = parts.join('|')
               row[`__parts_${leafKey}`] = parts
-              row[`__rule_${leafKey}`] =
-                cellRuleRef.current[parts.join('|')] ?? 'manual'
+              pinnedCoordKeys.push(parts.join('|'))
             }
           }
+        }
+        if (pinnedCoordKeys.length > 0) {
+          const pinnedCells: CellData[] = await api.getCellsPartial(sheetId, pinnedCoordKeys, currentUserId)
+          for (const c of pinnedCells) {
+            cellMapRef.current[c.coord_key] = c.value ?? ''
+            if (c.rule) cellRuleRef.current[c.coord_key] = c.rule as CellRule
+            if (c.formula) formulaMapRef.current[c.coord_key] = c.formula
+          }
+        }
+        for (const leafKey of allLeafKeys) {
+          const parts = row[`__parts_${leafKey}`] as string[] | undefined
+          if (!parts || parts.length < 2) continue
+          const lookup = lookupCell(parts)
+          row[`p_${leafKey}`] = lookup.value
+          row[`__rule_${leafKey}`] = cellRuleRef.current[parts.join('|')] ?? 'manual'
         }
         rows.push(row)
       }
 
-      // ── Bottom-up sum_children computation for group rows ───────────────
-      const pathIdx: Record<string, number[]> = {}
-      rows.forEach((r, i) => {
-        const parentKey = r.path.slice(0, -1).join('|')
-        ;(pathIdx[parentKey] ||= []).push(i)
-      })
-      const sumFor = (rowIdx: number, field: string): number | null => {
-        const row = rows[rowIdx]
-        const leafId = field.slice(2)
-        const rule = row[`__rule_${leafId}`]
-        if (rule === 'empty') return null
-        if (row.isLeaf) {
-          const v = row[field]
-          if (v == null || v === '') return null
-          const n = parseFloat(String(v))
-          return Number.isNaN(n) ? null : n
-        }
-        const kids = pathIdx[row.path.join('|')] || []
-        let s = 0, has = false
-        for (const ci of kids) {
-          const sv = sumFor(ci, field)
-          if (sv != null) { s += sv; has = true }
-        }
-        return has ? s : null
-      }
-      for (let i = 0; i < rows.length; i++) {
-        if (rows[i].isLeaf) continue
-        for (const leafKey of allLeafKeys) {
-          const field = `p_${leafKey}`
-          const rule = rows[i][`__rule_${leafKey}`]
-          if (rule === 'empty') { rows[i][field] = ''; continue }
-          if ((rows[i][field] === '' || rows[i][field] == null) && rule === 'sum_children') {
-            const s = sumFor(i, field)
-            if (s != null) rows[i][field] = String(s)
-          }
-        }
-      }
+      // ── Bottom-up sum_children computation (only for loaded rows) ──────
+      computeSumChildren(rows, allLeafKeys)
 
       // Detect first period column with any non-empty cell data.
       firstDataColIdRef.current = null
@@ -1041,9 +1085,18 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       setError(e?.message || String(e))
       setLoading(false)
     }
-  }, [sheetId, currentUserId, lookupCell, pinned, recordLabel, t])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheetId, currentUserId, lookupCell, t])
 
   useEffect(() => { load() }, [load])
+
+  // When translations arrive, refresh grid labels (row names + column headers)
+  // without re-running the full load().
+  useEffect(() => {
+    if (!trMap || Object.keys(trMap).length === 0) return
+    gridApiRef.current?.refreshCells({ force: true })
+    gridApiRef.current?.refreshHeader()
+  }, [trMap])
 
   // Expose imperative methods to parent via ref
   useImperativeHandle(ref, () => ({
@@ -1112,7 +1165,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   // (so HEAD cells driven by consolidation/scoped rules show their formula +
   // source badge in the grid instead of a generic "Σ сумма" label).
   useEffect(() => {
-    if (!sheetId) return
+    if (!sheetId || mode !== 'formulas') return
     const keys = Object.keys(cellMapRef.current)
     if (keys.length === 0) return
     let cancelled = false
@@ -1164,12 +1217,23 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         if (extraIdx >= extraLeafArrays.length) {
           return [makePeriodColDef(parentTuple[parentTuple.length - 1].label, rTupleKey(parentTuple))]
         }
+        const rExtraAId = colAIdsRef.current[1 + extraIdx] || ''
+        const rExtraColor = rExtraAId ? analyticColorsRef.current[rExtraAId] : null
+        const rExtraHdrClass = rExtraColor
+          ? `ag-center-header peb-ahdr-${rExtraAId.slice(0, 8)}`
+          : 'ag-center-header'
         const result: (ColDef | ColGroupDef)[] = []
         for (const leaf of extraLeafArrays[extraIdx]) {
           const tuple = [...parentTuple, { recId: leaf.record.id, label: recordLabel(leaf) }]
           const children = buildNested(extraIdx + 1, tuple)
-          if (children.length === 1 && !('children' in children[0])) result.push(children[0])
-          else result.push({ headerName: recordLabel(leaf), headerClass: 'ag-center-header', children } as ColGroupDef)
+          if (children.length === 1 && !('children' in children[0])) {
+            const col = { ...children[0] } as ColDef
+            col.headerName = recordLabel(leaf)
+            col.headerClass = rExtraHdrClass
+            result.push(col)
+          } else {
+            result.push({ headerName: recordLabel(leaf), headerClass: rExtraHdrClass, children } as ColGroupDef)
+          }
         }
         return result
       }
@@ -1218,8 +1282,11 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   // Persist view settings (pinned analytics + column state: widths, order,
   // pinned cols, hidden cols). Debounced, only after first load.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const vsFirstRenderRef = useRef(true)
   useEffect(() => {
     if (!vsLoadedRef.current) return
+    // Skip the first render after load — it's just restoring saved state.
+    if (vsFirstRenderRef.current) { vsFirstRenderRef.current = false; return }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
       api.saveViewSettings(sheetId, {
@@ -1323,14 +1390,21 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           } else if (rule === 'formula' || rule === 'manual') {
             newVal = coordKey ? (freshMap[coordKey] ?? '') : ''
           } else {
-            let s = 0, has = false
-            for (const k of kids) {
-              const v = k.data[field]
-              if (v == null || v === '') continue
-              const n = parseFloat(String(v))
-              if (!Number.isNaN(n)) { s += n; has = true }
+            // sum_children: prefer the server's materialized value (which
+            // includes ALL descendants) over summing only loaded children.
+            const serverVal = coordKey ? freshMap[coordKey] : undefined
+            if (serverVal != null && serverVal !== '') {
+              newVal = serverVal
+            } else {
+              let s = 0, has = false
+              for (const k of kids) {
+                const v = k.data[field]
+                if (v == null || v === '') continue
+                const n = parseFloat(String(v))
+                if (!Number.isNaN(n)) { s += n; has = true }
+              }
+              newVal = has ? String(s) : ''
             }
-            newVal = has ? String(s) : ''
           }
           const oldVal = (pNode.data[field] ?? '') as string | number
           if (String(newVal) !== String(oldVal)) {
@@ -1486,6 +1560,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         return rule === 'manual'
       },
       valueFormatter: (p: any) => {
+        if (p.data?.__loading) return '\u2026'
         const rule: CellRule = p.data?.[`__rule_${periodRecId}`] || 'manual'
         if (mode === 'formulas') {
           // Formula mode: show resolved indicator-rule formula (single source of truth).
@@ -1548,6 +1623,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         return out
       },
       cellStyle: (p: any) => {
+        if (p.data?.__loading) return { textAlign: 'center', color: '#bbb', fontStyle: 'italic' }
         const isLeaf = !!p.data?.isLeaf
         const rule: CellRule = p.data?.[`__rule_${periodRecId}`] || 'manual'
         const s: any = { textAlign: mode === 'formulas' ? 'left' : 'right' }
@@ -1701,6 +1777,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         return has ? s : ''
       },
       valueFormatter: (p: any) => {
+        if (p.data?.__loading) return '\u2026'
         if (mode === 'formulas') {
           const key = buildSumKey(p.data?.recordIds)
           if (key) {
@@ -1809,6 +1886,79 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     // Expose for E2E tests. Harmless in production — just a handle.
     ;(window as unknown as { __pebbleGridApi?: GridApi }).__pebbleGridApi = e.api
   }, [])
+
+  // Lazy-load children cells when a group row is expanded.
+  const onRowGroupOpened = useCallback(async (event: any) => {
+    if (!event.expanded || !event.node?.data) return
+    const parentPath = event.node.data.path as string[]
+    const parentKey = parentPath.join('|')
+    if (loadedGroupsRef.current.has(parentKey)) return
+    loadedGroupsRef.current.add(parentKey)
+
+    const grid = gridApiRef.current
+    if (!grid) return
+
+    // Collect coord_keys for direct children that don't have values yet.
+    const coordKeys: string[] = []
+    const childNodes: any[] = []
+    grid.forEachNode(n => {
+      if (!n.data) return
+      const p = n.data.path as string[]
+      if (p.length === parentPath.length + 1 &&
+          p.slice(0, parentPath.length).join('|') === parentKey) {
+        let hasAnyValue = false
+        for (const leafId of colLeafIdsRef.current) {
+          if (n.data[`p_${leafId}`] !== undefined) { hasAnyValue = true; break }
+        }
+        if (!hasAnyValue) {
+          childNodes.push(n)
+          for (const leafId of colLeafIdsRef.current) {
+            const ck = n.data[`__coord_${leafId}`] as string
+            if (ck) coordKeys.push(ck)
+          }
+        }
+      }
+    })
+
+    if (coordKeys.length === 0) return
+
+    // Show "loading..." placeholder in children cells while fetching
+    for (const n of childNodes) {
+      n.data.__loading = true
+    }
+    grid.refreshCells({ rowNodes: childNodes, force: true })
+
+    try {
+      const cellData: CellData[] = await api.getCellsPartial(sheetId, coordKeys, currentUserId)
+      for (const c of cellData) {
+        cellMapRef.current[c.coord_key] = c.value ?? ''
+        if (c.rule) cellRuleRef.current[c.coord_key] = c.rule as CellRule
+        if (c.formula) formulaMapRef.current[c.coord_key] = c.formula
+      }
+      const changedCols = new Set<string>()
+      for (const n of childNodes) {
+        delete n.data.__loading
+        for (const leafId of colLeafIdsRef.current) {
+          const parts = n.data[`__parts_${leafId}`] as string[] | undefined
+          if (!parts || parts.length < 2) continue
+          const lookup = lookupCell(parts)
+          n.data[`p_${leafId}`] = lookup.value
+          changedCols.add(`p_${leafId}`)
+          const fullRule = cellRuleRef.current[parts.join('|')]
+          n.data[`__rule_${leafId}`] = fullRule
+            ?? (lookup.key !== parts.join('|') && lookup.value !== '' ? lookup.rule : undefined)
+            ?? (n.data.isLeaf ? 'manual' : 'sum_children')
+        }
+      }
+      if (changedCols.size > 0) {
+        grid.refreshCells({ rowNodes: childNodes, columns: Array.from(changedCols), force: true })
+      }
+    } catch (e) {
+      console.error('Lazy cell load failed:', e)
+      for (const n of childNodes) { delete n.data.__loading }
+      grid.refreshCells({ rowNodes: childNodes, force: true })
+    }
+  }, [sheetId, currentUserId, lookupCell])
 
   // Apply saved column state every time columnDefs are (re)built.
   // Smart merge: only apply state for colIds that still exist in the new
@@ -1941,14 +2091,19 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     }
 
     // Alt+ArrowLeft / Alt+ArrowRight → collapse/expand focused group row.
+    // Only consume the keystroke when the action actually changes the node's
+    // expanded state; otherwise let the default grid navigation happen.
     if (kev.altKey && (key === 'arrowleft' || key === 'arrowright')) {
       const focused = e.api.getFocusedCell()
       if (!focused) return
       const node = e.api.getDisplayedRowAtIndex(focused.rowIndex)
-      if (!node || !node.group) return
+      const isGroup = node && (node.group || node.allChildrenCount! > 0 || !node.data?.isLeaf)
+      if (!isGroup) return  // leaf row — let arrow navigate normally
+      const wantExpanded = key === 'arrowright'
+      if (node!.expanded === wantExpanded) return  // already in target state — navigate
       kev.preventDefault()
       kev.stopPropagation()
-      node.setExpanded(key === 'arrowright')
+      node!.setExpanded(wantExpanded)
       return
     }
 
@@ -2352,7 +2507,7 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     for (const [aid, color] of Object.entries(analyticColorsRef.current)) {
       if (!color) continue
       const cls = `peb-ahdr-${aid.slice(0, 8)}`
-      rules.push(`.${cls} { background: ${color} !important; }`)
+      rules.push(`.ag-header-cell.${cls}, .ag-header-group-cell.${cls} { background-color: ${color} !important; }`)
     }
     return rules.join('\n')
   }, [analyticsMap])
@@ -2450,12 +2605,13 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           treeData
           getDataPath={getDataPath}
           autoGroupColumnDef={autoGroupColumnDef}
-          groupDefaultExpanded={-1}
+          groupDefaultExpanded={0}
           rowHeight={28}
           headerHeight={30}
           onCellValueChanged={onCellValueChanged}
           onCellKeyDown={onCellKeyDown}
           onGridReady={onGridReady}
+          onRowGroupOpened={onRowGroupOpened}
           onColumnResized={e => { if (e.finished) captureColumnState() }}
           onColumnMoved={e => { if (e.finished) captureColumnState() }}
           onColumnPinned={captureColumnState}

@@ -361,14 +361,14 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   onClick={() => { if (mainSheets.length > 0) setSelectedRecordId(node.record.id) }}
                   sx={{
                     cursor: mainSheets.length > 0 ? 'pointer' : 'default',
-                    '& .row-actions': { opacity: 0 },
-                    '&:hover .row-actions': { opacity: 1 },
+                    '& .row-actions': { opacity: 0, width: 0, overflow: 'hidden' },
+                    '&:hover .row-actions': { opacity: 1, width: 'auto', overflow: 'visible' },
                   }}
                 >
                   {fields.map((f, fi) => (
-                    <TableCell key={f.id} sx={fi === 0 ? { pl: node.level * 6 + 1 } : undefined}>
+                    <TableCell key={f.id} sx={fi === 0 ? { pl: node.level * 4 + 1 } : undefined}>
                       {fi === 0 ? (
-                        <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0 }}>
                           <Box className="row-actions" sx={{ display: 'flex', gap: 0, transition: 'opacity 0.15s', flexShrink: 0 }}>
                             <Tooltip title={t('records.addChild')}>
                               <IconButton size="small" onClick={() => handleAdd(node.record.id)}>

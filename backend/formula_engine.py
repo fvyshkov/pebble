@@ -24,7 +24,12 @@ import json
 import math
 import itertools
 import time
+import zlib
 from typing import Any
+
+# zlib magic byte (0x78 = zlib stream); raw bincode starts with random bytes.
+# We prepend this 1-byte tag so old uncompressed blobs still load.
+_DAG_COMPRESS_MAGIC = b"\x01"   # tag byte for "zlib-compressed payload follows"
 
 # ── Rust V4 engine (only engine — no fallbacks) ──────────────────────────
 import pebble_calc as _rust_engine  # mandatory — crash if not installed
@@ -41,8 +46,13 @@ async def _try_load_dag_from_db(db, model_id: str):
     if not rows or not rows[0]["dag_blob"]:
         return None
     try:
+        blob = bytes(rows[0]["dag_blob"])
+        if blob[:1] == _DAG_COMPRESS_MAGIC:
+            t0 = time.perf_counter()
+            blob = zlib.decompress(blob[1:])
+            print(f"[formula_engine] V4 DAG decompressed: {time.perf_counter()-t0:.3f}s, {len(blob)/1024**2:.0f} MB")
         engine = _rust_engine.CalcEngine()
-        engine.load(rows[0]["dag_blob"])
+        engine.load(blob)
         print(f"[formula_engine] V4 engine loaded from DB cache for model {model_id}")
         return engine
     except Exception as e:
@@ -51,9 +61,12 @@ async def _try_load_dag_from_db(db, model_id: str):
 
 
 async def _save_dag_to_db(db, model_id: str, engine):
-    """Save the built DAG to the database for persistence."""
+    """Save the built DAG to the database for persistence (zlib-compressed)."""
     try:
-        blob = engine.serialize()
+        raw = engine.serialize()
+        t0 = time.perf_counter()
+        blob = _DAG_COMPRESS_MAGIC + zlib.compress(raw, 1)  # level 1 — fast, ~30% ratio
+        dt = time.perf_counter() - t0
         await db.execute(
             """INSERT INTO dag_cache (model_id, dag_blob, created_at)
                VALUES (?, ?, datetime('now'))
@@ -61,7 +74,8 @@ async def _save_dag_to_db(db, model_id: str, engine):
             (model_id, blob),
         )
         await db.commit()
-        print(f"[formula_engine] V4 DAG saved to DB cache for model {model_id} ({len(blob)} bytes)")
+        print(f"[formula_engine] V4 DAG saved to DB cache for model {model_id} "
+              f"({len(raw)/1024**2:.0f} MB → {len(blob)/1024**2:.0f} MB, compress={dt:.2f}s)")
     except Exception as e:
         print(f"[formula_engine] V4 DAG cache save failed: {e}")
 
@@ -92,13 +106,23 @@ async def _get_or_build_engine(db, model_id: str, model_json: str):
 
 
 async def invalidate_engine(db, model_id: str):
-    """Called when model structure changes — forces full rebuild on next calc."""
+    """Called when model structure changes — forces full rebuild on next calc.
+    Also marks the model as needing generation."""
     engine = _engine_cache.pop(model_id, None)
     if engine is not None:
         engine.drop_state()
     # Remove from DB cache
     try:
         await db.execute("DELETE FROM dag_cache WHERE model_id = ?", (model_id,))
+        await db.commit()
+    except Exception:
+        pass
+    # Mark model as needing generation
+    try:
+        await db.execute(
+            "UPDATE models SET calc_status = 'needs_generation' WHERE id = ?",
+            (model_id,),
+        )
         await db.commit()
     except Exception:
         pass
@@ -110,12 +134,27 @@ async def calculate_model_incremental(
     changed_cells: list[tuple[str, str, str]],  # [(sheet_id, coord_key, value)]
 ) -> dict[str, dict[str, str]]:
     """Update specific cell values using cached DAG.
-    Falls back to full recalc if engine not cached.
-    Always invalidates first to ensure new cells are included in the DAG."""
-    # Always invalidate — new cells may have been added since the last build.
-    # Full recalc is fast enough (sub-second) and guarantees correctness.
-    await invalidate_engine(db, model_id)
-    return await calculate_model(db, model_id)
+    Falls back to full recalc if engine not cached."""
+    # Try incremental path: use cached engine + update_values
+    engine = _engine_cache.get(model_id)
+    if engine is None or not engine.is_built():
+        # No cached engine — try loading from DB
+        engine = await _try_load_dag_from_db(db, model_id)
+        if engine is not None:
+            _engine_cache[model_id] = engine
+
+    if engine is not None and engine.is_built():
+        t0 = time.perf_counter()
+        changes_json = json.dumps(changed_cells)
+        result = engine.update_values(changes_json)
+        t1 = time.perf_counter()
+        total_cells = sum(len(v) for v in result.values()) if isinstance(result, dict) else 0
+        print(f"[formula_engine] V4 incremental: {t1-t0:.3f}s cells={total_cells}")
+        return result
+
+    # No cached engine — skip formula recalc (user must click Generate)
+    print("[formula_engine] V4 incremental: no cached engine, skipping formula recalc")
+    return {}
 
 
 async def get_dirty_cells(
@@ -460,6 +499,22 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     """Calculate ALL formula cells across ALL sheets in a model.
     Returns {sheet_id: {coord_key: new_value}}.
     """
+    # Fast path: engine state already loaded → skip DB reload + Python↔Rust marshaling.
+    # Manual edits go through calculate_model_incremental which keeps the engine in sync,
+    # and structural changes call invalidate_engine() which evicts the cache.
+    cached = _engine_cache.get(model_id)
+    if cached is None or not cached.is_built():
+        cached = await _try_load_dag_from_db(db, model_id)
+        if cached is not None:
+            _engine_cache[model_id] = cached
+    if cached is not None and cached.is_built():
+        t0 = time.perf_counter()
+        rust_result = cached.collect_all_changes()
+        dt = time.perf_counter() - t0
+        total = sum(len(v) for v in rust_result.values())
+        print(f"[formula_engine] V4 cached: compute={dt:.3f}s cells={total}")
+        return rust_result
+
     all_sheets = await db.execute_fetchall(
         "SELECT id, name, excel_code FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,))
     if not all_sheets:
@@ -615,7 +670,10 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         }
 
         for c in await db.execute_fetchall(
-                "SELECT coord_key, value, rule, formula FROM cell_data WHERE sheet_id = ?", (sid,)):
+                """SELECT cd.coord_key, cd.value, cd.rule,
+                          COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
+                   FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+                   WHERE cd.sheet_id = ?""", (sid,)):
             gk = (sid, c["coord_key"])
             global_cells[gk] = c["value"] or ""
             if c["rule"] == "formula" and c["formula"]:
@@ -634,7 +692,7 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
     # NOT be marked as manual (they need default SUM consolidation in Rust).
     _formula_no_text: set[tuple] = set()
     for c in await db.execute_fetchall(
-            "SELECT sheet_id, coord_key, rule FROM cell_data WHERE rule = 'formula' AND (formula IS NULL OR formula = '')"):
+            "SELECT sheet_id, coord_key, rule FROM cell_data WHERE rule='formula' AND formula_id IS NULL AND (formula IS NULL OR formula='')"):
         _formula_no_text.add((c["sheet_id"], c["coord_key"]))
     for gk in global_cells:
         if gk not in global_formulas and gk not in _formula_no_text:
@@ -678,7 +736,9 @@ async def resolve_formula_for_display(db, sheet_id: str, coord_key: str) -> dict
     """
     # 1. Per-cell explicit formula
     cell_rows = await db.execute_fetchall(
-        "SELECT rule, formula FROM cell_data WHERE sheet_id = ? AND coord_key = ?",
+        """SELECT cd.rule, COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
+           FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+           WHERE cd.sheet_id = ? AND cd.coord_key = ?""",
         (sheet_id, coord_key),
     )
     cell = dict(cell_rows[0]) if cell_rows else None

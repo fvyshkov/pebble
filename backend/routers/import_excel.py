@@ -3,10 +3,12 @@ structure analysis.
 
 Flow:
 1. Extract text representation of each Excel sheet (headers, row labels, data presence)
-2. Send to Claude API → returns JSON describing periods, indicator hierarchies
-3. Create model + period analytic with proper year/quarter/month hierarchy
-4. Create indicator analytics per sheet with hierarchical records
-5. Import cell values (manual vs formula detection by theme color)
+2. Apply Knowledge Base (KB) patterns for hierarchy detection
+3. Ask clarifying questions for ambiguous cases (interactive Q&A via SSE)
+4. Fall back to Claude API for sheets where KB is insufficient
+5. Create model + period analytic with proper year/quarter/month hierarchy
+6. Create indicator analytics per sheet with hierarchical records
+7. Import cell values (manual vs formula detection by theme color)
 """
 
 import asyncio
@@ -27,6 +29,56 @@ from backend.db import get_db
 
 router = APIRouter(prefix="/api/import", tags=["import"])
 log = logging.getLogger(__name__)
+
+# ── Q&A session management ────────────────────────────────────────────────
+# Each streaming import gets a unique session_id.  When the backend needs
+# user input it yields a "question" SSE event and awaits an asyncio.Event.
+# The answer endpoint sets the event with the user's response.
+
+_qa_sessions: dict[str, dict] = {}  # session_id -> {questions: {qid: {event, answer}}}
+
+
+def _create_qa_session() -> str:
+    sid = str(uuid.uuid4())
+    _qa_sessions[sid] = {"questions": {}}
+    return sid
+
+
+def _cleanup_qa_session(sid: str) -> None:
+    _qa_sessions.pop(sid, None)
+
+
+async def _ask_question(sid: str, qid: str, timeout: float = 300) -> str | None:
+    """Register a question and wait for the user's answer (up to timeout seconds)."""
+    evt = asyncio.Event()
+    _qa_sessions[sid]["questions"][qid] = {"event": evt, "answer": None}
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=timeout)
+        return _qa_sessions[sid]["questions"][qid]["answer"]
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        _qa_sessions[sid]["questions"].pop(qid, None)
+
+
+@router.post("/answer/{session_id}")
+async def submit_answer(session_id: str, body: dict = None):
+    """Submit an answer to a pending import question."""
+    if body is None:
+        return {"error": "No body"}
+    from fastapi import Request
+    qid = body.get("question_id", "")
+    answer = body.get("answer", "")
+    session = _qa_sessions.get(session_id)
+    if not session:
+        return {"error": "Session not found or expired"}
+    q = session["questions"].get(qid)
+    if not q:
+        return {"error": "Question not found or already answered"}
+    q["answer"] = answer
+    q["event"].set()
+    return {"ok": True}
+
 
 MONTH_NAMES_RU = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -605,7 +657,16 @@ def _split_sheet_into_chunks(sheet_text: str) -> list[str]:
 
 
 def _merge_chunk_results(results: list[dict]) -> dict:
-    """Merge multiple chunk analysis results into a single sheet config."""
+    """Merge multiple chunk analysis results into a single sheet config.
+
+    Each chunk gets the sheet header in front of its body, so the LLM tends to
+    re-emit header rows (e.g. an "АКТИВЫ" / "ОБЯЗАТЕЛЬСТВА" wrapper) in every
+    chunk. Naively concatenating yields N copies of the same wrapper.
+
+    We collapse duplicates by (row, name): repeated wrappers are merged into a
+    single parent whose children are the union of all chunks' children. Inside
+    that union, each unique excel_row is kept once (first occurrence wins).
+    """
     if len(results) == 1:
         return results[0]
 
@@ -616,8 +677,38 @@ def _merge_chunk_results(results: list[dict]) -> dict:
         "indicators": [],
     }
 
+    def _key(item: dict) -> tuple:
+        row = item.get("row")
+        name = (item.get("name") or "").strip().lower()
+        return (row if row is not None else "", name)
+
+    # Global row tracking — each excel_row may only appear once across the
+    # whole tree, since cell rows map 1:1 to rids.
+    rows_seen: set[int] = set()
+
+    def _merge_into(out: list[dict], items: list[dict]):
+        index: dict[tuple, dict] = {_key(it): it for it in out}
+        for item in items:
+            row = item.get("row")
+            k = _key(item)
+            if k in index:
+                existing = index[k]
+                existing_children = existing.setdefault("children", []) or []
+                _merge_into(existing_children, item.get("children") or [])
+                continue
+            if row is not None and row in rows_seen:
+                # Different name for an already-classified row — drop
+                continue
+            new_item = dict(item)
+            new_item["children"] = []
+            if row is not None:
+                rows_seen.add(row)
+            _merge_into(new_item["children"], item.get("children") or [])
+            out.append(new_item)
+            index[k] = new_item
+
     for r in results:
-        merged["indicators"].extend(r.get("indicators", []))
+        _merge_into(merged["indicators"], r.get("indicators", []))
 
     # Use display_name from first non-empty result
     for r in results:
@@ -2334,9 +2425,14 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
             )
             row_to_rid[item["row"]] = rid
 
-            # Store formula info and track sum_children groups
+            # Store formula info and track sum_children groups.
+            # Only treat as sum_children if the row actually has children —
+            # otherwise materialize_sums (which deletes all sum_children cells
+            # then re-aggregates) would erase the row's own value with nothing
+            # to replace it. Childless "group headers" with own data fall back
+            # to manual/formula based on the Excel cell content.
             rule = item.get("rule", "manual")
-            if rule == "sum_children":
+            if rule == "sum_children" and item.get("children"):
                 sum_children_rids.add(rid)
             elif rule == "formula":
                 rid_to_formula[rid] = {
@@ -2999,8 +3095,9 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                         formula_text = ""
 
                 # Post-translation: if formula contains unparseable range `:` notation
-                # (from partially substituted SUM/AVERAGE ranges), fall back to manual
-                if rule == "formula" and formula_text and ":" in formula_text:
+                # (from partially substituted SUM/AVERAGE ranges), fall back to manual.
+                # Allow `::` (cross-sheet separator like `[Sheet::name]`).
+                if rule == "formula" and formula_text and re.search(r'(?<!:):(?!:)', formula_text):
                     rule = "manual"
                     formula_text = ""
 
@@ -3030,16 +3127,21 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                         rule = "manual"
                         formula_text = ""
 
-                # Group indicators → sum_children rule (engine will compute)
-                if indicator_rid in sum_children_rids:
+                # Group indicators → sum_children rule (engine will compute).
+                # But only when we don't already have a real Excel formula —
+                # explicit formulas (e.g. grand totals like =D32+D54+...) must
+                # win over the sum_children heuristic.
+                if indicator_rid in sum_children_rids and not (rule == "formula" and formula_text):
                     rule = "sum_children"
                     formula_text = ""
 
                 cid = str(uuid.uuid4())
                 try:
+                    from backend.db import intern_formula
+                    fid = await intern_formula(db, formula_text) if formula_text else None
                     await db.execute(
-                        "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
-                        (cid, pebble_sheet_id, coord_key, value_str, "sum", rule, formula_text),
+                        "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula, formula_id) VALUES (?,?,?,?,?,?,?,?)",
+                        (cid, pebble_sheet_id, coord_key, value_str, "sum", rule, "" if fid else formula_text, fid),
                     )
                     cell_count += 1
                 except Exception:
@@ -3077,10 +3179,12 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
 # ── Streaming import endpoint (SSE) ───────────────────────────────────────
 
 @router.post("/excel-stream")
-async def import_excel_stream(file: UploadFile = File(...), model_name: str = Form("Imported Model"), lang: str = Form("ru")):
+async def import_excel_stream(file: UploadFile = File(...), model_name: str = Form("Imported Model"), lang: str = Form("ru"), use_kb: str = Form("0")):
     import asyncio
     content = await file.read()
     _lang = lang if lang in ("ru", "en", "ky", "vi") else "ru"
+    _use_kb = use_kb in ("1", "true", "yes")
+    _session_id = _create_qa_session()
 
     async def generate():
         import time as _time
@@ -3113,6 +3217,15 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             "verify_more":   {"ru": "   ...и ещё {n}", "en": "   ...and {n} more", "ky": "   ...жана дагы {n}", "vi": "   ...và thêm {n}"},
             "verify_ok":     {"ru": "   [OK]Все проверенные значения совпадают с Excel", "en": "   [OK]All verified values match Excel", "ky": "   [OK]Бардык текшерилген маанилер Excel менен дал келет", "vi": "   [OK]Tất cả giá trị đã xác minh khớp với Excel"},
             "done":          {"ru": "[DONE]Импорт завершён! {sheets} листов, {cells} ячеек", "en": "[DONE]Import complete! {sheets} sheets, {cells} cells", "ky": "[DONE]Импорт аяктады! {sheets} барак, {cells} уячалар", "vi": "[DONE]Nhập hoàn tất! {sheets} trang, {cells} ô"},
+            # KB-related messages
+            "kb_loading":    {"ru": "Загрузка базы знаний импорта...", "en": "Loading import knowledge base...", "ky": "Импорт билим базасы жүктөлүүдө...", "vi": "Đang tải cơ sở kiến thức nhập..."},
+            "kb_loaded":     {"ru": "   [OK]KB: {n} паттернов загружено", "en": "   [OK]KB: {n} patterns loaded", "ky": "   [OK]KB: {n} паттерн жүктөлдү", "vi": "   [OK]KB: {n} mẫu đã tải"},
+            "kb_analyzing":  {"ru": "Анализ структуры по базе знаний...", "en": "Analyzing structure using knowledge base...", "ky": "Билим базасы менен структура талдоо...", "vi": "Phân tích cấu trúc bằng cơ sở kiến thức..."},
+            "kb_sheet_ok":   {"ru": "   [OK]«{name}» (KB): {groups} групп, {inds} показателей", "en": "   [OK]\"{name}\" (KB): {groups} groups, {inds} indicators", "ky": "   [OK]«{name}» (KB): {groups} топ, {inds} көрсөткүч", "vi": "   [OK]\"{name}\" (KB): {groups} nhóm, {inds} chỉ tiêu"},
+            "kb_question":   {"ru": "Вопрос по листу «{name}»", "en": "Question about sheet \"{name}\"", "ky": "«{name}» барагы боюнча суроо", "vi": "Câu hỏi về trang \"{name}\""},
+            "kb_answer_ok":  {"ru": "   [OK]Ответ получен, паттерн сохранён", "en": "   [OK]Answer received, pattern saved", "ky": "   [OK]Жооп алынды, паттерн сакталды", "vi": "   [OK]Đã nhận câu trả lời, mẫu đã lưu"},
+            "kb_answer_skip":{"ru": "   Нет ответа, используем LLM", "en": "   No answer, falling back to LLM", "ky": "   Жооп жок, LLM колдонулууда", "vi": "   Không có câu trả lời, chuyển sang LLM"},
+            "kb_session":    {"ru": "Сессия: {sid}", "en": "Session: {sid}", "ky": "Сессия: {sid}", "vi": "Phiên: {sid}"},
         }
 
         def _m(key: str, **kwargs) -> str:
@@ -3214,6 +3327,92 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 pt.add("year")
             period_config["period_types"] = sorted(pt, key=lambda x: ["year", "half", "quarter", "month"].index(x) if x in ["year", "half", "quarter", "month"] else 99)
 
+        # ── KB-based analysis (runs before LLM) ─────────────────────────────
+        from backend.import_kb import ImportKB, extract_rows_from_worksheet, analyze_sheet_with_kb
+
+        kb = ImportKB()
+        kb_sheets_done: set[str] = set()  # sheets fully analyzed by KB
+        kb_configs: dict[str, dict] = {}  # sheet_name -> config dict
+
+        if _use_kb:
+            yield event(_m("kb_loading"))
+            try:
+                await kb.load(db)
+                yield event(_m("kb_loaded", n=len(kb.patterns)))
+            except Exception as e:
+                log.warning("KB load failed: %s", e)
+                yield event(f"[WARN]KB load failed: {e}")
+
+            yield event(_m("kb_analyzing"))
+
+            # Emit session_id so frontend can send answers
+            yield event(_m("kb_session", sid=_session_id), {"session_id": _session_id})
+
+            for sn in sheet_names:
+                if sn not in wb_formulas.sheetnames:
+                    continue
+                ws_kb = wb_formulas[sn]
+                try:
+                    sheet_rows = extract_rows_from_worksheet(ws_kb, sn)
+                    indicators, questions = analyze_sheet_with_kb(kb, sheet_rows, sn)
+
+                    if indicators:
+                        # Convert IndicatorNode tree to dict format matching LLM output
+                        ind_dicts = [ind.to_dict() for ind in indicators]
+                        # Detect display_name and data_start_col from headers
+                        _dn = sn
+                        for r in range(1, min(4, (ws_kb.max_row or 1) + 1)):
+                            v = ws_kb.cell(r, 1).value or ws_kb.cell(r, 2).value
+                            if v and isinstance(v, str) and v.strip():
+                                _dn = v.strip()
+                                break
+                        cfg = {
+                            "excel_name": sn,
+                            "display_name": _dn,
+                            "data_start_col": 4,
+                            "indicators": ind_dicts,
+                            "_source": "kb",
+                        }
+                        kb_configs[sn] = cfg
+
+                        # Count groups and indicators
+                        def _count_g(items):
+                            return sum(1 for it in items if it.get("is_group") or it.get("children"))
+                        def _count_i(items):
+                            return sum(1 + len(it.get("children", [])) for it in items)
+                        yield event(_m("kb_sheet_ok", name=sn,
+                                       groups=_count_g(ind_dicts),
+                                       inds=_count_i(ind_dicts)))
+
+                    # Handle questions (if any)
+                    for q in questions:
+                        # Check if we already have a session pattern for this
+                        if kb.has_session_pattern(q.pattern_type):
+                            continue
+                        # Yield question event and wait for answer
+                        yield event(_m("kb_question", name=sn), {
+                            "type": "question",
+                            "session_id": _session_id,
+                            "question_id": q.question_id,
+                            "sheet_name": sn,
+                            "text": q.text,
+                            "context": q.context,
+                            "options": q.options,
+                        })
+                        answer = await _ask_question(_session_id, q.question_id, timeout=120)
+                        if answer:
+                            yield event(_m("kb_answer_ok"))
+                            # Save as session pattern for auto-apply on subsequent sheets
+                            kb.add_session_pattern(q.pattern_type, {
+                                "answer": answer,
+                                "sheet": sn,
+                            })
+                        else:
+                            yield event(_m("kb_answer_skip"))
+
+                except Exception as e:
+                    log.warning("KB analysis failed for sheet %s: %s", sn, e)
+
         # Analyze with Claude (per-sheet with progress)
         # Create client lazily — cache may satisfy all requests without an API key
         try:
@@ -3224,11 +3423,23 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         try:
             sheets_config = []
 
-            # Launch sheets in parallel — concurrency is limited at the LLM request level
-            yield event(_m("analyzing_n", n=len(sheet_names)))
+            # For sheets already analyzed by KB, use KB results; for rest, use LLM
+            _need_llm = [sn for sn in sheet_names if sn not in kb_configs]
+            if _need_llm:
+                yield event(_m("analyzing_n", n=len(_need_llm)))
+            elif kb_configs:
+                # All sheets analyzed by KB — skip LLM entirely
+                for sn in sheet_names:
+                    if sn in kb_configs:
+                        sheets_config.append(kb_configs[sn])
+                # Jump past LLM analysis
+                _need_llm = []
 
             async def analyze_one(sn):
-                """Analyze one sheet: cache(full sheet) → Claude(chunked) → heuristic fallback."""
+                """Analyze one sheet: KB → cache(full sheet) → Claude(chunked)."""
+                # KB result already available?
+                if sn in kb_configs:
+                    return kb_configs[sn]
                 full_text = sheet_texts[sn]
                 # Check sheet-level cache first (survives chunking changes)
                 cached = await _llm_cache_get(full_text)
@@ -3253,19 +3464,25 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 # No fallback — LLM is required
                 return None
 
-            tasks = [analyze_one(sn) for sn in sheet_names]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Only run LLM for sheets not already handled by KB
+            _sheets_to_analyze = _need_llm if _need_llm else sheet_names
+            _already_in_config = {sc.get("excel_name") for sc in sheets_config}
+            _sheets_to_analyze = [sn for sn in _sheets_to_analyze if sn not in _already_in_config]
 
-            for i, (sn, result) in enumerate(zip(sheet_names, results)):
-                if isinstance(result, Exception):
-                    yield event(_m("sheet_err", name=sn, err=result))
-                elif result and len(result.get("indicators", [])) > 0:
-                    ind_count = len(result.get("indicators", []))
-                    ch_count = sum(len(x.get("children", [])) for x in result.get("indicators", []))
-                    yield event(_m("sheet_ok", name=sn, i=i+1, n=len(sheet_names), groups=ind_count, inds=ch_count))
-                    sheets_config.append(result)
-                else:
-                    yield event(_m("sheet_parse_err", name=sn))
+            if _sheets_to_analyze:
+                tasks = [analyze_one(sn) for sn in _sheets_to_analyze]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for i, (sn, result) in enumerate(zip(_sheets_to_analyze, results)):
+                    if isinstance(result, Exception):
+                        yield event(_m("sheet_err", name=sn, err=result))
+                    elif result and len(result.get("indicators", [])) > 0:
+                        ind_count = len(result.get("indicators", []))
+                        ch_count = sum(len(x.get("children", [])) for x in result.get("indicators", []))
+                        yield event(_m("sheet_ok", name=sn, i=i+1, n=len(sheet_names), groups=ind_count, inds=ch_count))
+                        sheets_config.append(result)
+                    else:
+                        yield event(_m("sheet_parse_err", name=sn))
 
             analysis = {"period_config": period_config, "sheets": sheets_config}
         except Exception as e:
@@ -3768,8 +3985,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             # value is authoritative for non-formula cells.
                             rule = "manual"
                             formula_text = ""
-                    # Post-translation: if formula has unparseable `:` range, fall back to manual
-                    if rule == "formula" and formula_text and ":" in formula_text:
+                    # Post-translation: if formula has unparseable `:` range, fall back to manual.
+                    # Allow `::` (cross-sheet separator like `[Sheet::name]`).
+                    if rule == "formula" and formula_text and re.search(r'(?<!:):(?!:)', formula_text):
                         rule = "manual"
                         formula_text = ""
                     # First-period formula cells: preserve starting balances
@@ -3792,15 +4010,19 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                     else:
                         _coord_key = f"{period_rid}|{indicator_rid}"
 
-                    # Group indicators → sum_children rule (engine will compute)
-                    if indicator_rid in sum_children_rids:
+                    # Group indicators → sum_children rule (engine will compute).
+                    # But preserve explicit Excel formulas — totals like
+                    # =D32+D54+D76+... must not be overwritten by sum_children.
+                    if indicator_rid in sum_children_rids and not (rule == "formula" and formula_text):
                         rule = "sum_children"
                         formula_text = ""
 
                     try:
+                        from backend.db import intern_formula
+                        fid = await intern_formula(db, formula_text) if formula_text else None
                         await db.execute(
-                            "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
-                            (str(uuid.uuid4()), pebble_sheet_id, _coord_key, str(val), "sum", rule, formula_text),
+                            "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula, formula_id) VALUES (?,?,?,?,?,?,?,?)",
+                            (str(uuid.uuid4()), pebble_sheet_id, _coord_key, str(val), "sum", rule, "" if fid else formula_text, fid),
                         )
                         cell_count += 1
                     except Exception:
@@ -3958,6 +4180,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
 
         yield event(_m("done", sheets=len(created_sheets), cells=total_cells),
                      {"done": True, "model_id": model_id, "model_name": model_name_final})
+
+        # Cleanup Q&A session
+        _cleanup_qa_session(_session_id)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

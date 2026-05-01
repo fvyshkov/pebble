@@ -10,9 +10,12 @@ import DescriptionOutlined from '@mui/icons-material/DescriptionOutlined'
 import CategoryOutlined from '@mui/icons-material/CategoryOutlined'
 import LockOutlined from '@mui/icons-material/LockOutlined'
 import LockOpenOutlined from '@mui/icons-material/LockOpenOutlined'
+import CircularProgress from '@mui/material/CircularProgress'
+import WarningAmberOutlined from '@mui/icons-material/WarningAmberOutlined'
 import * as Icons from '@mui/icons-material'
 import * as api from '../api'
 import { currentLang } from '../i18n'
+import { usePending } from '../store/PendingContext'
 import type { Model, Sheet, Analytic, TreeSelection } from '../types'
 
 interface Props {
@@ -35,6 +38,7 @@ interface ModelTree {
 
 export default function LeftPanel({ selection, onSelect, refreshKey, expandAfterCreate, onCreated, sheetsOnly, currentUserId, isAdmin, onRefresh }: Props) {
   const { t } = useTranslation()
+  const { getOverrides } = usePending()
   const [trees, setTrees] = useState<ModelTree[]>([])
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string[]>([])
@@ -43,6 +47,8 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null)
   // Translation map: "entity_type:entity_id:field" → translated value
   const [trMap, setTrMap] = useState<Record<string, string>>({})
+  // Model calc status: model_id → 'ready' | 'needs_generation' | 'generating' | 'error'
+  const [calcStatuses, setCalcStatuses] = useState<Record<string, string>>({})
 
   const load = useCallback(async () => {
     if (sheetsOnly && currentUserId) {
@@ -58,12 +64,16 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
         const next = [...new Set([...prev, ...modelIds])]
         return next
       })
-      // Load translations for all models
+      // Load translations and calc statuses
       const lang = currentLang()
       for (const td of treesData) {
         try {
           const tr = await api.getModelTranslations(td.model.id, lang)
           setTrMap(prev => ({ ...prev, ...tr }))
+        } catch { /* ignore */ }
+        try {
+          const st = await api.getCalcStatus(td.model.id)
+          setCalcStatuses(prev => ({ ...prev, [td.model.id]: st.calc_status }))
         } catch { /* ignore */ }
       }
     } else {
@@ -75,12 +85,16 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
         })
       )
       setTrees(treesData)
-      // Load translations
+      // Load translations and calc statuses
       const lang = currentLang()
       for (const td of treesData) {
         try {
           const tr = await api.getModelTranslations(td.model.id, lang)
           setTrMap(prev => ({ ...prev, ...tr }))
+        } catch { /* ignore */ }
+        try {
+          const st = await api.getCalcStatus(td.model.id)
+          setCalcStatuses(prev => ({ ...prev, [td.model.id]: st.calc_status }))
         } catch { /* ignore */ }
       }
     }
@@ -205,6 +219,23 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
     return Icon ? <Icon sx={{ fontSize: 18, opacity: 0.6 }} /> : <CategoryOutlined sx={{ fontSize: 18, opacity: 0.6 }} />
   }
 
+  const handleGenerate = async (e: React.MouseEvent, modelId: string) => {
+    e.stopPropagation()
+    setCalcStatuses(prev => ({ ...prev, [modelId]: 'generating' }))
+    try {
+      await api.generateModel(modelId, (data) => {
+        if (data.phase === 'done') {
+          setCalcStatuses(prev => ({ ...prev, [modelId]: 'ready' }))
+          onRefresh?.()
+        } else if (data.phase === 'error') {
+          setCalcStatuses(prev => ({ ...prev, [modelId]: 'error' }))
+        }
+      })
+    } catch {
+      setCalcStatuses(prev => ({ ...prev, [modelId]: 'error' }))
+    }
+  }
+
   const q = search.toLowerCase()
   const selectedItemId = selection ? `${selection.type}:${selection.id}:${selection.modelId}` : ''
 
@@ -223,7 +254,8 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
             onExpandedItemsChange={handleExpandChange}
           >
             {trees.map(({ model, sheets }) => {
-              const modelName = tr('model', model.id, model.name) || t('left.noName')
+              const modelOverride = getOverrides(`model:${model.id}`)
+              const modelName = (modelOverride?.name as string) || tr('model', model.id, model.name) || t('left.noName')
               const mMatch = !q || modelName.toLowerCase().includes(q)
               const filteredSheets = sheets.filter(s => {
                 const sName = tr('sheet', s.id, s.name)
@@ -238,15 +270,31 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                   label={
                     <div className="tree-item-label">
                       <span style={{ fontWeight: 600 }}>{modelName}</span>
+                      {calcStatuses[model.id] === 'generating' && (
+                        <CircularProgress size={14} sx={{ ml: 0.5, flexShrink: 0 }} />
+                      )}
+                      {calcStatuses[model.id] === 'needs_generation' && (
+                        <Tooltip title={t('left.needsGeneration', 'Требуется генерация')}>
+                          <WarningAmberOutlined sx={{ fontSize: 16, color: '#ed6c02', ml: 0.5, flexShrink: 0 }} />
+                        </Tooltip>
+                      )}
+                      {calcStatuses[model.id] === 'error' && (
+                        <Tooltip title={t('left.generationError', 'Ошибка генерации')}>
+                          <Icons.ErrorOutline sx={{ fontSize: 16, color: '#d32f2f', ml: 0.5, flexShrink: 0 }} />
+                        </Tooltip>
+                      )}
                       {isAdmin && (
                         <span className="actions">
-                          <Tooltip title={t('app.calculateAll')}>
-                            <IconButton size="small" onClick={e => {
-                              e.stopPropagation()
-                              api.calculateModelStream(model.id, () => {}).then(() => onRefresh?.())
-                            }}>
-                              <Icons.PlayArrowOutlined sx={{ fontSize: 16 }} />
-                            </IconButton>
+                          <Tooltip title={t('left.generate', 'Сгенерировать')}>
+                            <span>
+                              <IconButton
+                                size="small"
+                                disabled={calcStatuses[model.id] === 'generating'}
+                                onClick={e => handleGenerate(e, model.id)}
+                              >
+                                <Icons.PlayArrowOutlined sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            </span>
                           </Tooltip>
                           <Tooltip title={t('left.deleteModel')}>
                             <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, modelName)}>
@@ -388,7 +436,31 @@ export default function LeftPanel({ selection, onSelect, refreshKey, expandAfter
                 label={
                   <div className="tree-item-label">
                     <span>{modelName}</span>
+                    {calcStatuses[model.id] === 'generating' && (
+                      <CircularProgress size={14} sx={{ ml: 0.5, flexShrink: 0 }} />
+                    )}
+                    {calcStatuses[model.id] === 'needs_generation' && (
+                      <Tooltip title={t('left.needsGeneration', 'Требуется генерация')}>
+                        <WarningAmberOutlined sx={{ fontSize: 16, color: '#ed6c02', ml: 0.5, flexShrink: 0 }} />
+                      </Tooltip>
+                    )}
+                    {calcStatuses[model.id] === 'error' && (
+                      <Tooltip title={t('left.generationError', 'Ошибка генерации')}>
+                        <Icons.ErrorOutline sx={{ fontSize: 16, color: '#d32f2f', ml: 0.5, flexShrink: 0 }} />
+                      </Tooltip>
+                    )}
                     <span className="actions">
+                      <Tooltip title={t('left.generate', 'Сгенерировать')}>
+                        <span>
+                          <IconButton
+                            size="small"
+                            disabled={calcStatuses[model.id] === 'generating'}
+                            onClick={e => handleGenerate(e, model.id)}
+                          >
+                            <Icons.PlayArrowOutlined sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
                       <Tooltip title={t('left.deleteModel')}>
                         <IconButton size="small" onClick={e => handleDeleteModel(e, model.id, modelName)}>
                           <DeleteOutlineOutlined sx={{ fontSize: 16 }} />

@@ -1,5 +1,6 @@
 import uuid
-from fastapi import APIRouter, HTTPException
+import json as _json
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from backend.db import get_db
 
@@ -408,3 +409,63 @@ async def save_view_settings(sheet_id: str, body: ViewSettingsIn):
     )
     await db.commit()
     return {"ok": True}
+
+
+@router.get("/{sheet_id}/load-bundle")
+async def load_bundle(sheet_id: str, user_id: str = Query("")):
+    """Single endpoint returning everything the grid needs to render:
+    sheet info, sheet_analytics, analytics details, all records, and view settings.
+    Replaces ~15 separate HTTP calls with one."""
+    db = get_db()
+
+    # Sheet info (locked state, model_id)
+    sheet_rows = await db.execute_fetchall("SELECT * FROM sheets WHERE id = ?", (sheet_id,))
+    if not sheet_rows:
+        raise HTTPException(404, "Sheet not found")
+    sheet = dict(sheet_rows[0])
+
+    # Sheet analytics (bindings)
+    sa_rows = await db.execute_fetchall(
+        """SELECT sa.*, a.name as analytic_name, a.icon as analytic_icon
+           FROM sheet_analytics sa
+           JOIN analytics a ON a.id = sa.analytic_id
+           WHERE sa.sheet_id = ? ORDER BY sa.sort_order""",
+        (sheet_id,),
+    )
+    sheet_analytics = [dict(r) for r in sa_rows]
+    analytic_ids = [r["analytic_id"] for r in sa_rows]
+
+    # All analytics details + all records in 2 bulk queries
+    if analytic_ids:
+        ph = ",".join("?" for _ in analytic_ids)
+        a_rows = await db.execute_fetchall(
+            f"SELECT * FROM analytics WHERE id IN ({ph})", analytic_ids
+        )
+        r_rows = await db.execute_fetchall(
+            f"SELECT * FROM analytic_records WHERE analytic_id IN ({ph}) ORDER BY sort_order",
+            analytic_ids,
+        )
+    else:
+        a_rows, r_rows = [], []
+
+    analytics = {r["id"]: dict(r) for r in a_rows}
+    records: dict[str, list] = {aid: [] for aid in analytic_ids}
+    for r in r_rows:
+        aid = r["analytic_id"]
+        if aid in records:
+            records[aid].append(dict(r))
+
+    # View settings
+    vs_rows = await db.execute_fetchall(
+        "SELECT settings FROM sheet_view_settings WHERE sheet_id = ? AND user_id = ?",
+        (sheet_id, user_id),
+    )
+    view_settings = _json.loads(vs_rows[0]["settings"]) if vs_rows else {}
+
+    return {
+        "sheet": sheet,
+        "sheet_analytics": sheet_analytics,
+        "analytics": analytics,
+        "records": records,
+        "view_settings": view_settings,
+    }

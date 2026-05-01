@@ -310,7 +310,10 @@ async def export_model(model_id: str):
 
         # Cells
         cells_raw = await db.execute_fetchall(
-            "SELECT coord_key, value, rule, formula FROM cell_data WHERE sheet_id = ?",
+            """SELECT cd.coord_key, cd.value, cd.rule,
+                      COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
+               FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+               WHERE cd.sheet_id = ?""",
             (sheet_id,),
         )
         cells = {c["coord_key"]: c for c in cells_raw}

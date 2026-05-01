@@ -18,9 +18,12 @@ from openpyxl.utils import column_index_from_string
 # ── Excel cell reference parser ────────────────────────────────────────────
 
 # Matches: 'Sheet Name'!E19, Sheet!E19, E19, $E$19, E$19, $E19
-# Note: \w with re.UNICODE matches Cyrillic and other Unicode word chars
+# Note: \w with re.UNICODE matches Cyrillic and other Unicode word chars.
+# Unquoted sheet names allow only word chars and '.' — Excel requires quoting
+# names containing operators (+, -, space, etc), so we mustn't include those
+# here or e.g. "A1+Sheet!B2" would capture "+Sheet" as the sheet name.
 CELL_REF_RE = re.compile(
-    r"(?:'([^']+)'|([\w.+]+))!"                # optional sheet prefix (quoted or simple name, Unicode-aware)
+    r"(?:'([^']+)'|([\w.]+))!"                # optional sheet prefix (quoted or simple name, Unicode-aware)
     r"(\$?[A-Z]{1,3})(\$?\d+)"                # column + row
     r"|"                                        # OR
     r"(\$?[A-Z]{1,3})(\$?\d+)",               # bare column + row
@@ -29,7 +32,7 @@ CELL_REF_RE = re.compile(
 
 # Matches Excel range like E19:E25 or 'Sheet'!E19:E25
 RANGE_RE = re.compile(
-    r"(?:(?:'([^']+)'|([\w.+\- ]+))!)?"
+    r"(?:(?:'([^']+)'|([\w.]+))!)?"
     r"(\$?[A-Z]{1,3})(\$?\d+)"
     r":"
     r"(\$?[A-Z]{1,3})(\$?\d+)",
@@ -227,15 +230,18 @@ def _replace_cell_refs(
     return result
 
 
+_PARENT_CHILD_SEP = "\x1f"  # ASCII unit separator — internal delimiter that can never appear in user-supplied names
+
+
 def _format_ref(name: str, display: str | None = None) -> str:
     """Format an indicator reference with optional parent qualifier.
 
-    parent/child → [parent][child]
-    plain name   → [name]
-    With display (cross-sheet): display::parent/child → [display::parent][child]
+    parent\\x1fchild → [parent][child]
+    plain name      → [name]
+    With display (cross-sheet): display::parent\\x1fchild → [display::parent][child]
     """
-    if "/" in name:
-        parent, child = name.split("/", 1)
+    if _PARENT_CHILD_SEP in name:
+        parent, child = name.split(_PARENT_CHILD_SEP, 1)
         if display:
             return f"[{display}::{parent}][{child}]"
         return f"[{parent}][{child}]"
@@ -291,10 +297,9 @@ def _translate_ref(
         parent_map = row_to_parent_names.get(pmap_key, {}) if row_to_parent_names else {}
         parent_name = parent_map.get(row)
         if parent_name:
-            # Use [parent][child] bracket format — the wrapping []
-            # will be added by the caller, so encode as "parent/child"
-            # internally; the Rust parser converts [parent][child] → parent/child
-            name = f"{parent_name}/{name}"
+            # Use [parent][child] bracket format — encode internally with a
+            # sentinel separator so parent_name or name may safely contain "/".
+            name = f"{parent_name}{_PARENT_CHILD_SEP}{name}"
         else:
             name = f"{name}#row{row}"
 

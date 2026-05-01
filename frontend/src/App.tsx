@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   IconButton, Tooltip, Badge, Select, MenuItem, FormControl,
@@ -20,6 +20,7 @@ import CheckCircleOutlined from '@mui/icons-material/CheckCircleOutlined'
 import ErrorOutlineOutlined from '@mui/icons-material/ErrorOutlineOutlined'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
 import WarningAmberOutlined from '@mui/icons-material/WarningAmberOutlined'
+import HelpOutlineOutlined from '@mui/icons-material/HelpOutlineOutlined'
 import DeleteSweepOutlined from '@mui/icons-material/DeleteSweepOutlined'
 import TranslateOutlined from '@mui/icons-material/TranslateOutlined'
 import UndoOutlined from '@mui/icons-material/UndoOutlined'
@@ -81,6 +82,15 @@ function LanguageSwitcher() {
   )
 }
 
+interface ImportQuestion {
+  session_id: string
+  question_id: string
+  sheet_name: string
+  text: string
+  context: string
+  options: { value: string; label: string; description?: string }[]
+}
+
 function ImportDialog({ open, onClose, onImported, initialFile }: {
   open: boolean; onClose: () => void; onImported: (modelId: string) => void; initialFile?: File | null
 }) {
@@ -104,6 +114,10 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
   const fileRef = useRef<HTMLInputElement>(null)
   const logRef = useRef<HTMLDivElement>(null)
 
+  // Q&A state
+  const [question, setQuestion] = useState<ImportQuestion | null>(null)
+  const [answerSending, setAnswerSending] = useState(false)
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
     if (f) {
@@ -118,10 +132,23 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
     setLog([])
     setDone(false)
     setElapsed(0)
+    setQuestion(null)
     elapsedRef.current = setInterval(() => setElapsed(t => t + 1), 1000)
     setProgress({ current: 0, total: 0 })
     try {
       const result = await api.importExcelModelStream(file, modelName, (msg, data) => {
+        // Handle Q&A question events
+        if (data?.type === 'question') {
+          setQuestion({
+            session_id: data.session_id,
+            question_id: data.question_id,
+            sheet_name: data.sheet_name,
+            text: data.text,
+            context: data.context,
+            options: data.options || [],
+          })
+          return
+        }
         setLog(prev => [...prev, msg])
         setTimeout(() => logRef.current?.scrollTo(0, logRef.current.scrollHeight), 50)
         // Parse progress from messages like "(3/7)"
@@ -140,6 +167,20 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
     }
   }
 
+  const handleAnswer = async (value: string) => {
+    if (!question) return
+    setAnswerSending(true)
+    try {
+      await api.submitImportAnswer(question.session_id, question.question_id, value)
+      setLog(prev => [...prev, `   ${question.text} -> ${value}`])
+      setQuestion(null)
+    } catch (err) {
+      setLog(prev => [...prev, `[ERR]${t('import.error')}: ${(err as Error).message}`])
+    } finally {
+      setAnswerSending(false)
+    }
+  }
+
   const handleClose = () => {
     if (loading) return
     onClose()
@@ -147,6 +188,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
     setModelName('')
     setLog([])
     setDone(false)
+    setQuestion(null)
   }
 
   return (
@@ -187,6 +229,40 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
             )}
           </Box>
         )}
+
+        {/* Q&A Question card */}
+        {question && (
+          <Box sx={{
+            bgcolor: '#fff3e0', border: '1px solid #ff9800', borderRadius: 1, p: 2,
+            display: 'flex', flexDirection: 'column', gap: 1.5,
+          }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <HelpOutlineOutlined sx={{ color: '#e65100', fontSize: 20 }} />
+              <Typography variant="subtitle2" sx={{ color: '#e65100', fontWeight: 600 }}>
+                {question.sheet_name}
+              </Typography>
+            </Box>
+            <Typography variant="body2" sx={{ fontWeight: 500 }}>{question.text}</Typography>
+            {question.context && (
+              <Typography variant="caption" sx={{ color: '#666' }}>{question.context}</Typography>
+            )}
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mt: 0.5 }}>
+              {question.options.map(opt => (
+                <Button
+                  key={opt.value}
+                  variant="outlined"
+                  size="small"
+                  disabled={answerSending}
+                  onClick={() => handleAnswer(opt.value)}
+                  sx={{ textTransform: 'none', fontSize: 12 }}
+                >
+                  {opt.label}
+                </Button>
+              ))}
+            </Box>
+          </Box>
+        )}
+
         {log.length > 0 && (
           <Box
             ref={logRef}
@@ -215,7 +291,7 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
                 </Box>
               )
             })}
-            {loading && !done && (() => {
+            {loading && !done && !question && (() => {
               const mins = Math.floor(elapsed / 60)
               const secs = String(elapsed % 60).padStart(2, '0')
               return (
@@ -288,6 +364,8 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const [reorderItems, setReorderItems] = useState<string[]>([])
   const [reorderColCount, setReorderColCount] = useState(1)
   const [reorderNames, setReorderNames] = useState<Record<string, string>>({})
+  const [reorderItemsBackup, setReorderItemsBackup] = useState<string[]>([])
+  const [reorderColCountBackup, setReorderColCountBackup] = useState(1)
   const reorderDragIdx = useRef<{ section: 'col' | 'row'; idx: number } | null>(null)
   const [reorderDragOver, setReorderDragOver] = useState<{ section: 'col' | 'row'; idx: number } | null>(null)
 
@@ -335,10 +413,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   const handleDeleteAllModels = async () => {
     setDeletingAll(true)
     try {
-      const models = await api.listModels()
-      for (const m of models) {
-        await api.deleteModel(m.id)
-      }
+      await api.deleteAllModels()
       setConfirmDeleteAll(false)
       setSelection(null)
       onRefresh()
@@ -427,13 +502,14 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
     const startedAt = Date.now()
     setCalcRunning(true)
     setCalcProgress({ done: 0, total: 1, startedAt })
-    api.calculateModelStream(modelId, (data) => {
+    api.generateModel(modelId, (data) => {
       if (data.phase === 'start') {
-        setCalcProgress({ done: 0, total: data.total_sheets || 1, totalCells: data.total_cells ?? undefined, computed: 0, startedAt })
+        setCalcProgress({ done: 0, total: data.total_sheets || 1, computed: 0, startedAt })
       } else if (data.phase === 'sheet_done') {
-        setCalcProgress({ done: data.done || 0, total: data.total_sheets || 1, sheet: data.sheet, totalCells: data.total_cells ?? undefined, computed: data.computed ?? undefined, startedAt })
+        setCalcProgress(prev => ({ done: (prev?.done || 0) + 1, total: data.total_sheets || 1, sheet: data.sheet, computed: data.computed ?? undefined, startedAt }))
       } else if (data.phase === 'done') {
         setCalcProgress(null); setCalcRunning(false)
+        setRefreshKey(k => k + 1)
       }
     }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
   }, [])
@@ -522,23 +598,22 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                   const startedAt = Date.now()
                   setCalcRunning(true)
                   setCalcProgress({ done: 0, total: 1, startedAt })
-                  await api.calculateModelStream(selection.modelId, (data) => {
+                  await api.generateModel(selection.modelId, (data) => {
                     if (data.phase === 'start') {
                       setCalcProgress({
                         done: 0, total: data.total_sheets || 1,
-                        totalCells: data.total_cells ?? undefined,
                         computed: 0, startedAt,
                       })
                     } else if (data.phase === 'sheet_done') {
                       setCalcProgress({
-                        done: data.done || 0, total: data.total_sheets || 1,
+                        done: (calcProgress?.done || 0) + 1, total: data.total_sheets || 1,
                         sheet: data.sheet,
-                        totalCells: data.total_cells ?? undefined,
                         computed: data.computed ?? undefined,
                         startedAt,
                       })
                     } else if (data.phase === 'done') {
                       setCalcProgress(null); setCalcRunning(false)
+                      setRefreshKey(k => k + 1)
                     }
                   }).catch(() => { setCalcRunning(false); setCalcProgress(null) })
                 }}
@@ -556,8 +631,10 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 const info = gridRef.current?.getAnalyticsInfo()
                 if (info) {
                   setReorderItems(info.order)
+                  setReorderItemsBackup(info.order)
                   setReorderNames(info.names)
                   setReorderColCount(info.colCount)
+                  setReorderColCountBackup(info.colCount)
                   setReorderOpen(true)
                 }
               }}>
@@ -752,7 +829,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
         <UsersDialog open={showUsers} onClose={() => setShowUsers(false)} />
 
         {/* Analytics reorder dialog — two sections: Columns / Rows */}
-        <Dialog open={reorderOpen} onClose={() => setReorderOpen(false)} maxWidth="xs" fullWidth>
+        <Dialog open={reorderOpen} onClose={() => { setReorderItems(reorderItemsBackup); setReorderColCount(reorderColCountBackup); setReorderOpen(false) }} maxWidth="xs" fullWidth>
           <DialogTitle>{t('app.analyticsOrder')}</DialogTitle>
           <DialogContent>
             {/* Column analytics section */}
@@ -763,7 +840,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
               const handleDrop = (targetSection: 'col' | 'row', targetIdx: number) => {
                 const from = reorderDragIdx.current
                 if (!from) return
-                const fromList = from.section === 'col' ? colItems : rowItems
+                const fromList = from.section === 'col' ? [...colItems] : [...rowItems]
                 const draggedId = fromList[from.idx]
                 if (!draggedId) return
                 // Build new order
@@ -782,7 +859,7 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 setReorderColCount(newCol.length)
                 reorderDragIdx.current = null
                 setReorderDragOver(null)
-                gridRef.current?.applyAnalyticsOrder(newOrder, newCol.length)
+                // Don't apply yet — wait for OK
               }
 
               const renderItem = (id: string, i: number, section: 'col' | 'row') => (
@@ -800,34 +877,60 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 </ListItem>
               )
 
+              const dropZone = (section: 'col' | 'row', idx: number) => (
+                <Box
+                  key={`drop-${section}-${idx}`}
+                  onDragOver={e => { e.preventDefault(); setReorderDragOver({ section, idx }) }}
+                  onDrop={() => handleDrop(section, idx)}
+                  sx={{
+                    height: reorderDragOver?.section === section && reorderDragOver?.idx === idx ? 20 : 8,
+                    borderTop: reorderDragOver?.section === section && reorderDragOver?.idx === idx ? '2px solid #1976d2' : '2px solid transparent',
+                    transition: 'height 0.1s',
+                  }}
+                />
+              )
+
               return (
                 <>
                   <Typography variant="caption" sx={{ fontWeight: 600, color: '#1976d2', display: 'block', mt: 1, mb: 0.5 }}>
                     {t('app.columns')}
                   </Typography>
-                  <Box sx={{ bgcolor: '#f5f8ff', borderRadius: 1, minHeight: 36, mb: 1 }}
-                    onDragOver={e => { e.preventDefault(); if (colItems.length === 0) setReorderDragOver({ section: 'col', idx: 0 }) }}
-                    onDrop={() => { if (colItems.length === 0) handleDrop('col', 0) }}
-                  >
-                    <List dense disablePadding>
-                      {colItems.map((id, i) => renderItem(id, i, 'col'))}
-                    </List>
+                  <Box sx={{ bgcolor: '#f5f8ff', borderRadius: 1, minHeight: 36, mb: 1 }}>
+                    {colItems.length === 0 && dropZone('col', 0)}
+                    {colItems.map((id, i) => (
+                      <Fragment key={id}>
+                        {renderItem(id, i, 'col')}
+                      </Fragment>
+                    ))}
+                    {colItems.length > 0 && dropZone('col', colItems.length)}
                   </Box>
                   <Typography variant="caption" sx={{ fontWeight: 600, color: '#666', display: 'block', mb: 0.5 }}>
                     {t('app.rows')}
                   </Typography>
-                  <Box sx={{ bgcolor: '#fafafa', borderRadius: 1, minHeight: 36 }}
-                    onDragOver={e => { e.preventDefault(); if (rowItems.length === 0) setReorderDragOver({ section: 'row', idx: 0 }) }}
-                    onDrop={() => { if (rowItems.length === 0) handleDrop('row', 0) }}
-                  >
-                    <List dense disablePadding>
-                      {rowItems.map((id, i) => renderItem(id, i, 'row'))}
-                    </List>
+                  <Box sx={{ bgcolor: '#fafafa', borderRadius: 1, minHeight: 36 }}>
+                    {rowItems.length === 0 && dropZone('row', 0)}
+                    {rowItems.map((id, i) => (
+                      <Fragment key={id}>
+                        {renderItem(id, i, 'row')}
+                      </Fragment>
+                    ))}
+                    {rowItems.length > 0 && dropZone('row', rowItems.length)}
                   </Box>
                 </>
               )
             })()}
           </DialogContent>
+          <DialogActions>
+            <Button onClick={() => { setReorderItems(reorderItemsBackup); setReorderColCount(reorderColCountBackup); setReorderOpen(false) }}>
+              {t('app.cancel')}
+            </Button>
+            <Button variant="contained" onClick={() => {
+              gridRef.current?.applyAnalyticsOrder(reorderItems, reorderColCount)
+              setReorderOpen(false)
+            }}>
+              OK
+            </Button>
+          </DialogActions>
         </Dialog>
 
         <Dialog open={confirmDeleteAll} onClose={() => setConfirmDeleteAll(false)}>

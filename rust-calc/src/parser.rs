@@ -61,8 +61,10 @@ pub fn parse_ref(token: &str) -> RefParsed {
         if child_end > 1 {
             let child_name = &rest[1..child_end];
             let after_child = &rest[child_end + 1..];
-            // Combine as "parent/child" — resolver already handles this split
-            let combined = format!("{}/{}", first_name, child_name);
+            // Combine as "parent\x1fchild" — \x1f is a sentinel that can
+            // never appear in user-supplied names, so parent or child
+            // may safely contain "/" without ambiguity.
+            let combined = format!("{}\x1f{}", first_name, child_name);
             (combined, after_child.to_string())
         } else {
             (first_name.to_string(), rest.to_string())
@@ -209,9 +211,9 @@ mod tests {
 
     #[test]
     fn test_parent_qualified() {
-        // [parent][child] → name = "parent/child" (resolver handles split)
+        // [parent][child] → name = "parent\x1fchild" (resolver handles split)
         let r = parse_ref("[Факторинг][прибыль]");
-        assert_eq!(r.name, "Факторинг/прибыль");
+        assert_eq!(r.name, "Факторинг\x1fприбыль");
         assert!(r.sheet.is_none());
         assert!(r.params.is_empty());
     }
@@ -219,7 +221,7 @@ mod tests {
     #[test]
     fn test_parent_qualified_with_params() {
         let r = parse_ref("[parent][child](периоды=предыдущий)");
-        assert_eq!(r.name, "parent/child");
+        assert_eq!(r.name, "parent\x1fchild");
         assert_eq!(r.params.get("периоды").map(|s| s.as_str()), Some("предыдущий"));
     }
 }

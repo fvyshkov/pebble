@@ -34,8 +34,8 @@ pub fn resolve_local(
         }
     }
 
-    if !found_exact && ref_parsed.name.contains('/') {
-        let parts: Vec<&str> = ref_parsed.name.splitn(2, '/').collect();
+    if !found_exact && ref_parsed.name.contains('\x1f') {
+        let parts: Vec<&str> = ref_parsed.name.splitn(2, '\x1f').collect();
         parent_hint = Some(parts[0].trim().to_lowercase());
         name_lower = parts[1].trim().to_lowercase();
     }
@@ -306,8 +306,8 @@ pub fn resolve_cross_sheet(
             break;
         }
     }
-    if !found_exact && ref_parsed.name.contains('/') {
-        let parts: Vec<&str> = ref_parsed.name.splitn(2, '/').collect();
+    if !found_exact && ref_parsed.name.contains('\x1f') {
+        let parts: Vec<&str> = ref_parsed.name.splitn(2, '\x1f').collect();
         parent_hint = Some(parts[0].trim().to_lowercase());
         name_lower = parts[1].trim().to_lowercase();
     }

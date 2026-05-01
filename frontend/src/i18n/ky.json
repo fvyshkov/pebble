@@ -61,7 +61,10 @@
     "delete": "Жок кылуу",
     "lockSheet": "Баракты бекитүү",
     "unlockSheet": "Баракты ачуу",
-    "sheetLocked": "Барак бекитилген"
+    "sheetLocked": "Барак бекитилген",
+    "generate": "Генерациялоо",
+    "needsGeneration": "Генерация талап кылынат",
+    "generationError": "Генерация катасы"
   },
   "grid": {
     "selected": "Тандалды",

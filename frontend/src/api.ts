@@ -22,8 +22,35 @@ export const updateModel = (id: string, data: { name: string; description: strin
   fetch(`${BASE}/models/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => json<Model>(r))
 export const deleteModel = (id: string) =>
   fetch(`${BASE}/models/${id}`, { method: 'DELETE' }).then(r => json<any>(r))
+export const deleteAllModels = () =>
+  fetch(`${BASE}/models`, { method: 'DELETE' }).then(r => json<any>(r))
 export const getModelTree = (id: string) =>
   fetch(`${BASE}/models/${id}/tree`).then(r => json<any>(r))
+export const getCalcStatus = (modelId: string) =>
+  fetch(`${BASE}/models/${modelId}/calc-status`).then(r => json<{ calc_status: string }>(r))
+export const generateModel = (
+  modelId: string,
+  onProgress: (data: { phase: string; sheet?: string; computed?: number; total_sheets?: number; message?: string }) => void,
+): Promise<void> =>
+  fetch(`${BASE}/models/${modelId}/generate`, { method: 'POST' })
+    .then(async res => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try { onProgress(JSON.parse(line.slice(6))) } catch {}
+          }
+        }
+      }
+    })
 
 // Analytics
 export const listAnalytics = (modelId: string) =>
@@ -115,6 +142,17 @@ export const getViewSettings = (sheetId: string, userId?: string) =>
   fetch(`${BASE}/sheets/${sheetId}/view-settings${userId ? `?user_id=${userId}` : ''}`).then(r => json<any>(r))
 export const saveViewSettings = (sheetId: string, settings: any) =>
   fetch(`${BASE}/sheets/${sheetId}/view-settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings }) }).then(r => json<any>(r))
+
+// Bundle: single request for all grid data
+export interface LoadBundle {
+  sheet: any
+  sheet_analytics: SheetAnalytic[]
+  analytics: Record<string, any>
+  records: Record<string, any[]>
+  view_settings: any
+}
+export const loadBundle = (sheetId: string, userId?: string) =>
+  fetch(`${BASE}/sheets/${sheetId}/load-bundle${userId ? `?user_id=${userId}` : ''}`).then(r => json<LoadBundle>(r))
 
 // Cells
 export const getCells = (sheetId: string, userId?: string) =>
@@ -240,6 +278,14 @@ export const importExcelModelStream = (
       .catch(reject)
   })
 }
+
+// Import Q&A — submit answer to a pending question during import
+export const submitImportAnswer = (sessionId: string, questionId: string, answer: string) =>
+  fetch(`${BASE}/import/answer/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question_id: questionId, answer }),
+  }).then(r => json<any>(r))
 
 // Sheet data Excel export/import
 export const exportSheetExcelUrl = (sheetId: string) => `${BASE}/excel/sheets/${sheetId}/export`

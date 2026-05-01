@@ -4,7 +4,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from backend.db import get_db
+from backend.db import get_db, get_read_db
 
 router = APIRouter(prefix="/api/cells", tags=["cells"])
 
@@ -74,21 +74,55 @@ class BulkCellsIn(BaseModel):
     cells: list[CellIn]
 
 
+def _cell_slim(r) -> dict:
+    """Return only fields the frontend needs (skip id, sheet_id to reduce payload)."""
+    d: dict = {"coord_key": r["coord_key"], "value": r["value"]}
+    if r["rule"]:
+        d["rule"] = r["rule"]
+    if r["formula"]:
+        d["formula"] = r["formula"]
+    return d
+
+
 @router.get("/by-sheet/{sheet_id}")
 async def get_cells(sheet_id: str, user_id: str | None = Query(None)):
-    db = get_db()
-    rows = await db.execute_fetchall(
-        "SELECT * FROM cell_data WHERE sheet_id = ?", (sheet_id,)
-    )
-    restrictions = await _get_allowed_records(db, user_id, sheet_id)
-    if not restrictions:
-        return [dict(r) for r in rows]
+    async with get_read_db() as db:
+        restrictions = await _get_allowed_records(db, user_id, sheet_id)
+        order = None
+        if restrictions:
+            order = [b["analytic_id"] for b in await db.execute_fetchall(
+                "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
+            )]
 
-    # Get analytic order for coord_key parsing
-    order = [b["analytic_id"] for b in await db.execute_fetchall(
-        "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
-    )]
-    return [dict(r) for r in rows if _coord_allowed(r["coord_key"], restrictions, order)]
+        rows = await db.execute_fetchall(
+            """SELECT cd.coord_key, cd.value, cd.rule,
+                      COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
+               FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+               WHERE cd.sheet_id = ?""", (sheet_id,),
+        )
+
+    # Build JSON manually to avoid per-row dict creation + json.dumps overhead.
+    # For 350K rows this saves ~1-2s compared to returning list-of-dicts.
+    chunks: list[str] = []
+    _dumps = json.dumps
+    for r in rows:
+        if restrictions and order and not _coord_allowed(r["coord_key"], restrictions, order):
+            continue
+        ck = r["coord_key"]
+        v = r["value"]
+        s = '{"coord_key":"' + ck + '","value":' + (_dumps(v) if v is not None else '""')
+        rule = r["rule"]
+        if rule:
+            s += ',"rule":"' + rule + '"'
+        formula = r["formula"]
+        if formula:
+            s += ',"formula":' + _dumps(formula)
+        s += "}"
+        chunks.append(s)
+
+    from fastapi.responses import Response
+    content = "[" + ",".join(chunks) + "]"
+    return Response(content=content, media_type="application/json")
 
 
 class PartialCellsIn(BaseModel):
@@ -98,29 +132,32 @@ class PartialCellsIn(BaseModel):
 @router.post("/by-sheet/{sheet_id}/partial")
 async def get_cells_partial(sheet_id: str, body: PartialCellsIn, user_id: str | None = Query(None)):
     """Return cells only for the requested coord_keys (lazy loading)."""
-    db = get_db()
     if not body.coord_keys:
         return []
-    # Fetch in batches of 500 using IN clause
-    results = []
-    keys = body.coord_keys
-    for i in range(0, len(keys), 500):
-        batch = keys[i:i+500]
-        placeholders = ",".join("?" for _ in batch)
-        rows = await db.execute_fetchall(
-            f"SELECT * FROM cell_data WHERE sheet_id = ? AND coord_key IN ({placeholders})",
-            (sheet_id, *batch),
-        )
-        results.extend(rows)
+    async with get_read_db() as db:
+        # Fetch in batches of 500 using IN clause
+        results = []
+        keys = body.coord_keys
+        for i in range(0, len(keys), 500):
+            batch = keys[i:i+500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = await db.execute_fetchall(
+                f"""SELECT cd.coord_key, cd.value, cd.rule,
+                           COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
+                    FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+                    WHERE cd.sheet_id = ? AND cd.coord_key IN ({placeholders})""",
+                (sheet_id, *batch),
+            )
+            results.extend(rows)
 
-    restrictions = await _get_allowed_records(db, user_id, sheet_id)
-    if not restrictions:
-        return [dict(r) for r in results]
+        restrictions = await _get_allowed_records(db, user_id, sheet_id)
+        if not restrictions:
+            return [_cell_slim(r) for r in results]
 
-    order = [b["analytic_id"] for b in await db.execute_fetchall(
-        "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
-    )]
-    return [dict(r) for r in results if _coord_allowed(r["coord_key"], restrictions, order)]
+        order = [b["analytic_id"] for b in await db.execute_fetchall(
+            "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order", (sheet_id,)
+        )]
+        return [_cell_slim(r) for r in results if _coord_allowed(r["coord_key"], restrictions, order)]
 
 
 async def _save_cell(db, sheet_id: str, cell: CellIn):
@@ -130,6 +167,8 @@ async def _save_cell(db, sheet_id: str, cell: CellIn):
     )
     old_value = existing[0]["value"] if existing else None
 
+    from backend.db import intern_formula
+    fid = await intern_formula(db, cell.formula) if cell.formula else None
     if existing:
         # Build dynamic update
         fields = ["value=?", "data_type=?"]
@@ -139,7 +178,9 @@ async def _save_cell(db, sheet_id: str, cell: CellIn):
             params.append(cell.rule)
         if cell.formula is not None:
             fields.append("formula=?")
-            params.append(cell.formula)
+            params.append("")
+            fields.append("formula_id=?")
+            params.append(fid)
         params.extend([sheet_id, cell.coord_key])
         await db.execute(
             f"UPDATE cell_data SET {', '.join(fields)} WHERE sheet_id=? AND coord_key=?",
@@ -148,9 +189,9 @@ async def _save_cell(db, sheet_id: str, cell: CellIn):
     else:
         cid = str(uuid.uuid4())
         await db.execute(
-            "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula) VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO cell_data (id, sheet_id, coord_key, value, data_type, rule, formula, formula_id) VALUES (?,?,?,?,?,?,?,?)",
             (cid, sheet_id, cell.coord_key, cell.value, cell.data_type,
-             cell.rule or "manual", cell.formula or ""),
+             cell.rule or "manual", "" if fid else (cell.formula or ""), fid),
         )
 
     # Record history
@@ -162,18 +203,178 @@ async def _save_cell(db, sheet_id: str, cell: CellIn):
         )
 
 
-async def _recalc_model(db, sheet_id: str,
-                        changed_cells: list[tuple[str, str, str]] | None = None) -> int:
-    """Recalculate formula cells. Uses incremental path if engine cached and changes provided."""
-    from backend.formula_engine import calculate_model, calculate_model_incremental
-    sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
-    if not sheet:
-        return 0
-    model_id = sheet[0]["model_id"]
-    if changed_cells:
-        result = await calculate_model_incremental(db, model_id, changed_cells)
+async def _materialize_sums(db, model_id: str,
+                            sheet_ids: list[str] | None = None) -> int:
+    """Build bottom-up sum_children aggregates for every parent coord_key.
+
+    Coord keys are pipe-separated record IDs.  The key length varies — a cell
+    may have 2 parts (period|indicator) or more when additional analytics are
+    pinned/expanded.  We look up each record ID to find which analytic it
+    belongs to, then aggregate child→parent within each position.
+
+    If *sheet_ids* is given, only those sheets are re-materialized (much
+    faster for single-cell edits).
+    """
+    import uuid as _uuid
+    if sheet_ids:
+        sheets = [{"id": sid} for sid in sheet_ids]
     else:
-        result = await calculate_model(db, model_id)
+        sheets = await db.execute_fetchall(
+            "SELECT id FROM sheets WHERE model_id = ?", (model_id,))
+    total = 0
+
+    # Clear all existing sum_children entries for this model's sheets
+    for s in sheets:
+        await db.execute(
+            "DELETE FROM cell_data WHERE sheet_id = ? AND rule = 'sum_children'",
+            (s["id"],),
+        )
+
+    for s in sheets:
+        sid = s["id"]
+        bindings = await db.execute_fetchall(
+            "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order",
+            (sid,),
+        )
+        all_aids = [b["analytic_id"] for b in bindings]
+        if len(all_aids) < 2:
+            continue
+
+        # Build parent_of map: rid → parent_rid (None if root)
+        parent_of: dict[str, str | None] = {}
+        rid_to_aid: dict[str, str] = {}  # rid → analytic_id
+        for aid in all_aids:
+            recs = await db.execute_fetchall(
+                "SELECT id, parent_id FROM analytic_records WHERE analytic_id = ?",
+                (aid,),
+            )
+            for r in recs:
+                parent_of[r["id"]] = r["parent_id"]
+                rid_to_aid[r["id"]] = aid
+
+        # Load ALL non-aggregate cells
+        cells = await db.execute_fetchall(
+            "SELECT coord_key, value FROM cell_data WHERE sheet_id = ? AND rule != 'sum_children'",
+            (sid,),
+        )
+
+        # Parse into dict
+        cell_vals: dict[tuple, float] = {}
+        for c in cells:
+            parts = tuple(c["coord_key"].split("|"))
+            if len(parts) < 2:
+                continue
+            try:
+                v = float(c["value"]) if c["value"] not in (None, '') else 0.0
+            except (ValueError, TypeError):
+                continue
+            cell_vals[parts] = v
+
+        if not cell_vals:
+            continue
+
+        # ── Phase 1: within-dimension aggregation (bottom-up tree) ──
+        # For each position, group cells by context (everything except that
+        # position), then do a single bottom-up tree walk per group.
+        # This is O(cells × positions) instead of O(cells² × depth).
+        from collections import defaultdict, deque
+        import time as _time
+
+        aggregated: dict[tuple, float] = dict(cell_vals)
+        parent_keys: set[tuple] = set()
+        max_len = max(len(k) for k in aggregated)
+
+        t_start = _time.monotonic()
+
+        def _within_dim(keys_iter, klen: int | None = None):
+            """Within-dimension aggregation using bottom-up tree walk."""
+            # Build context groups for each position
+            for pos in range(klen if klen else max_len):
+                ctx_rids: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+                for key, val in keys_iter():
+                    if pos >= len(key):
+                        continue
+                    if klen is not None and len(key) != klen:
+                        continue
+                    ctx = key[:pos] + key[pos+1:]
+                    ctx_rids[ctx][key[pos]] += val
+
+                for ctx, rid_vals in ctx_rids.items():
+                    # Find ancestors of rids in this group
+                    node_vals: dict[str, float] = dict(rid_vals)
+                    for rid in list(rid_vals.keys()):
+                        r = parent_of.get(rid)
+                        while r is not None and r not in node_vals:
+                            node_vals[r] = 0.0
+                            r = parent_of.get(r)
+
+                    # Build local children map
+                    local_ch: dict[str, list[str]] = defaultdict(list)
+                    pending: dict[str, int] = {}
+                    for rid in node_vals:
+                        pid = parent_of.get(rid)
+                        if pid is not None and pid in node_vals:
+                            local_ch[pid].append(rid)
+                    for rid in node_vals:
+                        pending[rid] = len(local_ch.get(rid, []))
+
+                    # Bottom-up BFS: leaves first
+                    queue = deque(r for r, cnt in pending.items() if cnt == 0)
+                    while queue:
+                        rid = queue.popleft()
+                        pid = parent_of.get(rid)
+                        if pid is not None and pid in node_vals:
+                            node_vals[pid] += node_vals[rid]
+                            pending[pid] -= 1
+                            if pending[pid] == 0:
+                                queue.append(pid)
+
+                    # Write parent keys into aggregated
+                    for rid, val in node_vals.items():
+                        if rid not in rid_vals:
+                            key = ctx[:pos] + (rid,) + ctx[pos:]
+                            aggregated[key] = val
+                            parent_keys.add(key)
+
+        _within_dim(lambda: aggregated.items())
+        t_dim1 = _time.monotonic()
+
+        # ── Phase 2: cross-dimension collapse ──
+        # Collapse root-position tails to produce shorter prefix keys.
+        for drop_pos in range(max_len - 1, 1, -1):
+            collapse_sums: dict[tuple, float] = {}
+            for key, val in aggregated.items():
+                if len(key) != drop_pos + 1:
+                    continue
+                rid = key[drop_pos]
+                if parent_of.get(rid) is not None:
+                    continue
+                prefix = key[:drop_pos]
+                collapse_sums[prefix] = collapse_sums.get(prefix, 0.0) + val
+            for pk, sv in collapse_sums.items():
+                aggregated[pk] = sv
+                parent_keys.add(pk)
+            if collapse_sums:
+                _within_dim(lambda cs=collapse_sums: ((k, v) for k, v in aggregated.items() if len(k) == drop_pos), klen=drop_pos)
+
+        t_end = _time.monotonic()
+        print(f"[materialize] sheet {sid[:8]}: {len(cell_vals)} cells → {len(aggregated)} aggregated "
+              f"(dim={t_dim1-t_start:.2f}s, collapse={t_end-t_dim1:.2f}s)")
+
+        # NOTE: sum_children rows are no longer persisted — they're recomputed
+        # on demand. Count them for the response but skip writeback.
+        agg_count = sum(
+            1 for key in aggregated
+            if key not in cell_vals or key in parent_keys
+        )
+        total += agg_count
+
+    await db.commit()
+    return total
+
+
+async def _apply_engine_result(db, model_id: str, sheet_id: str, result: dict) -> int:
+    """Write formula engine results to DB and materialize sums."""
     total = 0
     import uuid as _uuid
     for sid, changes in result.items():
@@ -184,16 +385,48 @@ async def _recalc_model(db, sheet_id: str,
             rule = 'empty' if val == '__empty__' else 'formula'
             db_val = '' if val == '__empty__' else val
             rows.append((str(_uuid.uuid4()), sid, ck, db_val, rule))
-        # Batch upsert — never overwrite manually-entered values
         await db.executemany(
             """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
                VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule
-               WHERE rule != 'manual'""",
+               WHERE cell_data.rule != 'manual'""",
             rows,
         )
         total += len(changes)
+
+    affected_sheets = [sheet_id]
+    for sid, changes in result.items():
+        if changes and sid not in affected_sheets:
+            affected_sheets.append(sid)
+    total += await _materialize_sums(db, model_id, sheet_ids=affected_sheets)
     return total
+
+
+async def _update_dependents(db, sheet_id: str,
+                             changed_cells: list[tuple[str, str, str]]) -> int:
+    """Incrementally update formula dependents using cached DAG.
+    If no DAG is cached, only materializes sums (no full rebuild).
+    DAG rebuild is only triggered explicitly via calculate endpoint."""
+    from backend.formula_engine import calculate_model_incremental
+    sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
+    if not sheet:
+        return 0
+    model_id = sheet[0]["model_id"]
+
+    result = await calculate_model_incremental(db, model_id, changed_cells)
+    return await _apply_engine_result(db, model_id, sheet_id, result)
+
+
+async def _recalc_model(db, sheet_id: str) -> int:
+    """Full model recalculation — rebuilds DAG from scratch.
+    Called explicitly via calculate endpoint / generate button."""
+    from backend.formula_engine import calculate_model
+    sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
+    if not sheet:
+        return 0
+    model_id = sheet[0]["model_id"]
+    result = await calculate_model(db, model_id)
+    return await _apply_engine_result(db, model_id, sheet_id, result)
 
 
 @router.put("/by-sheet/{sheet_id}")
@@ -219,8 +452,8 @@ async def save_cells(sheet_id: str, body: BulkCellsIn, no_recalc: bool = Query(F
         if cell.value is not None and (cell.rule is None or cell.rule == "manual"):
             changed.append((sheet_id, cell.coord_key, cell.value))
     computed = 0
-    if not no_recalc:
-        computed = await _recalc_model(db, sheet_id, changed_cells=changed or None)
+    if not no_recalc and changed:
+        computed = await _update_dependents(db, sheet_id, changed_cells=changed)
     await db.commit()
     return {"ok": True, "computed": computed}
 
@@ -236,10 +469,10 @@ async def save_single_cell(sheet_id: str, body: CellIn):
         if not _coord_allowed(body.coord_key, edit_restrictions, order):
             return {"error": "No edit permission"}
     await _save_cell(db, sheet_id, body)
-    changed = None
+    computed = 0
     if body.value is not None and (body.rule is None or body.rule == "manual"):
         changed = [(sheet_id, body.coord_key, body.value)]
-    computed = await _recalc_model(db, sheet_id, changed_cells=changed)
+        computed = await _update_dependents(db, sheet_id, changed)
     await db.commit()
     return {"ok": True, "computed": computed}
 
@@ -312,6 +545,11 @@ async def calculate_model_stream(model_id: str):
             await asyncio.sleep(0)  # yield control
 
         await db.commit()
+
+        # Materialize sum_children aggregates
+        sum_count = await _materialize_sums(db, model_id)
+        total += sum_count
+
         yield f"data: {json.dumps({'phase': 'done', 'computed': total})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -436,24 +674,36 @@ async def undo(model_id: str, body: UndoIn):
         changes.append({"sheet_id": r["sheet_id"], "coord_key": r["coord_key"], "value": r["old_value"]})
         undone += 1
 
-    # Recalc — capture which cells were recomputed
-    from backend.formula_engine import calculate_model
+    # Incremental recalc for undone cells
+    from backend.formula_engine import calculate_model_incremental
     sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (rows[0]["sheet_id"],))
     model_id_for_recalc = sheet[0]["model_id"] if sheet else model_id
-    recalc_result = await calculate_model(db, model_id_for_recalc)
+    changed_tuples = [(c["sheet_id"], c["coord_key"], c["value"] or "") for c in changes]
+    recalc_result = await calculate_model_incremental(db, model_id_for_recalc, changed_tuples)
     computed = 0
+    import uuid as _uuid
     for sid, recalc_changes in recalc_result.items():
+        if not recalc_changes:
+            continue
+        rows_to_write = []
         for ck, val in recalc_changes.items():
             rule = 'empty' if val == '__empty__' else 'formula'
             db_val = '' if val == '__empty__' else val
-            await db.execute(
-                """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule
-                   WHERE rule != 'manual'""",
-                (str(__import__('uuid').uuid4()), sid, ck, db_val, rule),
-            )
+            rows_to_write.append((str(_uuid.uuid4()), sid, ck, db_val, rule))
+        await db.executemany(
+            """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule
+               WHERE cell_data.rule != 'manual'""",
+            rows_to_write,
+        )
         computed += len(recalc_changes)
+    # Materialize sums for affected sheets
+    affected = list({c["sheet_id"] for c in changes})
+    for sid, ch in recalc_result.items():
+        if ch and sid not in affected:
+            affected.append(sid)
+    computed += await _materialize_sums(db, model_id_for_recalc, sheet_ids=affected)
     await db.commit()
 
     # Build minimal all_cells: only undone cells + recomputed cells

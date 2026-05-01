@@ -77,8 +77,10 @@ async def get_rules(sheet_id: str, indicator_id: str):
         main_idx = next((i for i, b in enumerate(bindings) if b["is_main"]), None)
         if main_idx is not None:
             cell_row = await db.execute_fetchall(
-                """SELECT formula FROM cell_data
-                   WHERE sheet_id = ? AND formula IS NOT NULL AND formula != ''
+                """SELECT COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
+                   FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+                   WHERE cd.sheet_id = ?
+                     AND ((cd.formula IS NOT NULL AND cd.formula != '') OR cd.formula_id IS NOT NULL)
                    LIMIT 100""",
                 (sheet_id,),
             )
@@ -99,10 +101,11 @@ async def get_rules(sheet_id: str, indicator_id: str):
 
             for pat in like_patterns:
                 cell_row = await db.execute_fetchall(
-                    """SELECT formula FROM cell_data
-                       WHERE sheet_id = ? AND coord_key LIKE ?
-                       AND formula IS NOT NULL AND formula != ''
-                       ORDER BY coord_key LIMIT 1""",
+                    """SELECT COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
+                       FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+                       WHERE cd.sheet_id = ? AND cd.coord_key LIKE ?
+                         AND ((cd.formula IS NOT NULL AND cd.formula != '') OR cd.formula_id IS NOT NULL)
+                       ORDER BY cd.coord_key LIMIT 1""",
                     (sheet_id, pat),
                 )
                 if cell_row:
@@ -189,10 +192,11 @@ async def get_all_rules(sheet_id: str):
     # coord_key = "period_rec_id|indicator_rec_id" — take the indicator part.
     # Pick any one non-empty formula per indicator record (they're typically the same).
     cell_rows = await db.execute_fetchall(
-        """SELECT coord_key, formula, rule
-           FROM cell_data
-           WHERE sheet_id = ? AND formula IS NOT NULL AND formula != ''
-           ORDER BY coord_key""",
+        """SELECT cd.coord_key, COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula, cd.rule
+           FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+           WHERE cd.sheet_id = ?
+             AND ((cd.formula IS NOT NULL AND cd.formula != '') OR cd.formula_id IS NOT NULL)
+           ORDER BY cd.coord_key""",
         (sheet_id,),
     )
     # Determine indicator position in coord_key from sheet_analytics binding order.

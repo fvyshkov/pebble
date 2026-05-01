@@ -627,18 +627,20 @@ fn resolve_local_ref_to_id(
         }
     }
 
-    // Parent/child split on '/' (v2 lines 440-480)
+    // Parent/child split on \x1f sentinel (set by parser for [parent][child])
     if target_rid.is_none() {
         let name_str = model.interner.get_str(name_id).to_string();
-        if name_str.contains('/') {
-            let parts: Vec<&str> = name_str.splitn(2, '/').collect();
+        if name_str.contains('\x1f') {
+            let parts: Vec<&str> = name_str.splitn(2, '\x1f').collect();
             let child_lower = parts[1].trim().to_lowercase();
             let parent_lower = parts[0].trim().to_lowercase();
             let child_name = match model.interner.get_id(&child_lower) {
-                Some(id) => id, None => return UNRESOLVED,
+                Some(id) => id,
+                None => return UNRESOLVED,
             };
             let parent_name = match model.interner.get_id(&parent_lower) {
-                Some(id) => id, None => return UNRESOLVED,
+                Some(id) => id,
+                None => return UNRESOLVED,
             };
             let sheet = &model.sheets[sheet_idx];
             for (axis_idx, name_map) in sheet.name_to_rids.iter().enumerate() {
@@ -675,7 +677,10 @@ fn resolve_local_ref_to_id(
         }
     }
 
-    let target_rid = match target_rid { Some(r) => r, None => return UNRESOLVED };
+    let target_rid = match target_rid {
+        Some(r) => r,
+        None => return UNRESOLVED,
+    };
     let target_axis = target_axis.unwrap();
 
     let mut target_coord = *coord;
@@ -718,6 +723,47 @@ fn resolve_cross_sheet_ref_to_id(
                 target_axis = Some(axis_idx);
             }
             break;
+        }
+    }
+
+    // Parent-qualified `[Sheet::parent][child]` — name interned as "parent\x1fchild".
+    // Mirrors the local resolver's handling: split on \x1f, look up child in the
+    // target sheet, and disambiguate by parent name_lower if multiple rids match.
+    if target_rid.is_none() {
+        let name_str = model.interner.get_str(name_id).to_string();
+        if name_str.contains('\x1f') {
+            let parts: Vec<&str> = name_str.splitn(2, '\x1f').collect();
+            let parent_lower = parts[0].trim().to_lowercase();
+            let child_lower = parts[1].trim().to_lowercase();
+            let child_name = model.interner.get_id(&child_lower);
+            let parent_name = model.interner.get_id(&parent_lower);
+            if let (Some(child_id), Some(parent_id)) = (child_name, parent_name) {
+                for (axis_idx, name_map) in target_sheet.name_to_rids.iter().enumerate() {
+                    if Some(axis_idx) == target_sheet.period_axis { continue; }
+                    if let Some(rids) = name_map.get(&child_id) {
+                        if rids.len() == 1 {
+                            target_rid = Some(rids[0]);
+                            target_axis = Some(axis_idx);
+                        } else if !rids.is_empty() {
+                            let mut filtered: Vec<u32> = Vec::new();
+                            for &rid in rids {
+                                if let Some(rec) = target_sheet.records.get(&rid) {
+                                    if let Some(pid) = rec.parent_id {
+                                        if let Some(prec) = target_sheet.records.get(&pid) {
+                                            if prec.name_lower == parent_id {
+                                                filtered.push(rid);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            target_rid = Some(if filtered.len() == 1 { filtered[0] } else { rids[0] });
+                            target_axis = Some(axis_idx);
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 
