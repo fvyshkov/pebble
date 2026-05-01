@@ -7,6 +7,8 @@ frontend/node_modules/
 *.db-wal
 *.db-shm
 *.db
+*.db.bak*
+pebble.db.bak.*
 .llm_cache/
 models.xlsx
 .venv/
