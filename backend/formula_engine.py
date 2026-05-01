@@ -27,6 +27,14 @@ import time
 import zlib
 from typing import Any
 
+from backend.coord_key import (
+    pack as _pack_coord,
+    pack_sync as _pack_sync,
+    unpack as _unpack_coord,
+    to_uuid_coord_key as _ck_to_uuid,
+    _load_all as _coord_key_prime,
+)
+
 # zlib magic byte (0x78 = zlib stream); raw bincode starts with random bytes.
 # We prepend this 1-byte tag so old uncompressed blobs still load.
 _DAG_COMPRESS_MAGIC = b"\x01"   # tag byte for "zlib-compressed payload follows"
@@ -145,7 +153,10 @@ async def calculate_model_incremental(
 
     if engine is not None and engine.is_built():
         t0 = time.perf_counter()
-        changes_json = json.dumps(changed_cells)
+        # Engine holds uuid-form coord_keys; callers (API/edits) use seq_id form.
+        await _coord_key_prime(db)
+        translated = [(sid, _ck_to_uuid(ck), val) for sid, ck, val in changed_cells]
+        changes_json = json.dumps(translated)
         result = engine.update_values(changes_json)
         t1 = time.perf_counter()
         total_cells = sum(len(v) for v in result.values()) if isinstance(result, dict) else 0
@@ -167,8 +178,14 @@ async def get_dirty_cells(
     if engine is None or not engine.is_built():
         return []
 
-    changes_json = json.dumps(changed_cells)
-    return engine.mark_dirty(changes_json)
+    await _coord_key_prime(db)
+    translated = [(sid, _ck_to_uuid(ck)) for sid, ck in changed_cells]
+    changes_json = json.dumps(translated)
+    dirty = engine.mark_dirty(changes_json)
+    # Caller works with seq_id-form keys; translate the engine's uuid output back.
+    # Use intern variant: dirty list may include uuids freshly emitted by the engine.
+    from backend.coord_key import from_uuid_coord_key_intern as _ck_to_seq_intern
+    return [(sid, await _ck_to_seq_intern(db, ck)) for sid, ck in dirty]
 
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────
@@ -421,7 +438,9 @@ def _serialize_for_rust(all_sheets, sheet_meta, global_cells, global_formulas,
         for gk, val in global_cells.items():
             if gk[0] != sid:
                 continue
-            ck = gk[1]
+            # global_cells holds DB-form (seq_id) coord_keys. Rust expects keys
+            # consistent with records/children_by_rid (uuid form), so translate.
+            ck = _ck_to_uuid(gk[1])
             formula = global_formulas.get(gk, "")
             if gk in manual_cells:
                 rule = "manual"
@@ -519,6 +538,9 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         "SELECT id, name, excel_code FROM sheets WHERE model_id = ? ORDER BY created_at", (model_id,))
     if not all_sheets:
         return {}
+
+    # Prime the seq_id↔uuid cache so _ck_to_uuid works for all stored cells.
+    await _coord_key_prime(db)
 
     # ── Load entire model ──
     global_cells = {}       # {(sheet_id, coord_key): value_str}
@@ -715,6 +737,10 @@ async def calculate_model(db, model_id: str) -> dict[str, dict[str, str]]:
         prev_period, period_order,
     )
     t1 = time.perf_counter()
+    import os as _os
+    if _os.environ.get("PEBBLE_DEBUG_ENGINE_JSON"):
+        with open(_os.environ["PEBBLE_DEBUG_ENGINE_JSON"], "w") as fh:
+            fh.write(model_json)
     _engine, rust_result = await _get_or_build_engine(db, model_id, model_json)
     if rust_result is None:
         # Engine was loaded from cache — collect all changes
@@ -754,7 +780,10 @@ async def resolve_formula_for_display(db, sheet_id: str, coord_key: str) -> dict
     )
     ordered_aids = [b["analytic_id"] for b in bindings]
     main_aid = next((b["analytic_id"] for b in bindings if b["is_main"]), None)
-    parts = coord_key.split("|")
+    # coord_key parts are seq_id strings on disk — unpack to uuids so the rest
+    # of this function (which queries by uuid record_id) keeps working.
+    await _coord_key_prime(db)
+    parts = _unpack_coord(coord_key)
     context = {aid: parts[i] for i, aid in enumerate(ordered_aids) if i < len(parts)}
     if not main_aid:
         return {"formula": "", "source": "manual", "kind": None}

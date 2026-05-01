@@ -145,10 +145,12 @@ CREATE TABLE IF NOT EXISTS analytic_records (
     parent_id    TEXT REFERENCES analytic_records(id) ON DELETE CASCADE,
     sort_order   INTEGER NOT NULL DEFAULT 0,
     data_json    TEXT NOT NULL DEFAULT '{}',
-    excel_row    INTEGER
+    excel_row    INTEGER,
+    seq_id       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_arecords_analytic ON analytic_records(analytic_id);
 CREATE INDEX IF NOT EXISTS idx_arecords_parent ON analytic_records(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_arecords_seq ON analytic_records(seq_id);
 
 CREATE TABLE IF NOT EXISTS sheets (
     id          TEXT PRIMARY KEY,
@@ -344,10 +346,12 @@ CREATE TABLE IF NOT EXISTS analytic_records (
     parent_id    TEXT REFERENCES analytic_records(id) ON DELETE CASCADE,
     sort_order   INT NOT NULL DEFAULT 0,
     data_json    TEXT NOT NULL DEFAULT '{}',
-    excel_row    INT
+    excel_row    INT,
+    seq_id       INT
 );
 CREATE INDEX IF NOT EXISTS idx_arecords_analytic ON analytic_records(analytic_id);
 CREATE INDEX IF NOT EXISTS idx_arecords_parent ON analytic_records(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_arecords_seq ON analytic_records(seq_id);
 
 CREATE TABLE IF NOT EXISTS sheets (
     id          TEXT PRIMARY KEY,
@@ -530,6 +534,26 @@ async def intern_formula(db, text: str | None) -> int | None:
     return fid
 
 
+async def _backfill_record_seq_id(db) -> None:
+    """Assign seq_id to any analytic_records row that doesn't have one yet.
+
+    Idempotent: only touches rows where seq_id IS NULL. Allocates monotonically
+    after the current MAX(seq_id) so previously-issued ids are never reused."""
+    rows = await db.execute_fetchall(
+        "SELECT id FROM analytic_records WHERE seq_id IS NULL ORDER BY id"
+    )
+    if not rows:
+        return
+    cur = await db.execute_fetchall("SELECT COALESCE(MAX(seq_id), 0) AS m FROM analytic_records")
+    next_id = (cur[0]["m"] if cur else 0) + 1
+    for r in rows:
+        await db.execute(
+            "UPDATE analytic_records SET seq_id = ? WHERE id = ?",
+            (next_id, r["id"]),
+        )
+        next_id += 1
+
+
 async def _backfill_is_main(db) -> None:
     """Mark one sheet_analytics row per sheet as 'main'."""
     rows = await db.execute_fetchall(
@@ -592,6 +616,7 @@ async def _init_pg():
         )
     await _db.execute("UPDATE users SET can_admin = 1 WHERE username IN (?, ?)", ("Админ", "admin"))
     await _backfill_is_main(_db)
+    await _backfill_record_seq_id(_db)
     print(f"[db] PostgreSQL connected: {DATABASE_URL}")
 
 
@@ -658,6 +683,11 @@ async def _init_sqlite():
         )""",
         "ALTER TABLE cell_data ADD COLUMN formula_id INTEGER",
         "CREATE INDEX IF NOT EXISTS idx_cells_formula_id ON cell_data(formula_id) WHERE formula_id IS NOT NULL",
+        # Record-id interning: cell_data.coord_key was UUID|UUID|UUID (~108 B/row).
+        # Mapping each UUID to a small INTEGER seq_id and storing "12|34|56" trims
+        # ~70% off the column — about -300 MB on the largest production model.
+        "ALTER TABLE analytic_records ADD COLUMN seq_id INTEGER",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_arecords_seq ON analytic_records(seq_id)",
     ]
     for sql in MIGRATIONS:
         try:
@@ -692,6 +722,7 @@ async def _init_sqlite():
         )
     await _db.execute("UPDATE users SET can_admin = 1 WHERE username IN ('Админ', 'admin')")
     await _backfill_is_main(_db)
+    await _backfill_record_seq_id(_db)
     await _db.commit()
 
     # Read-only connection pool for parallel reads

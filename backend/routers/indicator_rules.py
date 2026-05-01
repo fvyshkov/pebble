@@ -8,6 +8,11 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend.coord_key import (
+    unpack as _unpack_coord,
+    _load_all as _coord_key_prime,
+    normalize as _ck_normalize,
+)
 from backend.db import get_db
 from backend.formula_engine import resolve_formula_for_display
 
@@ -212,8 +217,9 @@ async def get_all_rules(sheet_id: str):
     if main_idx is None:
         return result
 
+    await _coord_key_prime(db)
     for cr in cell_rows:
-        parts = cr["coord_key"].split("|")
+        parts = _unpack_coord(cr["coord_key"])
         if len(parts) <= main_idx:
             continue
         rec_id = parts[main_idx]
@@ -247,7 +253,8 @@ async def promote_cell(sheet_id: str, indicator_id: str, body: PromoteCellIn):
     main_aid = next((b["analytic_id"] for b in bindings if b["is_main"]), None)
     if not main_aid:
         raise HTTPException(400, "sheet has no main analytic")
-    parts = body.coord_key.split("|")
+    body.coord_key = await _ck_normalize(db, body.coord_key)
+    parts = _unpack_coord(body.coord_key)
     if len(parts) != len(ordered_aids):
         raise HTTPException(400, "coord_key length mismatch")
     scope: dict[str, str] = {}

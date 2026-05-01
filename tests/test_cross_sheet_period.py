@@ -135,15 +135,31 @@ def model():
 
 
 def _get_cells(sheet_id):
-    """Return {coord_key: value} for all cells in sheet."""
+    """Return {coord_key: value} for all cells in sheet (uuid-form keys).
+
+    The API stores coord_keys in seq_id form for compactness; we re-expand to
+    uuid form here so tests can look up by the same key they used on PUT.
+    """
+    bindings = _req("get", f"/sheets/{sheet_id}/analytics").json()
+    seq_to_uuid: dict[str, str] = {}
+    for b in bindings:
+        aid = b.get("analytic_id") or b.get("id")
+        if not aid:
+            continue
+        recs = _req("get", f"/analytics/{aid}/records").json()
+        for r in recs:
+            if r.get("seq_id") is not None:
+                seq_to_uuid[str(r["seq_id"])] = r["id"]
     r = _req("get", f"/cells/by-sheet/{sheet_id}")
     assert r.status_code == 200, r.text
     result = {}
     for c in r.json():
+        ck = c["coord_key"]
+        uuid_ck = "|".join(seq_to_uuid.get(p, p) for p in ck.split("|"))
         try:
-            result[c["coord_key"]] = float(c.get("value", 0) or 0)
+            result[uuid_ck] = float(c.get("value", 0) or 0)
         except (ValueError, TypeError):
-            result[c["coord_key"]] = 0.0
+            result[uuid_ck] = 0.0
     return result
 
 

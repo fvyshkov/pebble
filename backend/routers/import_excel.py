@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from backend.db import get_db
+from backend.coord_key import pack as _pack_coord, unpack as _unpack_coord
 
 router = APIRouter(prefix="/api/import", tags=["import"])
 log = logging.getLogger(__name__)
@@ -800,7 +801,7 @@ async def _verify_import_against_excel(
 
         checked = 0
         for cell in cells:
-            parts = cell["coord_key"].split("|")
+            parts = _unpack_coord(cell["coord_key"])
             if len(parts) < 2:
                 continue
 
@@ -3110,9 +3111,9 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     else:
                         # Column without explicit label → "план" (budget/forecast)
                         _ver_rid = version_record_ids.get("план", "")
-                    coord_key = f"{period_rid}|{indicator_rid}|{_ver_rid}"
+                    coord_key = await _pack_coord(db, [period_rid, indicator_rid, _ver_rid])
                 else:
-                    coord_key = f"{period_rid}|{indicator_rid}"
+                    coord_key = await _pack_coord(db, [period_rid, indicator_rid])
                 value_str = str(val)
 
                 # First-period formula cells often reference starting balances from
@@ -4006,9 +4007,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             _ver_rid = version_record_ids[_vlabel]
                         else:
                             _ver_rid = version_record_ids.get("план", "")
-                        _coord_key = f"{period_rid}|{indicator_rid}|{_ver_rid}"
+                        _coord_key = await _pack_coord(db, [period_rid, indicator_rid, _ver_rid])
                     else:
-                        _coord_key = f"{period_rid}|{indicator_rid}"
+                        _coord_key = await _pack_coord(db, [period_rid, indicator_rid])
 
                     # Group indicators → sum_children rule (engine will compute).
                     # But preserve explicit Excel formulas — totals like

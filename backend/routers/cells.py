@@ -5,12 +5,22 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from backend.db import get_db, get_read_db
+from backend.coord_key import (
+    pack as _pack_coord,
+    pack_sync as _pack_sync,
+    unpack as _unpack_coord,
+    intern as _intern_coord,
+    to_uuid_coord_key as _ck_to_uuid,
+    normalize as _ck_normalize,
+)
 
 router = APIRouter(prefix="/api/cells", tags=["cells"])
 
 
 async def _get_allowed_records(db, user_id: str | None, sheet_id: str) -> dict[str, set[str]] | None:
-    """Return {analytic_id: set(record_ids)} for restricted analytics, or None if no restrictions."""
+    """Return {analytic_id: set(seq_id_str)} for restricted analytics, or None if no restrictions.
+    Seq-id strings are used so set membership against coord_key parts (which are
+    seq_id strings since the coord_key int-interning rollout) is a direct match."""
     if not user_id:
         return None
     bindings = await db.execute_fetchall(
@@ -21,16 +31,20 @@ async def _get_allowed_records(db, user_id: str | None, sheet_id: str) -> dict[s
     for b in bindings:
         aid = b["analytic_id"]
         perms = await db.execute_fetchall(
-            "SELECT record_id FROM analytic_record_permissions WHERE user_id = ? AND analytic_id = ? AND can_view = 1",
+            """SELECT CAST(ar.seq_id AS TEXT) AS sid
+               FROM analytic_record_permissions arp
+               JOIN analytic_records ar ON ar.id = arp.record_id
+               WHERE arp.user_id = ? AND arp.analytic_id = ? AND arp.can_view = 1
+                 AND ar.seq_id IS NOT NULL""",
             (user_id, aid),
         )
         if perms:
-            restrictions[aid] = {p["record_id"] for p in perms}
+            restrictions[aid] = {p["sid"] for p in perms}
     return restrictions if restrictions else None
 
 
 async def _get_editable_records(db, user_id: str | None, sheet_id: str) -> dict[str, set[str]] | None:
-    """Return {analytic_id: set(record_ids)} where user can_edit, or None if no restrictions."""
+    """Return {analytic_id: set(seq_id_str)} where user can_edit, or None if no restrictions."""
     if not user_id:
         return None
     bindings = await db.execute_fetchall(
@@ -41,18 +55,22 @@ async def _get_editable_records(db, user_id: str | None, sheet_id: str) -> dict[
     for b in bindings:
         aid = b["analytic_id"]
         perms = await db.execute_fetchall(
-            "SELECT record_id FROM analytic_record_permissions WHERE user_id = ? AND analytic_id = ? AND can_edit = 1",
+            """SELECT CAST(ar.seq_id AS TEXT) AS sid
+               FROM analytic_record_permissions arp
+               JOIN analytic_records ar ON ar.id = arp.record_id
+               WHERE arp.user_id = ? AND arp.analytic_id = ? AND arp.can_edit = 1
+                 AND ar.seq_id IS NOT NULL""",
             (user_id, aid),
         )
         if perms:
-            restrictions[aid] = {p["record_id"] for p in perms}
+            restrictions[aid] = {p["sid"] for p in perms}
     return restrictions if restrictions else None
 
 
 def _coord_allowed(coord_key: str, restrictions: dict[str, set[str]], order: list[str]) -> bool:
     """Check if a coord_key is allowed given restrictions.
-    coord_key = "rid1|rid2|..." matching order of analytics.
-    """
+    coord_key = "sid1|sid2|..." (seq_id strings) matching order of analytics.
+    Restrictions are also seq_id-string sets so this is a direct compare."""
     parts = coord_key.split("|")
     for i, aid in enumerate(order):
         if aid in restrictions and i < len(parts):
@@ -76,7 +94,8 @@ class BulkCellsIn(BaseModel):
 
 def _cell_slim(r) -> dict:
     """Return only fields the frontend needs (skip id, sheet_id to reduce payload)."""
-    d: dict = {"coord_key": r["coord_key"], "value": r["value"]}
+    from backend.coord_key import to_uuid_coord_key as _ck_to_uuid
+    d: dict = {"coord_key": _ck_to_uuid(r["coord_key"]), "value": r["value"]}
     if r["rule"]:
         d["rule"] = r["rule"]
     if r["formula"]:
@@ -100,6 +119,9 @@ async def get_cells(sheet_id: str, user_id: str | None = Query(None)):
                FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
                WHERE cd.sheet_id = ?""", (sheet_id,),
         )
+        # API exposes uuid-form coord_keys to clients; DB stores compact seq_id form.
+        from backend.coord_key import _load_all as _ck_prime, to_uuid_coord_key as _ck_to_uuid
+        await _ck_prime(db)
 
     # Build JSON manually to avoid per-row dict creation + json.dumps overhead.
     # For 350K rows this saves ~1-2s compared to returning list-of-dicts.
@@ -108,7 +130,7 @@ async def get_cells(sheet_id: str, user_id: str | None = Query(None)):
     for r in rows:
         if restrictions and order and not _coord_allowed(r["coord_key"], restrictions, order):
             continue
-        ck = r["coord_key"]
+        ck = _ck_to_uuid(r["coord_key"])
         v = r["value"]
         s = '{"coord_key":"' + ck + '","value":' + (_dumps(v) if v is not None else '""')
         rule = r["rule"]
@@ -135,11 +157,12 @@ async def get_cells_partial(sheet_id: str, body: PartialCellsIn, user_id: str | 
     if not body.coord_keys:
         return []
     async with get_read_db() as db:
+        # Accept legacy uuid-form keys from older callers
+        keys = [await _ck_normalize(db, k) for k in body.coord_keys]
         # Fetch in batches of 500 using IN clause
         results = []
-        keys = body.coord_keys
         for i in range(0, len(keys), 500):
-            batch = keys[i:i+500]
+            batch = keys[i : i + 500]
             placeholders = ",".join("?" for _ in batch)
             rows = await db.execute_fetchall(
                 f"""SELECT cd.coord_key, cd.value, cd.rule,
@@ -240,17 +263,28 @@ async def _materialize_sums(db, model_id: str,
         if len(all_aids) < 2:
             continue
 
-        # Build parent_of map: rid → parent_rid (None if root)
+        # Build parent_of map: seq_id_str → parent_seq_id_str (None if root).
+        # Coord-key parts are seq_id strings since the int-interning rollout, so we
+        # key parent_of/rid_to_aid by seq_id_str too — same shape, faster compares.
         parent_of: dict[str, str | None] = {}
-        rid_to_aid: dict[str, str] = {}  # rid → analytic_id
+        rid_to_aid: dict[str, str] = {}
+        uuid_to_seq_str: dict[str, str] = {}
         for aid in all_aids:
             recs = await db.execute_fetchall(
-                "SELECT id, parent_id FROM analytic_records WHERE analytic_id = ?",
+                "SELECT id, parent_id, seq_id FROM analytic_records WHERE analytic_id = ?",
                 (aid,),
             )
             for r in recs:
-                parent_of[r["id"]] = r["parent_id"]
-                rid_to_aid[r["id"]] = aid
+                if r["seq_id"] is None:
+                    continue
+                uuid_to_seq_str[r["id"]] = str(r["seq_id"])
+            for r in recs:
+                if r["seq_id"] is None:
+                    continue
+                sid_str = str(r["seq_id"])
+                parent_sid = uuid_to_seq_str.get(r["parent_id"]) if r["parent_id"] else None
+                parent_of[sid_str] = parent_sid
+                rid_to_aid[sid_str] = aid
 
         # Load ALL non-aggregate cells
         cells = await db.execute_fetchall(
@@ -377,6 +411,13 @@ async def _apply_engine_result(db, model_id: str, sheet_id: str, result: dict) -
     """Write formula engine results to DB and materialize sums."""
     total = 0
     import uuid as _uuid
+    # Engine returned uuid-form coord_keys; DB stores seq_id form, translate.
+    # Use intern variant: auto-aggregate cells may have uuids without seq_ids yet.
+    from backend.coord_key import (
+        _load_all as _ck_prime,
+        from_uuid_coord_key_intern as _ck_to_seq_intern,
+    )
+    await _ck_prime(db)
     for sid, changes in result.items():
         if not changes:
             continue
@@ -384,7 +425,7 @@ async def _apply_engine_result(db, model_id: str, sheet_id: str, result: dict) -
         for ck, val in changes.items():
             rule = 'empty' if val == '__empty__' else 'formula'
             db_val = '' if val == '__empty__' else val
-            rows.append((str(_uuid.uuid4()), sid, ck, db_val, rule))
+            rows.append((str(_uuid.uuid4()), sid, await _ck_to_seq_intern(db, ck), db_val, rule))
         await db.executemany(
             """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
                VALUES (?, ?, ?, ?, ?)
@@ -436,6 +477,9 @@ async def save_cells(sheet_id: str, body: BulkCellsIn, no_recalc: bool = Query(F
     lock_row = await db.execute_fetchall("SELECT locked FROM sheets WHERE id = ?", (sheet_id,))
     if lock_row and lock_row[0]["locked"]:
         raise HTTPException(403, "Sheet is locked")
+    # Normalize incoming coord_keys (legacy uuid-form callers still work).
+    for cell in body.cells:
+        cell.coord_key = await _ck_normalize(db, cell.coord_key)
     # Check edit permissions if user_id provided
     user_id = body.cells[0].user_id if body.cells else None
     edit_restrictions = await _get_editable_records(db, user_id, sheet_id)
@@ -461,6 +505,7 @@ async def save_cells(sheet_id: str, body: BulkCellsIn, no_recalc: bool = Query(F
 @router.put("/by-sheet/{sheet_id}/single")
 async def save_single_cell(sheet_id: str, body: CellIn):
     db = get_db()
+    body.coord_key = await _ck_normalize(db, body.coord_key)
     edit_restrictions = await _get_editable_records(db, body.user_id, sheet_id)
     if edit_restrictions:
         order = [b["analytic_id"] for b in await db.execute_fetchall(
@@ -526,6 +571,13 @@ async def calculate_model_stream(model_id: str):
         yield f"data: {json.dumps({'phase': 'start', 'total_sheets': total_sheets, 'total_cells': total_cells})}\n\n"
 
         result = await calculate_model(db, model_id)
+        # Engine returned uuid-form coord_keys; DB stores seq_id form.
+        # Use intern variant for auto-aggregate cells that may lack seq_ids.
+        from backend.coord_key import (
+            _load_all as _ck_prime,
+            from_uuid_coord_key_intern as _ck_to_seq_intern,
+        )
+        await _ck_prime(db)
         total = 0
         done_sheets = 0
         for sid, changes in result.items():
@@ -536,7 +588,7 @@ async def calculate_model_stream(model_id: str):
                     """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
                        VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT(sheet_id, coord_key) DO UPDATE SET value = excluded.value, rule = excluded.rule""",
-                    (str(__import__('uuid').uuid4()), sid, ck, db_val, rule),
+                    (str(__import__('uuid').uuid4()), sid, await _ck_to_seq_intern(db, ck), db_val, rule),
                 )
             total += len(changes)
             done_sheets += 1
@@ -558,6 +610,7 @@ async def calculate_model_stream(model_id: str):
 @router.get("/history/{sheet_id}/{coord_key}")
 async def get_cell_history(sheet_id: str, coord_key: str):
     db = get_db()
+    coord_key = await _ck_normalize(db, coord_key)
     rows = await db.execute_fetchall(
         """SELECT h.*, u.username FROM cell_history h
            LEFT JOIN users u ON u.id = h.user_id
@@ -579,17 +632,18 @@ async def get_model_history(model_id: str, limit: int = 10):
         return []
     sheet_names = {r["id"]: r["name"] for r in sheet_rows}
 
-    # Build a lookup: record_id → record name for all records in this model
+    # Build a lookup: seq_id_str → record name for all records in this model.
+    # Coord_key parts are seq_id strings, so this is keyed accordingly.
     rec_names: dict[str, str] = {}
     name_rows = await db.execute_fetchall(
-        """SELECT ar.id, json_extract(ar.data_json, '$.name') as name
+        """SELECT ar.seq_id, json_extract(ar.data_json, '$.name') as name
            FROM analytic_records ar
            JOIN analytics a ON a.id = ar.analytic_id
-           WHERE a.model_id = ?""",
+           WHERE a.model_id = ? AND ar.seq_id IS NOT NULL""",
         (model_id,),
     )
     for nr in name_rows:
-        rec_names[nr["id"]] = nr["name"] or nr["id"][:8]
+        rec_names[str(nr["seq_id"])] = nr["name"] or f"#{nr['seq_id']}"
 
     # Fetch history for each sheet individually (workaround for aiosqlite query issues)
     rows = []
@@ -682,6 +736,11 @@ async def undo(model_id: str, body: UndoIn):
     recalc_result = await calculate_model_incremental(db, model_id_for_recalc, changed_tuples)
     computed = 0
     import uuid as _uuid
+    from backend.coord_key import (
+        _load_all as _ck_prime,
+        from_uuid_coord_key_intern as _ck_to_seq_intern,
+    )
+    await _ck_prime(db)
     for sid, recalc_changes in recalc_result.items():
         if not recalc_changes:
             continue
@@ -689,7 +748,7 @@ async def undo(model_id: str, body: UndoIn):
         for ck, val in recalc_changes.items():
             rule = 'empty' if val == '__empty__' else 'formula'
             db_val = '' if val == '__empty__' else val
-            rows_to_write.append((str(_uuid.uuid4()), sid, ck, db_val, rule))
+            rows_to_write.append((str(_uuid.uuid4()), sid, await _ck_to_seq_intern(db, ck), db_val, rule))
         await db.executemany(
             """INSERT INTO cell_data (id, sheet_id, coord_key, value, rule)
                VALUES (?, ?, ?, ?, ?)
@@ -707,12 +766,13 @@ async def undo(model_id: str, body: UndoIn):
     await db.commit()
 
     # Build minimal all_cells: only undone cells + recomputed cells
+    # Recalc result has uuid-form keys; translate to seq_id form for the API.
     all_cells: dict[str, str | None] = {}
     for c in changes:
         all_cells[c["coord_key"]] = c["value"]
     for sid, recalc_changes in recalc_result.items():
         for ck, val in recalc_changes.items():
-            all_cells[ck] = '' if val == '__empty__' else val
+            all_cells[await _ck_to_seq_intern(db, ck)] = '' if val == '__empty__' else val
 
     # Check if there's more history remaining
     has_more = False

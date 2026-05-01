@@ -10,6 +10,11 @@ import json
 from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from backend.coord_key import (
+    pack as _pack_coord,
+    unpack as _unpack_coord,
+    _load_all as _coord_key_prime,
+)
 from backend.db import get_db
 
 
@@ -617,8 +622,9 @@ async def _fill_sheet_impl(
     existing = {r["coord_key"]: (r["id"], r["rule"]) for r in existing_rows}
     cells_written = 0
     skipped = 0
+    await _coord_key_prime(db)
     for combo in combos:
-        coord_key = "|".join(combo)
+        coord_key = await _pack_coord(db, combo)
         prev = existing.get(coord_key)
         if prev and prev[1] != "manual":
             skipped += 1
@@ -800,9 +806,10 @@ async def _gather_sheet_data_text(db, sheet_id: str) -> str | None:
         for r in recs:
             rid_to_name[r["id"]] = r["name"]
 
+    await _coord_key_prime(db)
     table_rows = []
     for c in cells:
-        parts = (c["coord_key"] or "").split("|")
+        parts = _unpack_coord(c["coord_key"] or "")
         labels = [rid_to_name.get(p, p) for p in parts]
         try:
             val = float(c["value"])

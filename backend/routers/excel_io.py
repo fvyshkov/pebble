@@ -6,6 +6,11 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from backend.db import get_db
+from backend.coord_key import (
+    pack as _pack_coord,
+    pack_sync as _pack_sync,
+    to_uuid_coord_key as _ck_to_uuid,
+)
 
 router = APIRouter(prefix="/api/excel", tags=["excel"])
 
@@ -200,11 +205,11 @@ async def export_sheet_data(sheet_id: str):
         all_row_records.extend([dict(r) for r in recs])
     row_tree = _build_record_tree(all_row_records)
 
-    # Load cells
+    # Load cells (DB stores seq_id form; rebuild as uuid form for in-memory lookup)
     cells_raw = await db.execute_fetchall(
         "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (sheet_id,),
     )
-    cells = {c["coord_key"]: c["value"] for c in cells_raw}
+    cells = {_ck_to_uuid(c["coord_key"]): c["value"] for c in cells_raw}
 
     # Build Excel
     wb = Workbook()
@@ -316,7 +321,7 @@ async def export_model(model_id: str):
                WHERE cd.sheet_id = ?""",
             (sheet_id,),
         )
-        cells = {c["coord_key"]: c for c in cells_raw}
+        cells = {_ck_to_uuid(c["coord_key"]): c for c in cells_raw}
 
         # Build worksheet
         # Truncate sheet name to 31 chars (Excel limit)
@@ -447,7 +452,7 @@ async def import_sheet_data(sheet_id: str, file: UploadFile = File(...)):
             val = ws.cell(row_idx, col_idx + 2).value
             if val is None:
                 continue
-            coord_key = f"{col_rid}|{row_rid}"
+            coord_key = await _pack_coord(db, [col_rid, row_rid])
             value_str = str(val)
 
             existing = await db.execute_fetchall(

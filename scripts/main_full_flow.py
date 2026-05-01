@@ -150,9 +150,13 @@ def _compare_all_cells(model_id: str, excel_path: Path) -> dict:
             cells = db.execute(
                 "SELECT coord_key, value FROM cell_data WHERE sheet_id = ?", (sid,)
             ).fetchall()
+            # coord_key parts are seq_id strings — load mapping to translate
+            seq_to_uuid = dict(db.execute(
+                "SELECT CAST(seq_id AS TEXT), id FROM analytic_records WHERE seq_id IS NOT NULL"
+            ).fetchall())
             cell_map = {}
             for ck, val in cells:
-                parts = ck.split("|")
+                parts = [seq_to_uuid.get(p, p) for p in ck.split("|")]
                 if len(parts) != len(ordered_aids):
                     continue
                 p_rid = ind_rid = None

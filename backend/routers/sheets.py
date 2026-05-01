@@ -180,11 +180,13 @@ async def add_sheet_analytic(sheet_id: str, body: SheetAnalyticIn):
     # HEAD = SUM(leaves) is computed by the formula engine's consolidation phase.
     first_leaf = await _find_first_leaf(db, body.analytic_id)
     if first_leaf:
+        from backend.coord_key import intern as _ck_intern
+        first_leaf_seq = str(await _ck_intern(db, first_leaf))
         cells = await db.execute_fetchall(
             "SELECT id, coord_key FROM cell_data WHERE sheet_id = ?", (sheet_id,)
         )
         for c in cells:
-            new_key = c["coord_key"] + "|" + first_leaf
+            new_key = c["coord_key"] + "|" + first_leaf_seq
             await db.execute(
                 "UPDATE cell_data SET coord_key = ? WHERE id = ?",
                 (new_key, c["id"])
@@ -262,13 +264,14 @@ async def remove_sheet_analytic(sheet_id: str, sa_id: str):
     # Find the position of the analytic being removed
     if removing_aid in order:
         pos = order.index(removing_aid)
-        # Get all record IDs for this analytic (to identify which part of coord_key to strip)
-        rec_ids = set()
+        # Get all record seq_ids for this analytic (coord_key parts are seq_id strings).
+        rec_ids: set[str] = set()
         recs = await db.execute_fetchall(
-            "SELECT id FROM analytic_records WHERE analytic_id = ?", (removing_aid,)
+            "SELECT seq_id FROM analytic_records WHERE analytic_id = ? AND seq_id IS NOT NULL",
+            (removing_aid,)
         )
         for r in recs:
-            rec_ids.add(r["id"])
+            rec_ids.add(str(r["seq_id"]))
 
         # Strip the part from coord_keys.
         # Multiple cells (HEAD, F1, F2) may collapse to the same key — keep the
