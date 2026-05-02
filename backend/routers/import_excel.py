@@ -1210,6 +1210,12 @@ def _substitute_non_indicator_refs(
     Only substitutes refs to rows NOT in row_to_name (header rows, date rows,
     rate constants). Indicator refs (including anchored $D8, $H8 to different
     periods) are left for the formula translator to handle as period references.
+
+    Multi-dim sheets exception: when Pebble's row→name mapping doesn't line up
+    with Excel content (e.g. Claude flattened a 2-D OPEX+CAPEX into a fake
+    1-D hierarchy), preserving the ref produces a formula pointing at the
+    wrong indicator. Detect by reading the row's label cells and falling
+    back to value substitution when the expected name isn't present there.
     """
     from openpyxl.utils import column_index_from_string
     from datetime import datetime, date
@@ -1225,8 +1231,11 @@ def _substitute_non_indicator_refs(
             return m.group(0)
 
         if row_num in row_to_name:
-            # Indicator row — let the translator handle it (including anchored refs)
-            return m.group(0)
+            # Indicator row — verify mapping matches Excel before letting the
+            # translator handle it. If wrong (multi-dim sheet), substitute.
+            if _row_name_matches_excel(ws_data, row_num, row_to_name[row_num]):
+                return m.group(0)
+            # else: fall through to substitute Excel value
 
         v = ws_data.cell(row_num, col_num).value
         if v is None:
@@ -1331,6 +1340,27 @@ def _get_sheet_period_type(sheet_periods: list[dict]) -> str:
     return "unknown"
 
 
+def _row_name_matches_excel(ws, row_num: int, expected_name: str) -> bool:
+    """Verify Pebble's row→name mapping matches actual Excel content at that row.
+
+    Multi-dim sheets (e.g. col A=Product, col B=OPEX/CAPEX, col C=Item) confuse
+    Claude's analysis: it produces a single-dim hierarchy with row numbers that
+    don't line up with Excel rows. When the mapping is wrong, cross-sheet refs
+    point at the wrong indicator. We detect by reading cols 1..6 of the target
+    row and checking whether expected_name appears (case-insensitive substring).
+    """
+    if not expected_name:
+        return False
+    needle = expected_name.lower().strip()
+    for c in range(1, 7):
+        v = ws.cell(row_num, c).value
+        if v is None:
+            continue
+        if isinstance(v, str) and needle in v.lower():
+            return True
+    return False
+
+
 def _substitute_cross_period_refs(
     formula: str,
     source_period_type: str,
@@ -1339,11 +1369,15 @@ def _substitute_cross_period_refs(
     all_sheet_total_cols: dict[str, set[int]] | None = None,
     all_sheet_row_maps: dict[str, dict[int, str]] | None = None,
 ) -> str:
-    """Replace cross-sheet refs with Excel values when they reference non-indicator rows.
+    """Replace cross-sheet refs with Excel values when the target row's
+    indicator mapping is unreliable, otherwise preserve the ref for the
+    formula translator.
 
-    Indicator refs are preserved for the formula translator to handle (it uses
-    absolute period keys for cross-period-type refs).
-    Only substitutes non-indicator row refs with actual Excel values.
+    Indicator refs are normally preserved for the translator to convert into
+    [Sheet::name] syntax — but for multi-dim sheets where the LLM-produced
+    row→name mapping is structurally wrong (rows don't line up with Excel),
+    we fall back to substituting the actual Excel value so the cell still
+    computes correctly.
     """
     from openpyxl.utils import column_index_from_string
     all_sheet_row_maps = all_sheet_row_maps or {}
@@ -1363,17 +1397,28 @@ def _substitute_cross_period_refs(
         row_num = int(row_str)
         target_row_map = all_sheet_row_maps.get(sheet_name, {})
 
-        # If the target row is an indicator, let the translator handle it
-        if row_num in target_row_map:
+        # Verify the row→name mapping matches actual Excel content. If the
+        # name Claude assigned to this row doesn't appear in the row's label
+        # columns, the mapping is wrong (typical for multi-dim sheets where
+        # Claude flattened a 2-D structure). Fall through to value substitution.
+        ws_data_target = None
+        if sheet_name in wb_data.sheetnames:
+            ws_data_target = wb_data[sheet_name]
+        if row_num in target_row_map and ws_data_target is not None:
+            expected = target_row_map[row_num]
+            if _row_name_matches_excel(ws_data_target, row_num, expected):
+                return m.group(0)
+            # else: fall through to substitute Excel value
+        elif row_num in target_row_map:
+            # Can't verify (wb missing) — preserve, translator will handle
             return m.group(0)
 
-        # Non-indicator row — substitute with actual Excel value
+        # Non-indicator row OR mismatched mapping — substitute with Excel value
         try:
-            if sheet_name not in wb_data.sheetnames:
+            if ws_data_target is None:
                 return m.group(0)
-            ws = wb_data[sheet_name]
             col_num = column_index_from_string(col_str)
-            v = ws.cell(row_num, col_num).value
+            v = ws_data_target.cell(row_num, col_num).value
             if v is None:
                 return "0"
             fv = float(v)
