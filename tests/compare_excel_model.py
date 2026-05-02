@@ -100,10 +100,19 @@ def _detect_sheet_layout(ws) -> dict | None:
     }
 
 
+def _read_sheet_title(ws) -> str | None:
+    """Authoritative sheet title: first non-empty string in row 1, cols 1..6."""
+    for col in range(1, 7):
+        v = ws.cell(1, col).value
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
 def extract_excel_data(excel_path: str) -> dict:
     """Extract all data from Excel, auto-detecting layouts.
 
-    Returns: {excel_sheet_name: {"col_to_period": {col: name}, "rows": [(row, name, {period: val})]}}
+    Returns: {excel_sheet_name: {"col_to_period": {col: name}, "rows": [(row, name, {period: val})], "title": str | None}}
     """
     wb = openpyxl.load_workbook(excel_path, data_only=True)
     result = {}
@@ -134,7 +143,11 @@ def extract_excel_data(excel_path: str) -> dict:
                 rows.append((row, name_val, values))
 
         if rows:
-            result[sheet_name] = {"col_to_period": col_to_period, "rows": rows}
+            result[sheet_name] = {
+                "col_to_period": col_to_period,
+                "rows": rows,
+                "title": _read_sheet_title(ws),
+            }
 
     wb.close()
     return result
@@ -154,18 +167,22 @@ def get_pebble_data(model_id: str) -> dict:
     result = {}
     for sid, sname in sheets:
         sas = db.execute("""
-            SELECT sa.analytic_id, a.is_periods, sa.sort_order
+            SELECT sa.analytic_id, a.is_periods, sa.sort_order, sa.is_main
             FROM sheet_analytics sa JOIN analytics a ON a.id = sa.analytic_id
             WHERE sa.sheet_id = ? ORDER BY sa.sort_order
         """, (sid,)).fetchall()
 
+        # period_aid: the is_periods analytic.
+        # ind_aids: the is_main analytic only (the indicator dimension).
+        # Other dims (departments, versions, etc.) are extra slicers — their
+        # coord_key parts get ignored when extracting cells.
         period_aid = None
         ind_aids = []
         ordered_aids = [sa[0] for sa in sas]
         for sa in sas:
             if sa[1]:
                 period_aid = sa[0]
-            else:
+            elif sa[3]:
                 ind_aids.append(sa[0])
 
         if not period_aid or not ind_aids:
@@ -204,9 +221,20 @@ def get_pebble_data(model_id: str) -> dict:
             (sid,),
         ).fetchall()
 
+        # Build seq_id→uuid map for translating coord_keys (cell_data stores
+        # seq_id form, but period_name_map / records are keyed by UUID).
+        seq_to_uuid = {}
+        for sr in db.execute(
+            "SELECT id, seq_id FROM analytic_records WHERE seq_id IS NOT NULL"
+        ).fetchall():
+            seq_to_uuid[str(sr[1])] = sr[0]
+
+        def _to_uuid(p: str) -> str:
+            return seq_to_uuid.get(p, p)  # pass through legacy uuid-form
+
         cell_map = {}
         for ck, val, rule in cells:
-            parts = ck.split("|")
+            parts = [_to_uuid(p) for p in ck.split("|")]
             if len(parts) != len(ordered_aids):
                 continue
 
@@ -281,16 +309,38 @@ def match_sheets(pebble_data: dict, excel_data: dict) -> dict[str, str]:
                 return True
         return False
 
+    # 0. Match by Excel sheet TITLE (cell A1/B1 — authoritative). Many Excel
+    #    files use codes like "0", "BaaS.1", "BS" as tab names but write the
+    #    real sheet name into row 1.
+    used_e = set()
+    for pname in pebble_data:
+        for ename, edata in excel_data.items():
+            if ename in used_e:
+                continue
+            title = edata.get("title")
+            if title and title.lower().strip() == pname.lower().strip():
+                mapping[pname] = ename
+                used_e.add(ename)
+                break
+
     # 1. Direct name match
     for pname in pebble_data:
+        if pname in mapping:
+            continue
         for ename in excel_data:
+            if ename in used_e:
+                continue
             if pname.lower() == ename.lower():
                 mapping[pname] = ename
+                used_e.add(ename)
                 break
         if pname not in mapping:
             for ename in excel_data:
+                if ename in used_e:
+                    continue
                 if ename.lower() in pname.lower() or pname.lower() in ename.lower():
                     mapping[pname] = ename
+                    used_e.add(ename)
                     break
         # 1b. Abbreviation-based matching
         if pname not in mapping:

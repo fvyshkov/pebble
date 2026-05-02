@@ -4,7 +4,7 @@ import json
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from backend.db import get_db
+from backend.db import get_db, is_postgres
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -46,53 +46,50 @@ async def update_model(model_id: str, body: ModelIn):
     return dict(row[0])
 
 
+_DELETE_TABLES = [
+    "cell_data", "cell_history", "indicator_formula_rules", "dag_cache",
+    "sheet_analytics", "sheet_permissions", "sheet_view_settings", "sheets",
+    "analytic_record_permissions", "analytic_records", "analytic_fields",
+    "analytics", "models",
+]
+
+
 @router.delete("/{model_id}")
 async def delete_model(model_id: str):
     db = get_db()
-    # Speed up bulk deletion: disable synchronous writes and use in-memory journal.
-    await db.execute("PRAGMA synchronous = OFF")
-    await db.execute("PRAGMA journal_mode = MEMORY")
-    try:
-        sheet_sub = "SELECT id FROM sheets WHERE model_id = ?"
-        analytic_sub = "SELECT id FROM analytics WHERE model_id = ?"
-        await db.execute(f"DELETE FROM cell_data WHERE sheet_id IN ({sheet_sub})", (model_id,))
-        await db.execute(f"DELETE FROM cell_history WHERE sheet_id IN ({sheet_sub})", (model_id,))
-        await db.execute(f"DELETE FROM indicator_formula_rules WHERE sheet_id IN ({sheet_sub})", (model_id,))
-        await db.execute(f"DELETE FROM dag_cache WHERE sheet_id IN ({sheet_sub})", (model_id,))
-        await db.execute(f"DELETE FROM sheet_analytics WHERE sheet_id IN ({sheet_sub})", (model_id,))
-        await db.execute(f"DELETE FROM sheet_permissions WHERE sheet_id IN ({sheet_sub})", (model_id,))
-        await db.execute(f"DELETE FROM sheet_view_settings WHERE sheet_id IN ({sheet_sub})", (model_id,))
-        await db.execute("DELETE FROM sheets WHERE model_id = ?", (model_id,))
-        await db.execute(f"DELETE FROM analytic_record_permissions WHERE analytic_id IN ({analytic_sub})", (model_id,))
-        await db.execute(f"DELETE FROM analytic_records WHERE analytic_id IN ({analytic_sub})", (model_id,))
-        await db.execute(f"DELETE FROM analytic_fields WHERE analytic_id IN ({analytic_sub})", (model_id,))
-        await db.execute("DELETE FROM analytics WHERE model_id = ?", (model_id,))
-        await db.execute("DELETE FROM models WHERE id = ?", (model_id,))
-        await db.commit()
-    finally:
-        await db.execute("PRAGMA synchronous = FULL")
-        await db.execute("PRAGMA journal_mode = WAL")
+    sheet_sub = "SELECT id FROM sheets WHERE model_id = ?"
+    analytic_sub = "SELECT id FROM analytics WHERE model_id = ?"
+    await db.execute(f"DELETE FROM cell_data WHERE sheet_id IN ({sheet_sub})", (model_id,))
+    await db.execute(f"DELETE FROM cell_history WHERE sheet_id IN ({sheet_sub})", (model_id,))
+    await db.execute(f"DELETE FROM indicator_formula_rules WHERE sheet_id IN ({sheet_sub})", (model_id,))
+    await db.execute("DELETE FROM dag_cache WHERE model_id = ?", (model_id,))
+    await db.execute(f"DELETE FROM sheet_analytics WHERE sheet_id IN ({sheet_sub})", (model_id,))
+    await db.execute(f"DELETE FROM sheet_permissions WHERE sheet_id IN ({sheet_sub})", (model_id,))
+    await db.execute(f"DELETE FROM sheet_view_settings WHERE sheet_id IN ({sheet_sub})", (model_id,))
+    await db.execute("DELETE FROM sheets WHERE model_id = ?", (model_id,))
+    await db.execute(f"DELETE FROM analytic_record_permissions WHERE analytic_id IN ({analytic_sub})", (model_id,))
+    await db.execute(f"DELETE FROM analytic_records WHERE analytic_id IN ({analytic_sub})", (model_id,))
+    await db.execute(f"DELETE FROM analytic_fields WHERE analytic_id IN ({analytic_sub})", (model_id,))
+    await db.execute("DELETE FROM analytics WHERE model_id = ?", (model_id,))
+    await db.execute("DELETE FROM models WHERE id = ?", (model_id,))
+    await db.commit()
     return {"ok": True}
 
 
 @router.delete("")
 async def delete_all_models():
-    """Fast-path: drop all data by clearing tables (no per-row index updates)."""
+    """Wipe every model. PG: TRUNCATE in one statement. SQLite: per-table DELETE
+    (already O(1) without WHERE — the truncate optimization). VACUUM is left to
+    autovacuum / off-hours so the request returns immediately."""
     db = get_db()
-    tables = [
-        "cell_data", "cell_history", "indicator_formula_rules", "dag_cache",
-        "sheet_analytics", "sheet_permissions", "sheet_view_settings", "sheets",
-        "analytic_record_permissions", "analytic_records", "analytic_fields",
-        "analytics", "models",
-    ]
-    for t in tables:
-        await db.execute(f"DELETE FROM {t}")
+    if is_postgres():
+        await db.execute(
+            "TRUNCATE " + ", ".join(_DELETE_TABLES) + " RESTART IDENTITY CASCADE"
+        )
+    else:
+        for t in _DELETE_TABLES:
+            await db.execute(f"DELETE FROM {t}")
     await db.commit()
-    # Reclaim disk space in background (non-blocking for the response).
-    try:
-        await db.execute("VACUUM")
-    except Exception:
-        pass
     return {"ok": True}
 
 

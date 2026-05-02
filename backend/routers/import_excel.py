@@ -3557,7 +3557,9 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
             "INSERT INTO models (id, name, description) VALUES (?, ?, ?)",
             (model_id, model_name_final, "Импортировано из Excel"),
         )
-        yield event(_m("model_created", name=model_name_final))
+        # Emit model_id early so the client can issue DELETE if user cancels.
+        yield event(_m("model_created", name=model_name_final),
+                    {"model_id": model_id, "model_name": model_name_final})
 
         # Period analytics — one per granularity (monthly/qhy/yearly)
         all_period_types = period_config.get("period_types", ["year", "quarter", "month"])

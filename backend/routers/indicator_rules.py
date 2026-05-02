@@ -253,7 +253,7 @@ async def promote_cell(sheet_id: str, indicator_id: str, body: PromoteCellIn):
     main_aid = next((b["analytic_id"] for b in bindings if b["is_main"]), None)
     if not main_aid:
         raise HTTPException(400, "sheet has no main analytic")
-    body.coord_key = await _ck_normalize(db, body.coord_key)
+    body.coord_key = await _ck_normalize(db, body.coord_key, read_only=False)
     parts = _unpack_coord(body.coord_key)
     if len(parts) != len(ordered_aids):
         raise HTTPException(400, "coord_key length mismatch")

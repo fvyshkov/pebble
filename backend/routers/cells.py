@@ -479,7 +479,7 @@ async def save_cells(sheet_id: str, body: BulkCellsIn, no_recalc: bool = Query(F
         raise HTTPException(403, "Sheet is locked")
     # Normalize incoming coord_keys (legacy uuid-form callers still work).
     for cell in body.cells:
-        cell.coord_key = await _ck_normalize(db, cell.coord_key)
+        cell.coord_key = await _ck_normalize(db, cell.coord_key, read_only=False)
     # Check edit permissions if user_id provided
     user_id = body.cells[0].user_id if body.cells else None
     edit_restrictions = await _get_editable_records(db, user_id, sheet_id)
@@ -505,7 +505,7 @@ async def save_cells(sheet_id: str, body: BulkCellsIn, no_recalc: bool = Query(F
 @router.put("/by-sheet/{sheet_id}/single")
 async def save_single_cell(sheet_id: str, body: CellIn):
     db = get_db()
-    body.coord_key = await _ck_normalize(db, body.coord_key)
+    body.coord_key = await _ck_normalize(db, body.coord_key, read_only=False)
     edit_restrictions = await _get_editable_records(db, body.user_id, sheet_id)
     if edit_restrictions:
         order = [b["analytic_id"] for b in await db.execute_fetchall(

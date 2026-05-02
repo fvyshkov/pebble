@@ -150,7 +150,8 @@ CREATE TABLE IF NOT EXISTS analytic_records (
 );
 CREATE INDEX IF NOT EXISTS idx_arecords_analytic ON analytic_records(analytic_id);
 CREATE INDEX IF NOT EXISTS idx_arecords_parent ON analytic_records(parent_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_arecords_seq ON analytic_records(seq_id);
+-- idx_arecords_seq is created in the migrations block — older DBs add the
+-- seq_id column there, so the index must be created after that ALTER.
 
 CREATE TABLE IF NOT EXISTS sheets (
     id          TEXT PRIMARY KEY,
@@ -351,7 +352,8 @@ CREATE TABLE IF NOT EXISTS analytic_records (
 );
 CREATE INDEX IF NOT EXISTS idx_arecords_analytic ON analytic_records(analytic_id);
 CREATE INDEX IF NOT EXISTS idx_arecords_parent ON analytic_records(parent_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_arecords_seq ON analytic_records(seq_id);
+-- idx_arecords_seq is created in the migrations block — older DBs add the
+-- seq_id column there, so the index must be created after that ALTER.
 
 CREATE TABLE IF NOT EXISTS sheets (
     id          TEXT PRIMARY KEY,
@@ -725,14 +727,17 @@ async def _init_sqlite():
     await _backfill_record_seq_id(_db)
     await _db.commit()
 
-    # Read-only connection pool for parallel reads
-    _read_pool_available = asyncio.Queue(maxsize=_READ_POOL_SIZE)
-    for _ in range(_READ_POOL_SIZE):
-        rconn = await aiosqlite.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-        rconn.row_factory = aiosqlite.Row
-        await rconn.execute("PRAGMA journal_mode=WAL")
-        _read_pool.append(rconn)
-        await _read_pool_available.put(rconn)
+    # Read-only connection pool for parallel reads.
+    # Skip for in-memory DBs — each `:memory:` URI opens a *separate* database,
+    # so a read-pool connection wouldn't see the main connection's schema/data.
+    if DB_PATH != ":memory:":
+        _read_pool_available = asyncio.Queue(maxsize=_READ_POOL_SIZE)
+        for _ in range(_READ_POOL_SIZE):
+            rconn = await aiosqlite.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+            rconn.row_factory = aiosqlite.Row
+            await rconn.execute("PRAGMA journal_mode=WAL")
+            _read_pool.append(rconn)
+            await _read_pool_available.put(rconn)
     print(f"[db] SQLite connected: {DB_PATH}")
 
 

@@ -134,11 +134,14 @@ async def from_uuid_coord_key_intern(db, coord_key: str) -> str:
     return "|".join(out)
 
 
-async def normalize(db, coord_key: str) -> str:
+async def normalize(db, coord_key: str, *, read_only: bool = True) -> str:
     """Accept either uuid-form or seq_id-form coord_keys and return seq_id form.
 
     Used at the API boundary so legacy callers that send "{uuid}|{uuid}|..."
-    keep working. Digit parts pass through; non-digit parts are interned.
+    keep working. Default is read_only — unknown UUIDs map to "-1" so the
+    lookup simply returns no row. Pass read_only=False on write paths if a
+    new UUID can legitimately appear and should be interned (allocates a
+    seq_id via UPDATE on analytic_records).
     """
     await _load_all(db)
     out: list[str] = []
@@ -146,8 +149,10 @@ async def normalize(db, coord_key: str) -> str:
         if p.isdigit():
             out.append(p)
         else:
-            sid = await intern(db, p)
-            out.append(str(sid))
+            sid = _uuid_to_seq.get(p)
+            if sid is None and not read_only:
+                sid = await intern(db, p)
+            out.append(str(sid) if sid is not None else "-1")
     return "|".join(out)
 
 
