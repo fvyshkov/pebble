@@ -201,37 +201,58 @@ def main():
         ws = excel[etitle]["ws"]
         period_cols = excel[etitle]["period_cols"]
 
+        # Index Pebble cells by (excel_row, period_key)
+        pmap: dict[tuple[int, str], tuple[float | None, str, str, str]] = {}
+        ind_names_by_row: dict[int, str] = {}
+        for excel_row, pk, val, rule, _, ind_name in pebble_recs:
+            try:
+                pv = float(val) if val not in ("", None) else None
+            except (ValueError, TypeError):
+                pv = None
+            pmap[(excel_row, pk)] = (pv, rule or "", "", ind_name)
+            ind_names_by_row.setdefault(excel_row, ind_name)
+
+        # Build the row range from Pebble's known excel_rows for this sheet
+        pebble_rows = sorted({r for (r, _) in pmap.keys()})
+        if not pebble_rows:
+            per_sheet[psname] = (0, 0)
+            mismatches[psname] = []
+            continue
+
         s_total = s_matched = 0
         sh_mis: list = []
 
-        for excel_row, pk, val, rule, _, ind_name in pebble_recs:
-            ecol = period_cols.get(pk)
-            if ecol is None:
-                continue
-            try:
-                pebble_val = float(val) if val not in ("", None) else None
-            except (ValueError, TypeError):
-                continue
-            if pebble_val is None:
-                continue
-            excel_val = ws.cell(excel_row, ecol).value
-            if not isinstance(excel_val, (int, float)):
-                continue
+        for pk, ecol in period_cols.items():
+            for excel_row in pebble_rows:
+                excel_val = ws.cell(excel_row, ecol).value
+                if not isinstance(excel_val, (int, float)):
+                    continue
+                ev = float(excel_val)
+                pv_tuple = pmap.get((excel_row, pk))
+                if pv_tuple is None:
+                    pebble_val = None
+                    rule = "MISSING"
+                    ind_name = ind_names_by_row.get(excel_row, "?")
+                else:
+                    pebble_val, rule, _, ind_name = pv_tuple
+                    if pebble_val is None:
+                        rule = rule or "EMPTY"
 
-            total += 1
-            s_total += 1
-            ev = float(excel_val)
-            if abs(ev) < 1e-10:
-                ok = abs(pebble_val) < 0.01
-            else:
-                rel = abs(pebble_val - ev) / max(abs(ev), 1e-10)
-                ok = rel < args.tolerance
+                total += 1
+                s_total += 1
+                if pebble_val is None:
+                    ok = False
+                elif abs(ev) < 1e-10:
+                    ok = abs(pebble_val) < 0.01
+                else:
+                    rel = abs(pebble_val - ev) / max(abs(ev), 1e-10)
+                    ok = rel < args.tolerance
 
-            if ok:
-                matched += 1
-                s_matched += 1
-            else:
-                sh_mis.append((ind_name, excel_row, pk, pebble_val, ev, rule))
+                if ok:
+                    matched += 1
+                    s_matched += 1
+                else:
+                    sh_mis.append((ind_name, excel_row, pk, pebble_val, ev, rule))
 
         per_sheet[psname] = (s_total, s_matched)
         mismatches[psname] = sh_mis
@@ -250,9 +271,17 @@ def main():
             continue
         print(f"\n  {ps} ({len(lst)} mismatches, showing {min(args.show, len(lst))}):")
         for name, row, pk, pv, ev, rule in lst[:args.show]:
-            d = pv - ev
-            rp = abs(d) / max(abs(ev), 1e-10) * 100 if ev else float('inf')
-            print(f"    r{row:3d} {pk} {name[:50]:50s} | P={pv:14.4f} E={ev:14.4f} Δ={d:+12.4f} ({rp:.1f}%) [{rule}]")
+            if pv is None:
+                pv_str = "      (empty)"
+                d_str = f"Δ={-ev:+12.4f}"
+                rp_str = "100.0%"
+            else:
+                d = pv - ev
+                pv_str = f"{pv:14.4f}"
+                d_str = f"Δ={d:+12.4f}"
+                rp = abs(d) / max(abs(ev), 1e-10) * 100 if ev else float('inf')
+                rp_str = f"{rp:.1f}%"
+            print(f"    r{row:3d} {pk} {name[:50]:50s} | P={pv_str} E={ev:14.4f} {d_str} ({rp_str}) [{rule}]")
 
 
 if __name__ == "__main__":
