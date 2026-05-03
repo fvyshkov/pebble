@@ -226,189 +226,8 @@ async def _save_cell(db, sheet_id: str, cell: CellIn):
         )
 
 
-async def _materialize_sums(db, model_id: str,
-                            sheet_ids: list[str] | None = None) -> int:
-    """Build bottom-up sum_children aggregates for every parent coord_key.
-
-    Coord keys are pipe-separated record IDs.  The key length varies — a cell
-    may have 2 parts (period|indicator) or more when additional analytics are
-    pinned/expanded.  We look up each record ID to find which analytic it
-    belongs to, then aggregate child→parent within each position.
-
-    If *sheet_ids* is given, only those sheets are re-materialized (much
-    faster for single-cell edits).
-    """
-    import uuid as _uuid
-    if sheet_ids:
-        sheets = [{"id": sid} for sid in sheet_ids]
-    else:
-        sheets = await db.execute_fetchall(
-            "SELECT id FROM sheets WHERE model_id = ?", (model_id,))
-    total = 0
-
-    # Clear all existing sum_children entries for this model's sheets
-    for s in sheets:
-        await db.execute(
-            "DELETE FROM cell_data WHERE sheet_id = ? AND rule = 'sum_children'",
-            (s["id"],),
-        )
-
-    for s in sheets:
-        sid = s["id"]
-        bindings = await db.execute_fetchall(
-            "SELECT analytic_id FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order",
-            (sid,),
-        )
-        all_aids = [b["analytic_id"] for b in bindings]
-        if len(all_aids) < 2:
-            continue
-
-        # Build parent_of map: seq_id_str → parent_seq_id_str (None if root).
-        # Coord-key parts are seq_id strings since the int-interning rollout, so we
-        # key parent_of/rid_to_aid by seq_id_str too — same shape, faster compares.
-        parent_of: dict[str, str | None] = {}
-        rid_to_aid: dict[str, str] = {}
-        uuid_to_seq_str: dict[str, str] = {}
-        for aid in all_aids:
-            recs = await db.execute_fetchall(
-                "SELECT id, parent_id, seq_id FROM analytic_records WHERE analytic_id = ?",
-                (aid,),
-            )
-            for r in recs:
-                if r["seq_id"] is None:
-                    continue
-                uuid_to_seq_str[r["id"]] = str(r["seq_id"])
-            for r in recs:
-                if r["seq_id"] is None:
-                    continue
-                sid_str = str(r["seq_id"])
-                parent_sid = uuid_to_seq_str.get(r["parent_id"]) if r["parent_id"] else None
-                parent_of[sid_str] = parent_sid
-                rid_to_aid[sid_str] = aid
-
-        # Load ALL non-aggregate cells
-        cells = await db.execute_fetchall(
-            "SELECT coord_key, value FROM cell_data WHERE sheet_id = ? AND rule != 'sum_children'",
-            (sid,),
-        )
-
-        # Parse into dict
-        cell_vals: dict[tuple, float] = {}
-        for c in cells:
-            parts = tuple(c["coord_key"].split("|"))
-            if len(parts) < 2:
-                continue
-            try:
-                v = float(c["value"]) if c["value"] not in (None, '') else 0.0
-            except (ValueError, TypeError):
-                continue
-            cell_vals[parts] = v
-
-        if not cell_vals:
-            continue
-
-        # ── Phase 1: within-dimension aggregation (bottom-up tree) ──
-        # For each position, group cells by context (everything except that
-        # position), then do a single bottom-up tree walk per group.
-        # This is O(cells × positions) instead of O(cells² × depth).
-        from collections import defaultdict, deque
-        import time as _time
-
-        aggregated: dict[tuple, float] = dict(cell_vals)
-        parent_keys: set[tuple] = set()
-        max_len = max(len(k) for k in aggregated)
-
-        t_start = _time.monotonic()
-
-        def _within_dim(keys_iter, klen: int | None = None):
-            """Within-dimension aggregation using bottom-up tree walk."""
-            # Build context groups for each position
-            for pos in range(klen if klen else max_len):
-                ctx_rids: dict[tuple, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-                for key, val in keys_iter():
-                    if pos >= len(key):
-                        continue
-                    if klen is not None and len(key) != klen:
-                        continue
-                    ctx = key[:pos] + key[pos+1:]
-                    ctx_rids[ctx][key[pos]] += val
-
-                for ctx, rid_vals in ctx_rids.items():
-                    # Find ancestors of rids in this group
-                    node_vals: dict[str, float] = dict(rid_vals)
-                    for rid in list(rid_vals.keys()):
-                        r = parent_of.get(rid)
-                        while r is not None and r not in node_vals:
-                            node_vals[r] = 0.0
-                            r = parent_of.get(r)
-
-                    # Build local children map
-                    local_ch: dict[str, list[str]] = defaultdict(list)
-                    pending: dict[str, int] = {}
-                    for rid in node_vals:
-                        pid = parent_of.get(rid)
-                        if pid is not None and pid in node_vals:
-                            local_ch[pid].append(rid)
-                    for rid in node_vals:
-                        pending[rid] = len(local_ch.get(rid, []))
-
-                    # Bottom-up BFS: leaves first
-                    queue = deque(r for r, cnt in pending.items() if cnt == 0)
-                    while queue:
-                        rid = queue.popleft()
-                        pid = parent_of.get(rid)
-                        if pid is not None and pid in node_vals:
-                            node_vals[pid] += node_vals[rid]
-                            pending[pid] -= 1
-                            if pending[pid] == 0:
-                                queue.append(pid)
-
-                    # Write parent keys into aggregated
-                    for rid, val in node_vals.items():
-                        if rid not in rid_vals:
-                            key = ctx[:pos] + (rid,) + ctx[pos:]
-                            aggregated[key] = val
-                            parent_keys.add(key)
-
-        _within_dim(lambda: aggregated.items())
-        t_dim1 = _time.monotonic()
-
-        # ── Phase 2: cross-dimension collapse ──
-        # Collapse root-position tails to produce shorter prefix keys.
-        for drop_pos in range(max_len - 1, 1, -1):
-            collapse_sums: dict[tuple, float] = {}
-            for key, val in aggregated.items():
-                if len(key) != drop_pos + 1:
-                    continue
-                rid = key[drop_pos]
-                if parent_of.get(rid) is not None:
-                    continue
-                prefix = key[:drop_pos]
-                collapse_sums[prefix] = collapse_sums.get(prefix, 0.0) + val
-            for pk, sv in collapse_sums.items():
-                aggregated[pk] = sv
-                parent_keys.add(pk)
-            if collapse_sums:
-                _within_dim(lambda cs=collapse_sums: ((k, v) for k, v in aggregated.items() if len(k) == drop_pos), klen=drop_pos)
-
-        t_end = _time.monotonic()
-        print(f"[materialize] sheet {sid[:8]}: {len(cell_vals)} cells → {len(aggregated)} aggregated "
-              f"(dim={t_dim1-t_start:.2f}s, collapse={t_end-t_dim1:.2f}s)")
-
-        # NOTE: sum_children rows are no longer persisted — they're recomputed
-        # on demand. Count them for the response but skip writeback.
-        agg_count = sum(
-            1 for key in aggregated
-            if key not in cell_vals or key in parent_keys
-        )
-        total += agg_count
-
-    await db.commit()
-    return total
-
-
 async def _apply_engine_result(db, model_id: str, sheet_id: str, result: dict) -> int:
-    """Write formula engine results to DB and materialize sums."""
+    """Write formula engine results to DB."""
     total = 0
     import uuid as _uuid
     # Engine returned uuid-form coord_keys; DB stores seq_id form, translate.
@@ -435,18 +254,12 @@ async def _apply_engine_result(db, model_id: str, sheet_id: str, result: dict) -
         )
         total += len(changes)
 
-    affected_sheets = [sheet_id]
-    for sid, changes in result.items():
-        if changes and sid not in affected_sheets:
-            affected_sheets.append(sid)
-    total += await _materialize_sums(db, model_id, sheet_ids=affected_sheets)
     return total
 
 
 async def _update_dependents(db, sheet_id: str,
                              changed_cells: list[tuple[str, str, str]]) -> int:
     """Incrementally update formula dependents using cached DAG.
-    If no DAG is cached, only materializes sums (no full rebuild).
     DAG rebuild is only triggered explicitly via calculate endpoint."""
     from backend.formula_engine import calculate_model_incremental
     sheet = await db.execute_fetchall("SELECT model_id FROM sheets WHERE id = ?", (sheet_id,))
@@ -597,10 +410,6 @@ async def calculate_model_stream(model_id: str):
             await asyncio.sleep(0)  # yield control
 
         await db.commit()
-
-        # Materialize sum_children aggregates
-        sum_count = await _materialize_sums(db, model_id)
-        total += sum_count
 
         yield f"data: {json.dumps({'phase': 'done', 'computed': total})}\n\n"
 
@@ -757,12 +566,6 @@ async def undo(model_id: str, body: UndoIn):
             rows_to_write,
         )
         computed += len(recalc_changes)
-    # Materialize sums for affected sheets
-    affected = list({c["sheet_id"] for c in changes})
-    for sid, ch in recalc_result.items():
-        if ch and sid not in affected:
-            affected.append(sid)
-    computed += await _materialize_sums(db, model_id_for_recalc, sheet_ids=affected)
     await db.commit()
 
     # Build minimal all_cells: only undone cells + recomputed cells

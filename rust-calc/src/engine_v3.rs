@@ -580,6 +580,106 @@ fn expand_children_to_ids(
     Vec::new()
 }
 
+// ── Chain disambiguation helpers ────────────────────────────────────────
+
+/// Verify that `rid`'s ancestor chain on `sheet` matches `parent_lower_chain`
+/// (top-most ancestor first). Returns true if every parent in the chain
+/// matches the corresponding ancestor record's name_lower (intern id).
+fn ancestor_chain_matches(
+    sheet: &SheetData,
+    rid: u32,
+    parent_lower_ids: &[u32],
+) -> bool {
+    if parent_lower_ids.is_empty() {
+        return true;
+    }
+    let mut cur = match sheet.records.get(&rid) {
+        Some(r) => r,
+        None => return false,
+    };
+    // Walk parents bottom-up: child's immediate parent must match the LAST
+    // entry in parent_lower_ids, then up the chain.
+    for expected_id in parent_lower_ids.iter().rev() {
+        let pid = match cur.parent_id {
+            Some(p) => p,
+            None => return false,
+        };
+        let prec = match sheet.records.get(&pid) {
+            Some(r) => r,
+            None => return false,
+        };
+        if prec.name_lower != *expected_id {
+            return false;
+        }
+        cur = prec;
+    }
+    true
+}
+
+/// Resolve a possibly chain-qualified name on a single sheet.
+/// Returns (rid, axis_idx) on success.
+///
+/// Behavior:
+///   - If name has no \x1f: look up directly. Single match → ok. Multiple
+///     matches WITHOUT a parent qualifier → caller-defined fallback.
+///   - If name has \x1f: split into [a,b,...,leaf]. Look up leaf, filter
+///     candidates by walking parent_id chain to verify each ancestor
+///     name_lower matches. Single survivor → resolved.
+fn resolve_chain_on_sheet(
+    model: &Model,
+    sheet_idx: usize,
+    name_id: u32,
+) -> Option<(u32, usize)> {
+    let sheet = &model.sheets[sheet_idx];
+    let period_axis = sheet.period_axis;
+    let name_str = model.interner.get_str(name_id);
+
+    if !name_str.contains('\x1f') {
+        // Plain name — single-match only; multi-match handled by caller.
+        for (axis_idx, name_map) in sheet.name_to_rids.iter().enumerate() {
+            if Some(axis_idx) == period_axis { continue; }
+            if let Some(rids) = name_map.get(&name_id) {
+                if rids.len() == 1 {
+                    return Some((rids[0], axis_idx));
+                }
+                return None; // ambiguous — caller decides
+            }
+        }
+        return None;
+    }
+
+    let parts: Vec<&str> = name_str.split('\x1f').collect();
+    let leaf_lower = parts.last().unwrap().trim().to_lowercase();
+    let leaf_id = model.interner.get_id(&leaf_lower)?;
+    let parent_lower_ids: Vec<u32> = parts[..parts.len() - 1]
+        .iter()
+        .map(|p| {
+            let lower = p.trim().to_lowercase();
+            model.interner.get_id(&lower).unwrap_or(u32::MAX)
+        })
+        .collect();
+    if parent_lower_ids.iter().any(|&id| id == u32::MAX) {
+        return None;
+    }
+
+    for (axis_idx, name_map) in sheet.name_to_rids.iter().enumerate() {
+        if Some(axis_idx) == period_axis { continue; }
+        if let Some(rids) = name_map.get(&leaf_id) {
+            let mut hits: Vec<u32> = Vec::new();
+            for &rid in rids {
+                if ancestor_chain_matches(sheet, rid, &parent_lower_ids) {
+                    hits.push(rid);
+                }
+            }
+            if hits.len() == 1 {
+                return Some((hits[0], axis_idx));
+            }
+            return None; // 0 or multiple — caller decides
+        }
+    }
+    None
+}
+
 // ── Reference resolution (returns cell_id instead of f64) ──────────────
 
 fn resolve_ref_to_id(
@@ -605,62 +705,21 @@ fn resolve_local_ref_to_id(
     let mut target_rid: Option<u32> = None;
     let mut target_axis: Option<usize> = None;
 
-    for (axis_idx, name_map) in sheet.name_to_rids.iter().enumerate() {
-        if Some(axis_idx) == period_axis { continue; }
-        if let Some(rids) = name_map.get(&name_id) {
-            if rids.len() == 1 {
-                target_rid = Some(rids[0]);
-                target_axis = Some(axis_idx);
-            } else if !rids.is_empty() {
-                target_rid = Some(disambiguate(model, sheet_idx, axis_idx, rids, coord, cref));
-                target_axis = Some(axis_idx);
-            }
-            break;
-        }
+    // Try chain-aware resolution first (handles [a][b][c]... by walking parent_id chain).
+    if let Some((rid, axis)) = resolve_chain_on_sheet(model, sheet_idx, name_id) {
+        target_rid = Some(rid);
+        target_axis = Some(axis);
     }
 
-    // Parent/child split on \x1f sentinel (set by parser for [parent][child])
+    // Fallback: plain unqualified ambiguous lookup (multiple matches → disambiguate by parent dim).
     if target_rid.is_none() {
         let name_str = model.interner.get_str(name_id).to_string();
-        if name_str.contains('\x1f') {
-            let parts: Vec<&str> = name_str.splitn(2, '\x1f').collect();
-            let child_lower = parts[1].trim().to_lowercase();
-            let parent_lower = parts[0].trim().to_lowercase();
-            let child_name = match model.interner.get_id(&child_lower) {
-                Some(id) => id,
-                None => return UNRESOLVED,
-            };
-            let parent_name = match model.interner.get_id(&parent_lower) {
-                Some(id) => id,
-                None => return UNRESOLVED,
-            };
-            let sheet = &model.sheets[sheet_idx];
+        if !name_str.contains('\x1f') {
             for (axis_idx, name_map) in sheet.name_to_rids.iter().enumerate() {
                 if Some(axis_idx) == period_axis { continue; }
-                if let Some(rids) = name_map.get(&child_name) {
-                    if rids.len() == 1 {
-                        target_rid = Some(rids[0]);
-                        target_axis = Some(axis_idx);
-                    } else if !rids.is_empty() {
-                        let mut filtered: Vec<u32> = Vec::new();
-                        for &rid in rids {
-                            if let Some(rec) = sheet.records.get(&rid) {
-                                if let Some(pid) = rec.parent_id {
-                                    if let Some(prec) = sheet.records.get(&pid) {
-                                        if prec.name_lower == parent_name {
-                                            filtered.push(rid);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if filtered.len() == 1 {
-                            target_rid = Some(filtered[0]);
-                        } else if !filtered.is_empty() {
-                            target_rid = Some(disambiguate(model, sheet_idx, axis_idx, &filtered, coord, cref));
-                        } else {
-                            target_rid = Some(disambiguate(model, sheet_idx, axis_idx, rids, coord, cref));
-                        }
+                if let Some(rids) = name_map.get(&name_id) {
+                    if rids.len() >= 1 {
+                        target_rid = Some(disambiguate(model, sheet_idx, axis_idx, rids, coord, cref));
                         target_axis = Some(axis_idx);
                     }
                     break;
@@ -704,56 +763,27 @@ fn resolve_cross_sheet_ref_to_id(
     let mut target_rid: Option<u32> = None;
     let mut target_axis: Option<usize> = None;
 
-    for (axis_idx, name_map) in target_sheet.name_to_rids.iter().enumerate() {
-        if Some(axis_idx) == target_sheet.period_axis { continue; }
-        if let Some(rids) = name_map.get(&name_id) {
-            if rids.len() == 1 {
-                target_rid = Some(rids[0]);
-                target_axis = Some(axis_idx);
-            } else if !rids.is_empty() {
-                target_rid = Some(rids[0]);
-                target_axis = Some(axis_idx);
-            }
-            break;
-        }
+    // Chain-aware resolution (single match after walking parent chain) —
+    // works for plain names (single match) AND multi-level [a][b][c] paths.
+    if let Some((rid, axis)) = resolve_chain_on_sheet(model, target_sheet_idx, name_id) {
+        target_rid = Some(rid);
+        target_axis = Some(axis);
     }
 
-    // Parent-qualified `[Sheet::parent][child]` — name interned as "parent\x1fchild".
-    // Mirrors the local resolver's handling: split on \x1f, look up child in the
-    // target sheet, and disambiguate by parent name_lower if multiple rids match.
+    // Fallback: plain unqualified ambiguous lookup → first rid (legacy behavior).
+    // With always-full-path import this branch should rarely trigger; remains
+    // as a safety net for hand-edited or legacy formulas.
     if target_rid.is_none() {
         let name_str = model.interner.get_str(name_id).to_string();
-        if name_str.contains('\x1f') {
-            let parts: Vec<&str> = name_str.splitn(2, '\x1f').collect();
-            let parent_lower = parts[0].trim().to_lowercase();
-            let child_lower = parts[1].trim().to_lowercase();
-            let child_name = model.interner.get_id(&child_lower);
-            let parent_name = model.interner.get_id(&parent_lower);
-            if let (Some(child_id), Some(parent_id)) = (child_name, parent_name) {
-                for (axis_idx, name_map) in target_sheet.name_to_rids.iter().enumerate() {
-                    if Some(axis_idx) == target_sheet.period_axis { continue; }
-                    if let Some(rids) = name_map.get(&child_id) {
-                        if rids.len() == 1 {
-                            target_rid = Some(rids[0]);
-                            target_axis = Some(axis_idx);
-                        } else if !rids.is_empty() {
-                            let mut filtered: Vec<u32> = Vec::new();
-                            for &rid in rids {
-                                if let Some(rec) = target_sheet.records.get(&rid) {
-                                    if let Some(pid) = rec.parent_id {
-                                        if let Some(prec) = target_sheet.records.get(&pid) {
-                                            if prec.name_lower == parent_id {
-                                                filtered.push(rid);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            target_rid = Some(if filtered.len() == 1 { filtered[0] } else { rids[0] });
-                            target_axis = Some(axis_idx);
-                        }
-                        break;
+        if !name_str.contains('\x1f') {
+            for (axis_idx, name_map) in target_sheet.name_to_rids.iter().enumerate() {
+                if Some(axis_idx) == target_sheet.period_axis { continue; }
+                if let Some(rids) = name_map.get(&name_id) {
+                    if !rids.is_empty() {
+                        target_rid = Some(rids[0]);
+                        target_axis = Some(axis_idx);
                     }
+                    break;
                 }
             }
         }

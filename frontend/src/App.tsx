@@ -27,6 +27,7 @@ import UndoOutlined from '@mui/icons-material/UndoOutlined'
 import ArrowDropDownOutlined from '@mui/icons-material/ArrowDropDownOutlined'
 import FormatListNumberedOutlined from '@mui/icons-material/FormatListNumberedOutlined'
 import DragIndicatorOutlined from '@mui/icons-material/DragIndicatorOutlined'
+import SearchOutlined from '@mui/icons-material/SearchOutlined'
 import type { TreeSelection } from './types'
 import LoginPage from './features/auth/LoginPage'
 import LeftPanel from './panels/LeftPanel'
@@ -113,6 +114,11 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
   const elapsedRef = useRef<ReturnType<typeof setInterval>>()
   const fileRef = useRef<HTMLInputElement>(null)
   const logRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  // model_id is emitted by the SSE stream early (right after the model row is
+  // INSERTed), so we can DELETE it if the user cancels mid-import.
+  const importedModelIdRef = useRef<string | null>(null)
+  const cancelledRef = useRef(false)
 
   // Q&A state
   const [question, setQuestion] = useState<ImportQuestion | null>(null)
@@ -135,8 +141,11 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
     setQuestion(null)
     elapsedRef.current = setInterval(() => setElapsed(t => t + 1), 1000)
     setProgress({ current: 0, total: 0 })
+    abortRef.current = new AbortController()
+    importedModelIdRef.current = null
+    cancelledRef.current = false
     try {
-      const result = await api.importExcelModelStream(file, modelName, (msg, data) => {
+      await api.importExcelModelStream(file, modelName, (msg, data) => {
         // Handle Q&A question events
         if (data?.type === 'question') {
           setQuestion({
@@ -149,6 +158,11 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
           })
           return
         }
+        // Capture model_id as soon as backend emits it (right after the
+        // models row is inserted), so cancel can clean it up.
+        if (data?.model_id && !importedModelIdRef.current) {
+          importedModelIdRef.current = data.model_id
+        }
         setLog(prev => [...prev, msg])
         setTimeout(() => logRef.current?.scrollTo(0, logRef.current.scrollHeight), 50)
         // Parse progress from messages like "(3/7)"
@@ -158,12 +172,33 @@ function ImportDialog({ open, onClose, onImported, initialFile }: {
           setDone(true)
           onImported(data.model_id)
         }
-      }, currentLang())
+      }, currentLang(), abortRef.current.signal)
     } catch (err) {
-      setLog(prev => [...prev, `[ERR]${t('import.error')}: ${(err as Error).message}`])
+      if (cancelledRef.current) {
+        setLog(prev => [...prev, `[WARN]${t('import.cancelled')}`])
+      } else {
+        setLog(prev => [...prev, `[ERR]${t('import.error')}: ${(err as Error).message}`])
+      }
     } finally {
       setLoading(false)
       clearInterval(elapsedRef.current)
+      abortRef.current = null
+    }
+  }
+
+  const handleCancel = async () => {
+    if (!loading) { handleClose(); return }
+    cancelledRef.current = true
+    abortRef.current?.abort()
+    setLog(prev => [...prev, `[WARN]${t('import.cancelling')}`])
+    const mid = importedModelIdRef.current
+    if (mid) {
+      try {
+        await api.deleteModel(mid)
+        setLog(prev => [...prev, `[OK]${t('import.cleanedUp')}`])
+      } catch (err) {
+        setLog(prev => [...prev, `[ERR]${t('import.cleanupFailed')}: ${(err as Error).message}`])
+      }
     }
   }
 
@@ -351,6 +386,9 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
   })
   useEffect(() => { localStorage.setItem('pebble_chatWidth', String(chatWidth)) }, [chatWidth])
   const [chatImportFile, setChatImportFile] = useState<File | null>(null)
+  // Live row-filter query for the pivot grid (substring match on indicator labels;
+  // ancestors of matching rows stay visible so the path remains readable).
+  const [searchQuery, setSearchQuery] = useState('')
   // ── Undo state ──
   const [undoSnack, setUndoSnack] = useState<string | null>(null)
   const gridRef = useRef<PivotGridAGHandle>(null)
@@ -552,6 +590,24 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
             </IconButton>
           </Tooltip>
           <SaveButton />
+
+          {/* Live search filter — substring match on indicator labels.
+              Matching rows + their ancestors stay visible so the path is readable. */}
+          {isSheetSelected && (
+            <TextField
+              size="small"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder={t('app.searchIndicators')}
+              InputProps={{
+                startAdornment: (
+                  <SearchOutlined sx={{ fontSize: 14, color: '#999', mr: 0.5 }} />
+                ),
+                sx: { fontSize: 12, height: 28, py: 0, '& input': { py: 0.25 } },
+              }}
+              sx={{ width: 200 }}
+            />
+          )}
 
           {/* Mode toggle */}
           <ToggleButtonGroup
@@ -786,7 +842,9 @@ function AppInner({ authUser, onLogout }: { authUser?: { id: string; username: s
                 currentUserId={currentUserId}
                 calcProgress={calcProgress}
                 mode={mode === 'formulas' ? 'formulas' : 'data'}
+                searchQuery={searchQuery}
                 onUndoStateChange={setHasUndo}
+                onSheetMissing={() => { setSelection(null); setRefreshKey(k => k + 1) }}
               />
             ) : (
               <div className="panel-center" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>

@@ -22,6 +22,18 @@ async def _find_first_leaf(db, analytic_id: str) -> str | None:
     return recs[0]["id"]
 
 
+async def _find_leaf_records(db, analytic_id: str) -> list[str]:
+    """All terminal (childless) records of an analytic, in sort order."""
+    recs = await db.execute_fetchall(
+        "SELECT id, parent_id FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+        (analytic_id,),
+    )
+    if not recs:
+        return []
+    parent_ids = {r["id"] for r in recs if any(c["parent_id"] == r["id"] for c in recs)}
+    return [r["id"] for r in recs if r["id"] not in parent_ids]
+
+
 async def _find_root_record(db, analytic_id: str) -> str | None:
     """Find the root (top-level parent) record of an analytic.
     If there's a single root with children, return it. Otherwise return first leaf."""
@@ -173,24 +185,35 @@ async def add_sheet_analytic(sheet_id: str, body: SheetAnalyticIn):
         (said, sheet_id, body.analytic_id, body.sort_order, int(body.is_fixed), body.fixed_record_id),
     )
 
-    # Migrate existing cell data: append first leaf record of new analytic to coord_keys.
-    # Values AND formulas move to the first leaf; other leaves start empty.
-    # Per-cell formulas (e.g. [выдачи]/[партнёры]) keep working because they
-    # reference indicators by name — same-context resolution with the new dimension.
-    # HEAD = SUM(leaves) is computed by the formula engine's consolidation phase.
-    first_leaf = await _find_first_leaf(db, body.analytic_id)
-    if first_leaf:
+    # Migrate existing cell data: broadcast every cell across ALL leaf records
+    # of the new analytic. The original (single-dim) value is replicated to
+    # every terminal combination so each leaf×leaf comparison still matches
+    # the source Excel cell-for-cell. HEAD/parent records aggregate via the
+    # formula engine's consolidation phase.
+    leaf_ids = await _find_leaf_records(db, body.analytic_id)
+    if leaf_ids:
         from backend.coord_key import intern as _ck_intern
-        first_leaf_seq = str(await _ck_intern(db, first_leaf))
+        leaf_seqs = [str(await _ck_intern(db, lid)) for lid in leaf_ids]
         cells = await db.execute_fetchall(
-            "SELECT id, coord_key FROM cell_data WHERE sheet_id = ?", (sheet_id,)
+            "SELECT id, coord_key, value, rule, formula FROM cell_data WHERE sheet_id = ?",
+            (sheet_id,),
         )
+        # First leaf reuses the existing row (just appends seq); the rest are
+        # cloned with fresh ids and the same value/rule/formula.
+        primary_seq = leaf_seqs[0]
+        extra_seqs = leaf_seqs[1:]
         for c in cells:
-            new_key = c["coord_key"] + "|" + first_leaf_seq
+            base_key = c["coord_key"]
             await db.execute(
                 "UPDATE cell_data SET coord_key = ? WHERE id = ?",
-                (new_key, c["id"])
+                (base_key + "|" + primary_seq, c["id"]),
             )
+            for seq in extra_seqs:
+                await db.execute(
+                    "INSERT INTO cell_data (id, sheet_id, coord_key, value, rule, formula) VALUES (?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), sheet_id, base_key + "|" + seq,
+                     c["value"], c["rule"], c["formula"]),
+                )
 
     # Invalidate engine cache — model structure changed (new dimension)
     model_row = await db.execute_fetchall(

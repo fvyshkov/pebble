@@ -138,8 +138,14 @@ interface Props {
   calcProgress?: CalcProgress | null
   /** 'data' — values; 'formulas' — show rule label or formula text (admin). */
   mode?: 'data' | 'formulas'
+  /** Live substring filter for indicator labels. Matching rows + their
+   * ancestors stay visible; non-matching rows are hidden. Empty = no filter. */
+  searchQuery?: string
   /** Called when undo availability changes (true = has history to undo). */
   onUndoStateChange?: (hasUndo: boolean) => void
+  /** Called when the sheet no longer exists (e.g. its model was deleted) so
+   * the parent can clear stale selection and stop re-firing load-bundle. */
+  onSheetMissing?: () => void
 }
 
 /** Methods exposed to parent via ref. */
@@ -333,7 +339,7 @@ function CalcProgressChip({ calcProgress, localRunning }: {
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ sheetId, modelId, currentUserId, calcProgress, mode = 'data', onUndoStateChange }, ref) {
+const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ sheetId, modelId, currentUserId, calcProgress, mode = 'data', searchQuery = '', onUndoStateChange, onSheetMissing }, ref) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -1000,8 +1006,11 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           if (c.formula) formulaMapRef.current[c.coord_key] = c.formula
         }
       }
-      // Populate values for top-level rows from materialized sums
+      // Populate values for top-level rows from materialized sums.
+      // Children stay with p_ undefined so onRowGroupOpened detects them as
+      // not-yet-loaded and triggers the lazy fetch on first expansion.
       for (const row of rows) {
+        if (row.path.length !== 1) continue
         for (const leafKey of allLeafKeys) {
           const parts = row[`__parts_${leafKey}`] as string[] | undefined
           if (!parts || parts.length < 2) continue
@@ -1082,7 +1091,13 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       setSheetName(`${rowAIds.length} ${t('grid.analyticsCount')} \u00d7 ${colLeaves.length} ${t('grid.periodsCount')}`)
       setLoading(false)
     } catch (e: any) {
-      setError(e?.message || String(e))
+      const msg = e?.message || String(e)
+      // Sheet was deleted (e.g. its model was wiped). Tell the parent to clear
+      // the stale selection so we don't keep retrying load-bundle.
+      if (msg.startsWith('404')) {
+        onSheetMissing?.()
+      }
+      setError(msg)
       setLoading(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1161,18 +1176,21 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
     },
   }), [sheetId, currentUserId, pinned, colLevelToggles, load])
 
-  // In formulas mode, resolve indicator-rule formulas for all known coord keys
-  // (so HEAD cells driven by consolidation/scoped rules show their formula +
-  // source badge in the grid instead of a generic "Σ сумма" label).
+  // Resolve indicator-rule formulas for all known coord keys. Required for
+  //   - formula mode: cells display the resolved formula text instead of "Σ"
+  //   - data mode: hover tooltip uses the same source of truth (so a manual
+  //     literal on a parent indicator shows "ввод", not the misleading "ƒ SUM")
   useEffect(() => {
-    if (!sheetId || mode !== 'formulas') return
+    if (!sheetId) return
     const keys = Object.keys(cellMapRef.current)
     if (keys.length === 0) return
     let cancelled = false
     api.getResolvedFormulas(sheetId, keys).then(res => {
       if (cancelled) return
       const m: Record<string, { formula: string; source: string; kind: string }> = {}
-      for (const r of res) if (r.formula) m[r.coord_key] = { formula: r.formula, source: r.source, kind: r.kind }
+      // Keep every entry — cell-manual / cell-empty have empty formulas but
+      // still need to override the default-sum fallback on parent rows.
+      for (const r of res) m[r.coord_key] = { formula: r.formula, source: r.source, kind: r.kind }
       resolvedFormulaMapRef.current = m
       gridApiRef.current?.refreshCells({ force: true })
     }).catch(() => {})
@@ -1551,12 +1569,11 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       editable: (p: any) => {
         if (locked) return false // sheet is locked — no edits
         if (mode === 'formulas') return false // read-only in formula view
-        if (!p.data || !p.data.isLeaf) return false // group rows: read-only
-        const rule: CellRule = p.data[`__rule_${periodRecId}`] || 'manual'
-        // Только `manual` — редактируемо. Клетки с формулой редактируются
-        // через кнопку ⋮ → FormulaEditor (а не путём ввода значения), чтобы
-        // случайный ввод не затирал формулу. `empty` / `sum_children` —
-        // read-only.
+        if (!p.data) return false
+        const rule: CellRule = p.data[`__rule_${periodRecId}`] || (p.data.isLeaf ? 'manual' : 'sum_children')
+        // `manual` редактируемо ВСЕГДА (включая parent-rows: пользователь
+        // мог явно задать литерал на индикаторе с детьми — Excel D9=15).
+        // Формулы редактируются через ⋮ → FormulaEditor, `empty` / `sum_children` — read-only.
         return rule === 'manual'
       },
       valueFormatter: (p: any) => {
@@ -1566,6 +1583,10 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           // Formula mode: show resolved indicator-rule formula (single source of truth).
           const coordKey: string | undefined = p.data?.[`__coord_${periodRecId}`]
           const resolved = coordKey ? resolvedFormulaMapRef.current[coordKey] : undefined
+          // Explicit manual / empty per-cell entries: show the matching label
+          // even on parent-indicator rows (don't fall through to default-sum).
+          if (resolved?.source === 'cell-manual') return t('grid.manualLabel')
+          if (resolved?.source === 'cell-empty') return t('grid.emptyLabel')
           if (resolved?.formula) {
             return resolved.formula
           }
@@ -1636,7 +1657,10 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           s.lineHeight = '1.4'
           s.overflow = 'visible'
           s.paddingTop = '4px'
-          if (rule === 'formula') s.color = '#1565c0'
+          // Rule wins over row level: explicit `manual` on a parent row
+          // (e.g. Excel D9=15) must look manual, not green sum_children.
+          if (rule === 'manual') s.color = '#666'
+          else if (rule === 'formula') s.color = '#1565c0'
           else if (rule === 'sum_children' || !isLeaf) s.color = '#2e7d32'
           else if (rule === 'empty') s.color = '#bbb'
           else s.color = '#666'
@@ -1647,17 +1671,23 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           s.color = '#bbb'
           return s
         }
-        if (!isLeaf || rule === 'sum_children') {
-          s.background = '#fafafa'
-          s.color = '#2e7d32'
-          s.fontWeight = 500
+        // Rule wins over row level: parent-row cells with explicit
+        // rule='manual' (e.g. Excel D9=15 on partners) must look manual,
+        // not green sum_children.
+        if (rule === 'manual') {
+          s.background = locked ? '#fce4ec' : '#fdf8e8'
+          if (locked) s.color = '#880e4f'
         } else if (rule === 'formula') {
           // White background for all formula cells (including zero values);
           // blue text is enough to distinguish them from manual input.
           s.background = '#fff'
           s.color = '#1565c0'
+        } else if (!isLeaf || rule === 'sum_children') {
+          s.background = '#fafafa'
+          s.color = '#2e7d32'
+          s.fontWeight = 500
         } else {
-          s.background = locked ? '#fce4ec' : '#fdf8e8' // locked: light pink, normal: beige
+          s.background = locked ? '#fce4ec' : '#fdf8e8'
           if (locked) s.color = '#880e4f'
         }
         const num = Number(p.value)
@@ -1671,9 +1701,16 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         const isLeaf = !!p.data?.isLeaf
         // Resolved indicator rule formula (single source of truth)
         const resolved = resolvedFormulaMapRef.current[coordKey]
+        if (resolved?.source === 'cell-manual') return t('grid.manualLabel')
+        if (resolved?.source === 'cell-empty') return t('grid.emptyLabel')
         if (resolved?.formula) return `\u0192 ${resolved.formula}`
         // Consolidating cells (group indicator or period parent)
         if (!isLeaf || rule === 'sum_children') return t('grid.sumLabel')
+        // Fallback by per-cell rule when resolved-formulas didn't supply an
+        // entry (sheets without persisted indicator rules) — every cell still
+        // carries a rule, so the tooltip should never be empty.
+        if (rule === 'manual') return t('grid.manualLabel')
+        if (rule === 'empty') return t('grid.emptyLabel')
         return null
       },
       tooltipComponent: FormulaTooltip,
@@ -1782,6 +1819,8 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           const key = buildSumKey(p.data?.recordIds)
           if (key) {
             const resolved = resolvedFormulaMapRef.current[key]
+            if (resolved?.source === 'cell-manual') return t('grid.manualLabel')
+            if (resolved?.source === 'cell-empty') return t('grid.emptyLabel')
             if (resolved?.formula) return resolved.formula
           }
           return t('grid.sumLabel')
@@ -1803,6 +1842,8 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
         const key = buildSumKey(p.data?.recordIds)
         if (!key) return null
         const resolved = resolvedFormulaMapRef.current[key]
+        if (resolved?.source === 'cell-manual') return t('grid.manualLabel')
+        if (resolved?.source === 'cell-empty') return t('grid.emptyLabel')
         if (resolved?.formula) return `\u0192 ${resolved.formula}`
         return t('grid.sumLabel')
       },
@@ -1827,6 +1868,49 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
   }), [])
 
   const getDataPath = useCallback((data: RowDatum) => data.path, [])
+
+  // ── Live substring filter (toolbar search) ──
+  // Build a set of `path.join('|')` strings that should remain visible:
+  // every row whose label matches the query, plus all of their ancestors.
+  // Re-derived from rowData + searchQuery; cheap because rowData is already
+  // hierarchical and labels are a single field per row.
+  const filteredPathsRef = useRef<Set<string> | null>(null)
+  const filteredPaths = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return null
+    const keep = new Set<string>()
+    for (const row of rowData) {
+      const lbl = (row.label || '').toLowerCase()
+      if (!lbl.includes(q)) continue
+      // include this row and every ancestor path (1..N-1 prefix)
+      for (let i = 1; i <= row.path.length; i++) {
+        keep.add(row.path.slice(0, i).join('|'))
+      }
+    }
+    return keep
+  }, [rowData, searchQuery])
+  filteredPathsRef.current = filteredPaths
+
+  const isExternalFilterPresent = useCallback(
+    () => filteredPathsRef.current !== null,
+    [],
+  )
+  const doesExternalFilterPass = useCallback((node: any) => {
+    const set = filteredPathsRef.current
+    if (!set) return true
+    const p = node.data?.path as string[] | undefined
+    if (!p) return false
+    return set.has(p.join('|'))
+  }, [])
+
+  // Tell AG Grid to re-evaluate filtering whenever the query changes, and
+  // expand all matching paths so the user sees the result immediately.
+  useEffect(() => {
+    const api = gridApiRef.current
+    if (!api) return
+    api.onFilterChanged()
+    if (filteredPaths) api.expandAll()
+  }, [filteredPaths])
 
   const autoGroupColumnDef = useMemo<ColDef>(() => ({
     headerName: t('grid.analytic'),
@@ -2283,10 +2367,15 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       const parentPath = leafPath.slice(0, depth)
       const parent = byPath[parentPath.join('|')]
       if (!parent || parent.isLeaf) continue
-      // Always propagate SUM upward for group rows as immediate feedback.
-      // Server recalc will correct with proper formula values (weighted avg, etc.).
+      // Skip parents whose value doesn't depend on summing children:
+      //   - `empty` — fixed empty cell
+      //   - `manual` — literal entered on the parent itself (e.g. Excel D9=15
+      //     on «общее количество партнеров»)
+      //   - `formula` — parent's own formula (e.g. +1 from previous period)
+      // Only `sum_children` (or unset → falls back to sum) propagates upward.
+      // Server recalc updates these via refreshAndFlashParents.
       const rule = parent[`__rule_${leafId}`]
-      if (rule === 'empty') continue
+      if (rule === 'empty' || rule === 'manual' || rule === 'formula') continue
       const kids = kidsByPath[parentPath.join('|')] || []
       let s = 0, has = false
       for (const k of kids) {
@@ -2611,6 +2700,8 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
           onCellValueChanged={onCellValueChanged}
           onCellKeyDown={onCellKeyDown}
           onGridReady={onGridReady}
+          isExternalFilterPresent={isExternalFilterPresent}
+          doesExternalFilterPass={doesExternalFilterPass}
           onRowGroupOpened={onRowGroupOpened}
           onColumnResized={e => { if (e.finished) captureColumnState() }}
           onColumnMoved={e => { if (e.finished) captureColumnState() }}

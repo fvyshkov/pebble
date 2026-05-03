@@ -317,8 +317,11 @@ class ImportKB:
             return False
 
         elif rtype == "sheet_title_match":
-            sheet_name = ctx.get("sheet_name", "")
-            return sheet_name.lower() in text_lower or text_lower in sheet_name.lower()
+            sheet_name = ctx.get("sheet_name", "").strip().lower()
+            # Exact-match only. Substring-match historically swallowed real
+            # indicators whose name happened to be a substring of the sheet
+            # name (e.g. "OPEX" on a sheet called "OPEX+CAPEX").
+            return text_lower == sheet_name or text_lower == sheet_name.replace(" ", "")
 
         elif rtype == "formatting":
             cond = rule.get("condition", "")
@@ -337,50 +340,95 @@ class ImportKB:
 # ── Sheet parsing (from openpyxl worksheet, not from text) ────────────────
 
 def extract_rows_from_worksheet(ws, sheet_name: str, max_rows: int = 500) -> list[SheetRow]:
-    """Extract structured row data directly from openpyxl worksheet."""
-    from openpyxl.utils import get_column_letter
+    """Extract structured row data directly from openpyxl worksheet.
+
+    Detects 2+ label columns (e.g. col A=Product, B=Section, C=Indicator) and
+    emits one synthetic SheetRow per non-empty label column whose value
+    differs from the last emitted value at that column. Each synthetic row
+    gets virtual indent = col_idx_in_label_cols * 10 + within_col_indent so
+    the single-column hierarchy analyzer downstream builds the correct tree.
+    Single-column sheets fall back to the historical 1-row-per-Excel-row path.
+    """
     from datetime import datetime as _dt
 
     max_col = min(ws.max_column or 1, 200)
     max_row = min(ws.max_row or 1, max_rows)
-    rows: list[SheetRow] = []
 
-    # Detect label column (col with most non-empty text values)
-    col_scores = {}
-    for c in range(1, min(6, max_col + 1)):
-        count = 0
-        for r in range(1, min(max_row + 1, 100)):
-            v = ws.cell(r, c).value
-            if v is not None and not isinstance(v, _dt) and str(v).strip():
-                count += 1
-        col_scores[c] = count
-    label_col = max(col_scores, key=col_scores.get) if col_scores else 1
+    # Detect label columns among cols 1..4. Requires text content + bold
+    # formatting (unit-of-measure columns like "сом"/"шт" rarely use bold).
+    col_text: dict[int, int] = {}
+    col_bold: dict[int, int] = {}
+    col_avg_len: dict[int, float] = {}
+    for c in range(1, min(5, max_col + 1)):
+        text = bold = total_len = 0
+        for r in range(1, min(max_row + 1, 200)):
+            cell = ws.cell(r, c)
+            v = cell.value
+            if v is None or isinstance(v, _dt):
+                continue
+            s = str(v).strip()
+            if not s:
+                continue
+            text += 1
+            total_len += len(s)
+            if cell.font and cell.font.bold:
+                bold += 1
+        col_text[c] = text
+        col_bold[c] = bold
+        col_avg_len[c] = (total_len / text) if text else 0
+    if not col_text:
+        return []
+
+    top_text = max(col_text.values())
+    # A column qualifies as a label column when it has ≥5 text values, at
+    # least ~25% of the densest column's text count, and either ≥3 bold
+    # cells (typical for hierarchy headers) or avg text length ≥10 (rules
+    # out short unit tokens).
+    label_cols = [c for c, n in sorted(col_text.items())
+                  if n >= 5 and n >= max(5, top_text // 4)
+                  and (col_bold[c] >= 3 or col_avg_len[c] >= 10)]
+    if not label_cols:
+        label_cols = [max(col_text, key=col_text.get)]
+    multi = len(label_cols) >= 2
+    primary_label_col = label_cols[-1] if multi else label_cols[0]
+
+    rows: list[SheetRow] = []
+    last_emitted: dict[int, str | None] = {c: None for c in label_cols}
+
+    from backend.routers.import_excel import _get_cell_bg_color
 
     for r in range(1, max_row + 1):
-        # Get label from detected column (and fallback to other cols)
-        name = ""
+        # Read each label column's (value, is_bold, within-col indent)
+        col_data: dict[int, tuple[str, bool, int] | None] = {}
+        for c in label_cols:
+            cell = ws.cell(r, c)
+            v = cell.value
+            if v is None or isinstance(v, _dt):
+                col_data[c] = None
+                continue
+            s = str(v).strip()
+            if not s or len(s) >= 200:
+                col_data[c] = None
+                continue
+            is_bold_c = bool(cell.font and cell.font.bold)
+            indent_c = int(cell.alignment.indent) if cell.alignment and cell.alignment.indent else 0
+            col_data[c] = (s, is_bold_c, indent_c)
+
+        outline = ws.row_dimensions[r].outline_level if hasattr(ws.row_dimensions[r], 'outline_level') else 0
+
+        # Detect data start column for this row: first col after the deepest
+        # non-empty label column. Falls back to col 4 (the historical default).
+        data_start = max(label_cols) + 1
         unit = ""
-        for c in range(1, min(6, max_col + 1)):
+        # Look for unit between deepest label col and data area
+        for c in range(data_start, min(data_start + 3, max_col + 1)):
             v = ws.cell(r, c).value
             if v is not None and not isinstance(v, _dt):
                 s = str(v).strip()
-                if s and len(s) < 200:
-                    if not name:
-                        name = s
-                    elif not unit and c != label_col:
-                        # Second non-empty column might be unit
-                        if len(s) < 20:
-                            unit = s
-
-        if not name:
-            continue
-
-        cell_a = ws.cell(r, label_col)
-        is_bold = bool(cell_a.font and cell_a.font.bold)
-        indent = int(cell_a.alignment.indent) if cell_a.alignment and cell_a.alignment.indent else 0
-        outline = ws.row_dimensions[r].outline_level if hasattr(ws.row_dimensions[r], 'outline_level') else 0
-        if indent == 0 and outline > 0:
-            indent = outline
+                if s and len(s) < 30 and not s.replace('.', '').replace('-', '').isdigit():
+                    unit = s
+                    data_start = c + 1
+                    break
 
         has_data = False
         has_formula = False
@@ -389,14 +437,12 @@ def extract_rows_from_worksheet(ws, sheet_name: str, max_rows: int = 500) -> lis
         formula1 = ""
         formula2 = ""
 
-        for c in range(4, min(15, max_col + 1)):
+        for c in range(max(data_start, 4), min(15, max_col + 1)):
             cv = ws.cell(r, c).value
             if cv is not None:
                 has_data = True
                 if isinstance(cv, str) and cv.startswith("="):
                     has_formula = True
-                # Check bg color
-                from backend.routers.import_excel import _get_cell_bg_color
                 clr = _get_cell_bg_color(ws.cell(r, c))
                 if clr:
                     is_input = True
@@ -404,7 +450,7 @@ def extract_rows_from_worksheet(ws, sheet_name: str, max_rows: int = 500) -> lis
                 break
 
         if has_formula:
-            for c in range(4, min(max_col + 1, 50)):
+            for c in range(max(data_start, 4), min(max_col + 1, 50)):
                 cv = ws.cell(r, c).value
                 if cv and isinstance(cv, str) and cv.startswith("="):
                     if not formula1:
@@ -415,14 +461,94 @@ def extract_rows_from_worksheet(ws, sheet_name: str, max_rows: int = 500) -> lis
                 elif cv is not None and not formula1:
                     formula1 = str(cv)[:30]
 
-        rows.append(SheetRow(
-            row_num=r, name=name, unit=unit,
-            is_bold=is_bold, indent=indent, outline_level=outline,
-            has_data=has_data, has_formula=has_formula,
-            is_input=is_input, bg_color=bg_color,
-            formula1=formula1, formula2=formula2,
-            label_col=label_col,
-        ))
+        if not multi:
+            # Single-column path: take name from primary_label_col, fallback to
+            # any non-empty col 1..4 (preserves historical behavior).
+            name = ""
+            cd = col_data.get(primary_label_col)
+            if cd:
+                name = cd[0]
+            if not name:
+                for c in range(1, min(5, max_col + 1)):
+                    v = ws.cell(r, c).value
+                    if v is not None and not isinstance(v, _dt):
+                        s = str(v).strip()
+                        if s and len(s) < 200:
+                            name = s
+                            break
+            if not name:
+                continue
+
+            cell_a = ws.cell(r, primary_label_col)
+            is_bold = bool(cell_a.font and cell_a.font.bold)
+            indent = int(cell_a.alignment.indent) if cell_a.alignment and cell_a.alignment.indent else 0
+            if indent == 0 and outline > 0:
+                indent = outline
+
+            rows.append(SheetRow(
+                row_num=r, name=name, unit=unit,
+                is_bold=is_bold, indent=indent, outline_level=outline,
+                has_data=has_data, has_formula=has_formula,
+                is_input=is_input, bg_color=bg_color,
+                formula1=formula1, formula2=formula2,
+                label_col=primary_label_col,
+            ))
+            continue
+
+        # Multi-column path: emit synthetic rows for changed label columns.
+        # Find the leftmost column whose non-empty value differs from last
+        # emitted value at that column.
+        reset_from: int | None = None
+        for idx, c in enumerate(label_cols):
+            cd = col_data[c]
+            if cd is None:
+                continue
+            if cd[0] != last_emitted[c]:
+                reset_from = idx
+                break
+
+        if reset_from is None:
+            continue
+
+        # Reset memory for cols deeper than reset_from (their context is gone)
+        for idx in range(reset_from + 1, len(label_cols)):
+            last_emitted[label_cols[idx]] = None
+
+        # Collect non-empty cols from reset_from..end as synthetic rows
+        emit_list: list[tuple[int, int, str, bool, int]] = []  # (idx, col, name, is_bold, indent)
+        for idx in range(reset_from, len(label_cols)):
+            c = label_cols[idx]
+            cd = col_data[c]
+            if cd is None:
+                continue
+            emit_list.append((idx, c, cd[0], cd[1], cd[2]))
+
+        if not emit_list:
+            continue
+
+        leaf_idx = emit_list[-1][0]
+        for emit_pos, (idx, c, s, is_bold_c, indent_c) in enumerate(emit_list):
+            is_leaf = (idx == leaf_idx)
+            virtual_indent = idx * 10 + (indent_c if is_leaf else 0)
+            # Outer-level synthetic rows always treated as bold (they're
+            # categorical headers like "Product" / "Section"). The deepest
+            # row keeps its real bold flag so the analyzer can build sub-
+            # hierarchy from bold-vs-not-bold within that column.
+            effective_bold = is_bold_c if is_leaf else True
+            rows.append(SheetRow(
+                row_num=r, name=s,
+                unit=unit if is_leaf else "",
+                is_bold=effective_bold, indent=virtual_indent,
+                outline_level=outline if is_leaf else 0,
+                has_data=has_data if is_leaf else False,
+                has_formula=has_formula if is_leaf else False,
+                is_input=is_input if is_leaf else False,
+                bg_color=bg_color if is_leaf else None,
+                formula1=formula1 if is_leaf else "",
+                formula2=formula2 if is_leaf else "",
+                label_col=c,
+            ))
+            last_emitted[c] = s
 
     return rows
 
@@ -573,28 +699,22 @@ def analyze_sheet_with_kb(kb: ImportKB, rows: list[SheetRow],
                 root_nodes.append(node)
             continue
 
-        # Normal hierarchy logic
-        if cls["is_group"] and row.is_bold and row.indent == 0:
-            # Bold root-level group — always goes to root
-            root_nodes.append(node)
-            stack = [(0, node)]
-        elif effective_indent == 0 and not cls["is_currency_child"]:
-            # Root-level item
-            if stack and stack[-1][1].is_group and not row.is_bold:
-                # Non-bold item after a bold group at same indent — might be child
-                # Check: if there's a current group on stack at indent 0, add as child
-                parent_indent, parent_node = stack[-1]
-                if parent_indent == 0 and parent_node.is_group:
-                    parent_node.children.append(node)
-                    if cls["is_group"]:
-                        stack.append((1, node))
-                    continue
-            root_nodes.append(node)
-            stack = [(0, node)]
-        else:
-            # Indented item — find parent
-            while stack and stack[-1][0] >= effective_indent:
+        # Normal hierarchy logic. Uniform across all indent levels: pop
+        # strictly-deeper frames, then check whether top of stack is a bold
+        # group at the same indent we should attach to (vs. a sibling to pop).
+        while stack and stack[-1][0] > effective_indent:
+            stack.pop()
+        attached = False
+        if stack and stack[-1][0] == effective_indent:
+            top_indent, top_node = stack[-1]
+            if top_node.is_group and not row.is_bold:
+                top_node.children.append(node)
+                if cls["is_group"]:
+                    stack.append((effective_indent + 1, node))
+                attached = True
+            else:
                 stack.pop()
+        if not attached:
             if stack:
                 parent_indent, parent_node = stack[-1]
                 parent_node.is_group = True

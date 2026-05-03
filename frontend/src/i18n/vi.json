@@ -21,6 +21,7 @@
     "showChat": "Trợ lý AI (⌘J)",
     "logout": "Đăng xuất",
     "selectSheet": "Chọn trang tính để xem dữ liệu",
+    "searchIndicators": "Tìm chỉ số...",
     "deleteAllTitle": "Xóa tất cả mô hình?",
     "deleteAllText": "Tất cả mô hình, trang tính và dữ liệu sẽ bị xóa vĩnh viễn.",
     "cancel": "Hủy",
@@ -160,7 +161,9 @@
     "deleteRule": "Xóa quy tắc",
     "normalCell": "ô thường",
     "normalCellHint": "Cơ sở cho ô lá (tất cả trục không chính là lá).",
-    "any": "bất kỳ"
+    "any": "bất kỳ",
+    "perCellFormulas": "công thức theo ô",
+    "perCellFormulasHint": "Các ô của chỉ số này có công thức khác nhau. Mở ô cụ thể để xem công thức của nó."
   },
   "analytic": {
     "periods": "Kỳ",

@@ -244,13 +244,14 @@ export const importExcelModelStream = (
   file: File, modelName: string,
   onMessage: (msg: string, data?: any) => void,
   lang?: string,
+  signal?: AbortSignal,
 ): Promise<any> => {
   const fd = new FormData()
   fd.append('file', file)
   fd.append('model_name', modelName)
   if (lang) fd.append('lang', lang)
   return new Promise((resolve, reject) => {
-    fetch(`${BASE}/import/excel-stream`, { method: 'POST', body: fd })
+    fetch(`${BASE}/import/excel-stream`, { method: 'POST', body: fd, signal })
       .then(async res => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
         const reader = res.body!.getReader()

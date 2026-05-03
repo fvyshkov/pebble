@@ -97,6 +97,24 @@ def load_pebble(model_id: str) -> dict:
         if not period_aid or not main_aid:
             continue
 
+        # Extra analytics (Подразделения, Версии, etc) — when the user adds a
+        # new analytic, sheets.py:_find_first_leaf migrates existing cell data
+        # to (..., first_leaf_seq). Replicate that lookup here to project the
+        # comparison onto the same terminal combination.
+        extra_aids = [a for a in ordered_aids if a != period_aid and a != main_aid]
+        first_leaf_seq_for: dict[str, str] = {}
+        for aid in extra_aids:
+            recs = db.execute(
+                "SELECT id, parent_id, seq_id FROM analytic_records WHERE analytic_id = ? ORDER BY sort_order",
+                (aid,),
+            ).fetchall()
+            if not recs:
+                continue
+            parent_ids = {r["id"] for r in recs if any(c["parent_id"] == r["id"] for c in recs)}
+            leaf = next((r for r in recs if r["id"] not in parent_ids), recs[0])
+            if leaf["seq_id"] is not None:
+                first_leaf_seq_for[aid] = str(leaf["seq_id"])
+
         # Period uuid → period_key
         period_keys = {}
         for r in db.execute(
@@ -117,28 +135,87 @@ def load_pebble(model_id: str) -> dict:
             n = json.loads(r["data_json"]).get("name", "")
             ind_meta[r["id"]] = (r["excel_row"], n, r["parent_id"])
 
+        # parent_uuid → list[child_uuid] (only indicators with excel_row)
+        children_of: dict[str, list[str]] = {}
+        for uid, (_, _, par) in ind_meta.items():
+            if par:
+                children_of.setdefault(par, []).append(uid)
+
         cells = db.execute(
             "SELECT coord_key, value, rule FROM cell_data WHERE sheet_id = ?",
             (sid,),
         ).fetchall()
 
-        recs = []
+        # First pass: index existing cells by (period_uuid, ind_uuid).
+        # Filter to cells whose extra-analytic positions match each analytic's
+        # first leaf — that's where add_sheet_analytic migrated the original
+        # value to.
+        cell_by_pk_ind: dict[tuple[str, str], tuple[float | None, str]] = {}
         for c in cells:
-            parts = [seq_to_uuid.get(p, p) for p in c["coord_key"].split("|")]
-            if len(parts) != len(ordered_aids):
+            raw_parts = c["coord_key"].split("|")
+            if len(raw_parts) != len(ordered_aids):
                 continue
-            period_uuid = None
-            ind_uuid = None
+            skip = False
+            period_uuid = ind_uuid = None
             for i, aid in enumerate(ordered_aids):
+                raw = raw_parts[i]
                 if aid == period_aid:
-                    period_uuid = parts[i]
+                    period_uuid = seq_to_uuid.get(raw, raw)
                 elif aid == main_aid:
-                    ind_uuid = parts[i]
+                    ind_uuid = seq_to_uuid.get(raw, raw)
+                else:
+                    expected = first_leaf_seq_for.get(aid)
+                    if expected is not None and raw != expected:
+                        skip = True
+                        break
+            if skip or not period_uuid or not ind_uuid:
+                continue
+            try:
+                v = float(c["value"]) if c["value"] not in ("", None) else None
+            except (ValueError, TypeError):
+                v = None
+            cell_by_pk_ind[(period_uuid, ind_uuid)] = (v, c["rule"] or "")
+
+        # Compute sum_children aggregates for parents that have no persisted cell.
+        # Mirrors backend/routers/cells.py _materialize_sums semantics: for each
+        # period, sum descendant leaves into ancestor parents that aren't already
+        # set. (sum_children rows are deleted at recalc — the engine recomputes
+        # them on demand, so they may be absent from cell_data even when the UI
+        # shows a value.)
+        all_inds = list(ind_meta.keys())
+        for period_uuid in period_keys:
+            # Bottom-up walk: for each indicator, if no cell, sum children
+            # Process leaves first by sorting by depth descending
+            def depth(uid):
+                d = 0
+                cur = ind_meta.get(uid, (None, None, None))[2]
+                while cur and d < 50:
+                    d += 1
+                    cur = ind_meta.get(cur, (None, None, None))[2]
+                return d
+            for uid in sorted(all_inds, key=depth, reverse=True):
+                if (period_uuid, uid) in cell_by_pk_ind:
+                    continue
+                kids = children_of.get(uid, [])
+                if not kids:
+                    continue
+                total = 0.0
+                any_kid = False
+                for k in kids:
+                    pv = cell_by_pk_ind.get((period_uuid, k))
+                    if pv and pv[0] is not None:
+                        total += pv[0]
+                        any_kid = True
+                if any_kid:
+                    cell_by_pk_ind[(period_uuid, uid)] = (total, "sum_children")
+
+        recs = []
+        for (period_uuid, ind_uuid), (v, rule) in cell_by_pk_ind.items():
             pk = period_keys.get(period_uuid)
             meta = ind_meta.get(ind_uuid)
             if not pk or not meta or meta[0] is None:
                 continue
-            recs.append((meta[0], pk, c["value"], c["rule"], "", meta[1]))
+            recs.append((meta[0], pk, v, rule, "", meta[1]))
         out[sname] = recs
 
     db.close()
@@ -212,18 +289,22 @@ def main():
             pmap[(excel_row, pk)] = (pv, rule or "", "", ind_name)
             ind_names_by_row.setdefault(excel_row, ind_name)
 
-        # Build the row range from Pebble's known excel_rows for this sheet
-        pebble_rows = sorted({r for (r, _) in pmap.keys()})
-        if not pebble_rows:
-            per_sheet[psname] = (0, 0)
-            mismatches[psname] = []
-            continue
-
         s_total = s_matched = 0
         sh_mis: list = []
 
-        for pk, ecol in period_cols.items():
-            for excel_row in pebble_rows:
+        # Iterate over EXCEL as the source of truth: every Excel row that has a
+        # text label in cols 1-3 (= an indicator row) and a numeric value in any
+        # period column must have a matching Pebble cell. If the row has no
+        # corresponding Pebble indicator at all, the cell is MISSING_IND. If the
+        # indicator exists but no cell, it's EMPTY.
+        max_row = ws.max_row or 200
+        for excel_row in range(2, max_row + 1):
+            label_cells = [ws.cell(excel_row, c).value for c in (1, 2, 3)]
+            label = next((str(v).strip() for v in label_cells
+                          if isinstance(v, str) and v.strip()), "")
+            if not label:
+                continue
+            for pk, ecol in period_cols.items():
                 excel_val = ws.cell(excel_row, ecol).value
                 if not isinstance(excel_val, (int, float)):
                     continue
@@ -231,8 +312,12 @@ def main():
                 pv_tuple = pmap.get((excel_row, pk))
                 if pv_tuple is None:
                     pebble_val = None
-                    rule = "MISSING"
-                    ind_name = ind_names_by_row.get(excel_row, "?")
+                    if excel_row in ind_names_by_row:
+                        rule = "EMPTY"
+                        ind_name = ind_names_by_row[excel_row]
+                    else:
+                        rule = "MISSING_IND"
+                        ind_name = label
                 else:
                     pebble_val, rule, _, ind_name = pv_tuple
                     if pebble_val is None:

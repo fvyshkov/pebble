@@ -1147,6 +1147,32 @@ def _has_external_refs(formula: str) -> bool:
     return bool(_EXTERNAL_REF_RE.search(formula))
 
 
+def _has_unparseable_range_colon(formula: str) -> bool:
+    """True if `formula` contains a leftover Excel range like `D9:D20` outside
+    of any bracketed name reference. Bracketed sections (`[Sheet::name]`,
+    `[ind. with colon: foo]`) are stripped first because indicator names and
+    cross-sheet separators legitimately contain `:` characters.
+    """
+    if ":" not in formula:
+        return False
+    # Strip every bracketed segment (with nested-bracket support) so the
+    # remaining text contains only operators / parens / numbers / func names.
+    out = []
+    depth = 0
+    for ch in formula:
+        if ch == "[":
+            depth += 1
+            continue
+        if ch == "]":
+            if depth > 0:
+                depth -= 1
+            continue
+        if depth == 0:
+            out.append(ch)
+    rest = "".join(out)
+    return ":" in rest
+
+
 def _classify_total_leaf_cols(sheet_periods: list[dict]) -> tuple[set[int], set[int]]:
     """Classify period columns as 'total' or 'leaf' per year.
 
@@ -1347,7 +1373,9 @@ def _row_name_matches_excel(ws, row_num: int, expected_name: str) -> bool:
     Claude's analysis: it produces a single-dim hierarchy with row numbers that
     don't line up with Excel rows. When the mapping is wrong, cross-sheet refs
     point at the wrong indicator. We detect by reading cols 1..6 of the target
-    row and checking whether expected_name appears (case-insensitive substring).
+    row and checking whether expected_name appears (case-insensitive substring,
+    BOTH directions — Pebble joins col-1+col-2+... into the name, so the Excel
+    cell may hold a substring of the joined name).
     """
     if not expected_name:
         return False
@@ -1356,7 +1384,12 @@ def _row_name_matches_excel(ws, row_num: int, expected_name: str) -> bool:
         v = ws.cell(row_num, c).value
         if v is None:
             continue
-        if isinstance(v, str) and needle in v.lower():
+        if not isinstance(v, str):
+            continue
+        v_low = v.lower().strip()
+        if not v_low:
+            continue
+        if needle in v_low or (len(v_low) >= 4 and v_low in needle):
             return True
     return False
 
@@ -2242,12 +2275,13 @@ def _verify_group_rules(indicators: list[dict], ws, data_start_col: int) -> None
     here, only fix rules on already-detected groups.
     """
     max_col = min(ws.max_column or 1, 200)
-    # Pick up to 3 data columns to verify sums
+    # Verify across ALL data columns. With only a handful of columns checked,
+    # FX-converted parents (e.g. CAPEX. Оборудование) match by coincidence in
+    # months where both parent and children are zero, while the annual columns
+    # diverge sharply. Iterating all columns catches every divergence.
     check_cols: list[int] = []
     for c in range(data_start_col, max_col + 1):
-        if len(check_cols) >= 3:
-            break
-        # Check if this column has numeric data in at least one row
+        # Include columns that have numeric data in at least one row
         for r in range(2, min(ws.max_row or 2, 100)):
             v = ws.cell(r, c).value
             if isinstance(v, (int, float)) and v != 0:
@@ -2269,7 +2303,11 @@ def _verify_group_rules(indicators: list[dict], ws, data_start_col: int) -> None
             if item.get("children"):
                 _walk(item["children"])
 
-            if not item.get("is_group") or not item.get("children"):
+            # Run on ANY parent with children, regardless of is_group flag —
+            # the hierarchy detection sometimes attaches children to a row
+            # without flagging it as a group, leaving its Excel value
+            # un-persisted because the engine treats it as sum_children.
+            if not item.get("children"):
                 continue
             parent_row = item.get("row")
             if not parent_row:
@@ -2282,6 +2320,8 @@ def _verify_group_rules(indicators: list[dict], ws, data_start_col: int) -> None
             # Check if parent value == sum of children across check columns
             sum_matches = 0
             sum_checks = 0
+            parent_has_nonzero = False
+            children_have_nonzero = False
             for c in check_cols:
                 pv = ws.cell(parent_row, c).value
                 if pv is None:
@@ -2290,6 +2330,8 @@ def _verify_group_rules(indicators: list[dict], ws, data_start_col: int) -> None
                     parent_val = float(pv)
                 except (ValueError, TypeError):
                     continue
+                if abs(parent_val) > 1e-9:
+                    parent_has_nonzero = True
 
                 children_sum = 0.0
                 children_found = 0
@@ -2297,8 +2339,11 @@ def _verify_group_rules(indicators: list[dict], ws, data_start_col: int) -> None
                     cv = ws.cell(cr, c).value
                     if cv is not None:
                         try:
-                            children_sum += float(cv)
+                            cf = float(cv)
+                            children_sum += cf
                             children_found += 1
+                            if abs(cf) > 1e-9:
+                                children_have_nonzero = True
                         except (ValueError, TypeError):
                             pass
 
@@ -2313,12 +2358,84 @@ def _verify_group_rules(indicators: list[dict], ws, data_start_col: int) -> None
             if sum_checks > 0 and sum_matches == sum_checks:
                 # All checked columns match → confirm sum_children
                 item["rule"] = "sum_children"
-            elif sum_checks > 0 and sum_matches == 0:
-                # No column matches → keep as manual (don't override a formula)
+            elif sum_checks > 0 and sum_matches < sum_checks:
+                # ANY column doesn't match → engine sum would produce wrong values.
+                # Demote to manual so Excel's authoritative value is preserved.
+                if item.get("rule") == "sum_children":
+                    item["rule"] = "manual"
+            elif parent_has_nonzero and not children_have_nonzero:
+                # Parent has real values but no children have any → not a sum.
                 if item.get("rule") == "sum_children":
                     item["rule"] = "manual"
 
     _walk(indicators)
+
+
+def _validate_indicator_names(indicators: list[dict], ws) -> list[dict]:
+    """Replace LLM-hallucinated indicator names with the deterministic
+    concatenation of cols 1/2/3 of each indicator's row.
+
+    Strict rule: the LLM-supplied name must EXACTLY match (case-insensitive,
+    after trimming and a few punctuation normalisations) one of the
+    cell-derived candidates for that row:
+        C, B.C, A.B.C, A.C, A. B, B, A
+    Otherwise we substitute ". "-joined non-empty cells.
+
+    Names of group nodes without a `row` are left alone (virtual nodes).
+    """
+    def _norm(s: str) -> str:
+        return " ".join(s.lower().replace(".", " ").replace(",", " ").split()).strip()
+
+    def _row_parts(row: int) -> tuple[str, str, str]:
+        out: list[str] = []
+        for col in (1, 2, 3):
+            v = ws.cell(row, col).value
+            if v is None or not isinstance(v, str):
+                out.append("")
+                continue
+            out.append(v.strip())
+        return out[0], out[1], out[2]
+
+    def _candidates(a: str, b: str, c: str) -> list[str]:
+        cs: list[str] = []
+        for combo in [c, f"{b}. {c}".strip(". "), f"{a}. {b}. {c}".strip(". "),
+                      f"{a}. {c}".strip(". "), f"{a}. {b}".strip(". "), b, a]:
+            if combo and combo not in cs:
+                cs.append(combo)
+        return cs
+
+    def _best_combined(a: str, b: str, c: str) -> str:
+        parts = [p for p in (a, b, c) if p]
+        return ". ".join(parts)
+
+    fixed = 0
+    def walk(items: list[dict]):
+        nonlocal fixed
+        for item in items:
+            row = item.get("row")
+            name = (item.get("name") or "").strip()
+            if row and name:
+                a, b, c = _row_parts(int(row))
+                joined = _best_combined(a, b, c)
+                if joined:
+                    cand_norm = {_norm(x) for x in _candidates(a, b, c)}
+                    name_n = _norm(name)
+                    # Also drop trailing disambiguating " (group)" or "#N" suffixes
+                    name_stripped = name_n
+                    for suf in (" #2", " #3", " #4", " #5"):
+                        if name_stripped.endswith(suf):
+                            name_stripped = name_stripped[: -len(suf)].strip()
+                    if name_n not in cand_norm and name_stripped not in cand_norm:
+                        item["_llm_name_was"] = name
+                        item["name"] = joined
+                        fixed += 1
+            if item.get("children"):
+                walk(item["children"])
+
+    walk(indicators)
+    if fixed:
+        print(f"  [name-validate] replaced {fixed} hallucinated indicator name(s) with cell-derived A.B.C", flush=True)
+    return indicators
 
 
 def _flatten_empty_parents(indicators: list[dict], ws, data_start_col: int) -> list[dict]:
@@ -2361,6 +2478,120 @@ def _flatten_empty_parents(indicators: list[dict], ws, data_start_col: int) -> l
         return result
 
     return _walk(indicators)
+
+
+def _hierarchy_from_formatting(indicators: list[dict], ws) -> list[dict]:
+    """Re-build the indicator tree using the row's font + horizontal alignment.
+
+    Many user spreadsheets (e.g. PL on MAIN.xlsx) encode hierarchy purely via
+    typography rather than Excel's outline_level or `indent` cell attribute:
+      - **bold + halign=left**            → top-level section header (level 1)
+      - regular + halign=left|center|none → mid-level group (level 2)
+      - **italic + halign=right**         → leaf detail row (level 3)
+      - any row whose `indent` is >0      → child of the last shallower row
+
+    The LLM extraction frequently returns a flat list for these sheets. We
+    deterministically rebuild parent/child links from the original Excel cell
+    formatting so subsequent steps (formula translation, sum_children
+    detection) see the correct tree.
+
+    A higher level only nests under a lower level if at least one such child
+    actually follows in row order — otherwise the lower-level row stays a leaf
+    (avoids over-nesting bold totals like "ЧИСТЫЙ ПРОЦЕНТНЫЙ ДОХОД" that have
+    no children below them).
+    """
+    # Flatten any existing nesting so we work from a single ordered list.
+    flat: list[dict] = []
+
+    def _walk(items: list[dict]):
+        for it in items:
+            kids = it.pop("children", None) or []
+            flat.append(it)
+            _walk(kids)
+
+    _walk(list(indicators))
+
+    # Drop entries without an excel_row (synthetic). Keep them aside; we'll
+    # re-append at the end at top level.
+    by_row: dict[int, dict] = {}
+    no_row: list[dict] = []
+    for it in flat:
+        r = it.get("row")
+        if isinstance(r, int):
+            by_row[r] = it
+        else:
+            no_row.append(it)
+    if not by_row:
+        return indicators
+
+    def _row_level(row: int) -> int:
+        # Use whichever of the first three columns actually carries the label.
+        cell = None
+        for col in (1, 2, 3):
+            v = ws.cell(row, col).value
+            if isinstance(v, str) and v.strip():
+                cell = ws.cell(row, col)
+                break
+        if cell is None:
+            return 2
+        font = cell.font
+        align = cell.alignment
+        bold = bool(font and font.bold)
+        italic = bool(font and font.italic)
+        halign = (align.horizontal if align else None) or ""
+        indent = float(align.indent) if (align and align.indent) else 0.0
+        # Italic + right-align is the unambiguous "leaf detail" pattern.
+        if italic and halign == "right":
+            return 3
+        # Explicit indent always pushes a row deeper.
+        if indent >= 2.0:
+            return 3
+        if indent >= 1.0:
+            return 2
+        # Bold + left = top-level section header.
+        if bold and halign in ("left", "general", ""):
+            return 1
+        # Anything else with left/centre/no align = middle group (level 2).
+        return 2
+
+    # Compute levels in row order.
+    ordered_rows = sorted(by_row.keys())
+    level_of: dict[int, int] = {r: _row_level(r) for r in ordered_rows}
+
+    # First pass: determine which rows actually become parents by scanning
+    # forward — a level-N row is a parent only if some later row at level >N
+    # appears before any other row at level ≤N.
+    has_children: dict[int, bool] = {r: False for r in ordered_rows}
+    for i, r in enumerate(ordered_rows):
+        my = level_of[r]
+        for r2 in ordered_rows[i + 1:]:
+            l2 = level_of[r2]
+            if l2 <= my:
+                break
+            has_children[r] = True
+            break
+
+    # Second pass: assemble tree using a stack of open parents.
+    root: list[dict] = []
+    stack: list[tuple[int, dict]] = []  # (level, item)
+    for r in ordered_rows:
+        item = by_row[r]
+        item.pop("children", None)  # ensure clean
+        lvl = level_of[r]
+        # Pop deeper-or-equal-level parents
+        while stack and stack[-1][0] >= lvl:
+            stack.pop()
+        if stack:
+            parent = stack[-1][1]
+            parent.setdefault("children", []).append(item)
+        else:
+            root.append(item)
+        if has_children[r]:
+            stack.append((lvl, item))
+
+    # Re-attach rows without excel_row at top level (preserve original order).
+    root.extend(no_row)
+    return root
 
 
 def _recover_missing_rows(indicators: list[dict], ws, data_start_col: int) -> list[dict]:
@@ -2419,9 +2650,11 @@ def _recover_missing_rows(indicators: list[dict], ws, data_start_col: int) -> li
         if not name or len(name) > 200:
             continue
 
-        # Check for numeric data in period columns
+        # Check for numeric data in period columns. Scan all data columns —
+        # some sheets (e.g. BS in MAIN.xlsx) only populate the annual or later
+        # monthly columns for certain rows, so a narrow window misses them.
         has_data = False
-        for c in range(data_start_col, min(data_start_col + 10, max_col + 1)):
+        for c in range(data_start_col, max_col + 1):
             cv = ws.cell(r, c).value
             if cv is not None:
                 if isinstance(cv, (int, float)):
@@ -2529,6 +2762,8 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
             rule = item.get("rule", "manual")
             if rule == "sum_children" and item.get("children"):
                 sum_children_rids.add(rid)
+                if item.get("row") in (14, 21):
+                    print(f"  [add-to-sc] row={item.get('row')} name={item.get('name','?')[:40]} rule={rule}", flush=True)
             elif rule == "formula":
                 rid_to_formula[rid] = {
                     "rule": "formula",
@@ -2565,17 +2800,23 @@ async def _create_indicator_records(db, analytic_id: str, indicators: list[dict]
 
     await insert_items(indicators, None)
 
-    # Build row_to_name and row_to_parent_name mappings for formula translator
+    # Build row_to_name and row_to_parent_name mappings for formula translator.
+    # row_to_parent_name now holds the FULL ancestor chain joined by \x1f
+    # (e.g. "grandparent\x1fparent"), so formula refs always carry the
+    # complete path: [Sheet::grandparent][parent][indicator].
     row_to_name: dict[int, str] = {}
     row_to_parent_name: dict[int, str] = {}
-    def collect_names(items: list[dict], parent_name: str | None = None):
+    PARENT_SEP = "\x1f"
+    def collect_names(items: list[dict], ancestor_chain: str | None = None):
         for item in items:
-            if item.get("row") and item.get("name"):
-                row_to_name[item["row"]] = item["name"]
-                if parent_name:
-                    row_to_parent_name[item["row"]] = parent_name
-            if item.get("children"):
-                collect_names(item["children"], item.get("name"))
+            nm = item.get("name")
+            if item.get("row") and nm:
+                row_to_name[item["row"]] = nm
+                if ancestor_chain:
+                    row_to_parent_name[item["row"]] = ancestor_chain
+            if item.get("children") and nm:
+                next_chain = f"{ancestor_chain}{PARENT_SEP}{nm}" if ancestor_chain else nm
+                collect_names(item["children"], next_chain)
     collect_names(indicators)
 
     return row_to_rid, rid_to_formula, row_to_name, row_to_parent_name, sum_children_rids
@@ -2874,7 +3115,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
         _sheet_visible_rids[excel_name] = visible_rids
 
     # ── Step 5: Process each sheet (two passes: 1. create structure, 2. import cells) ──
-    from backend.excel_formula_translator import translate_excel_formula
+    from backend.excel_formula_translator import translate_excel_formula, _expand_sum_ranges
 
     created_sheets = []
     analytic_sort = _period_analytic_sort  # after all period analytics
@@ -2935,13 +3176,17 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 (fid, indicator_analytic_id, fname, fcode, ftype, sort_i),
             )
 
+        indicators = _validate_indicator_names(indicators, ws_d)
         _enrich_with_indent(indicators, ws_d)
         indicators = _regroup_by_outline(indicators)
         indicators = _validate_hierarchy_by_indent(indicators)
         indicators = _fix_indicator_hierarchy(indicators)
-        _verify_group_rules(indicators, ws_d, data_start_col)
         indicators = _flatten_empty_parents(indicators, ws_d, data_start_col)
         indicators = _recover_missing_rows(indicators, ws_d, data_start_col)
+        # Reconstruct hierarchy from font/alignment cues — overrides anything
+        # the LLM produced when Excel encodes structure via bold/italic/halign.
+        indicators = _hierarchy_from_formatting(indicators, ws_d)
+        _verify_group_rules(indicators, ws_d, data_start_col)
         row_to_rid, rid_to_formula, row_to_name, row_to_parent_name, sum_children_rids = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
         # Create Pebble sheet
@@ -3127,20 +3372,24 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     except (ValueError, AttributeError):
                         continue
 
-                # Cell color is authoritative: yellow/beige fill (theme=7) means
-                # "user input" in the source spreadsheet — treat as manual even
-                # if a formula exists. We keep the numeric value Excel computed.
+                # Mirror Excel exactly: if the cell holds a formula, store it
+                # as a translated formula even if the fill is yellow. Yellow
+                # fill in source spreadsheets only marks "user input" for
+                # literal numeric cells; a yellow cell containing =A1+1 is
+                # still a formula and must propagate when its dependency
+                # changes.
+                excel_formula = ws_f.cell(row_num, col_num).value
                 is_yellow = _is_input_cell(ws_f.cell(row_num, col_num))
+                cell_has_formula = isinstance(excel_formula, str) and excel_formula.startswith("=")
 
                 # Determine rule and formula — prefer actual Excel formula translated deterministically
-                if is_yellow:
+                if is_yellow and not cell_has_formula:
                     rule = "manual"
                     formula_text = ""
                 else:
                     # Try actual Excel formula first (deterministic, handles cross-sheet)
-                    excel_formula = ws_f.cell(row_num, col_num).value
                     is_first = (period_rid == first_period_rid)
-                    if isinstance(excel_formula, str) and excel_formula.startswith("="):
+                    if cell_has_formula:
                         rule = "formula"
                         try:
                             # External workbook refs [N]Sheet!Cell → can't resolve, keep manual
@@ -3158,6 +3407,11 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                                 excel_formula = _substitute_cross_period_refs(
                                     excel_formula, src_ptype, all_sheet_period_types, wb_data,
                                     all_sheet_total_cols, all_sheet_row_maps)
+                            # Expand SUM/AVERAGE ranges first so non-indicator rows
+                            # inside the range don't corrupt the colon syntax when
+                            # their values get substituted below.
+                            excel_formula = _expand_sum_ranges(
+                                excel_formula, row_to_name, all_sheet_row_maps)
                             # Pre-substitute: replace refs to non-indicator rows with values
                             excel_formula = _substitute_non_indicator_refs(
                                 excel_formula, ws_d, row_to_name, data_start_col, base_col=col_num)
@@ -3193,7 +3447,7 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                 # Post-translation: if formula contains unparseable range `:` notation
                 # (from partially substituted SUM/AVERAGE ranges), fall back to manual.
                 # Allow `::` (cross-sheet separator like `[Sheet::name]`).
-                if rule == "formula" and formula_text and re.search(r'(?<!:):(?!:)', formula_text):
+                if rule == "formula" and formula_text and _has_unparseable_range_colon(formula_text):
                     rule = "manual"
                     formula_text = ""
 
@@ -3231,6 +3485,8 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                     rule = "sum_children"
                     formula_text = ""
 
+                if row_num in (14, 21) and excel_name in ("OPEX+CAPEX", "BS"):
+                    print(f"  [persist-try] {excel_name} r{row_num} col {col_num} rule={rule} val={value_str} f={formula_text[:60] if formula_text else ''} in_sc={indicator_rid in sum_children_rids}", flush=True)
                 cid = str(uuid.uuid4())
                 try:
                     from backend.db import intern_formula
@@ -3240,8 +3496,9 @@ async def import_excel(file: UploadFile = File(...), model_name: str = Form("Imp
                         (cid, pebble_sheet_id, coord_key, value_str, "sum", rule, "" if fid else formula_text, fid),
                     )
                     cell_count += 1
-                except Exception:
-                    pass  # Skip duplicates
+                except Exception as _e:
+                    if row_num in (14, 21) and excel_name in ("OPEX+CAPEX", "BS"):
+                        print(f"  [persist-skip] {excel_name} r{row_num} col {col_num} rule={rule} err={_e}", flush=True)
 
         # Extract consolidation formulas from total columns (year/quarter totals)
         total_cols = _detect_total_columns(ws_d, ws_f, col_to_period_rid, min(ws_d.max_column or 1, 200))
@@ -3789,7 +4046,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
         yield event(_m("total_inds", n=total_indicators, sheets=len(sheets_config)))
 
         # Process sheets (two passes: 1. create structure, 2. import cells)
-        from backend.excel_formula_translator import translate_excel_formula
+        from backend.excel_formula_translator import translate_excel_formula, _expand_sum_ranges
 
         created_sheets = []
         analytic_sort = _period_analytic_sort
@@ -3846,14 +4103,16 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                 )
 
             if excel_name in wb_data.sheetnames:
+                indicators = _validate_indicator_names(indicators, wb_data[excel_name])
                 _enrich_with_indent(indicators, wb_data[excel_name])
             indicators = _regroup_by_outline(indicators)
             indicators = _validate_hierarchy_by_indent(indicators)
             indicators = _fix_indicator_hierarchy(indicators)
             if excel_name in wb_data.sheetnames:
-                _verify_group_rules(indicators, wb_data[excel_name], data_start_col)
                 indicators = _flatten_empty_parents(indicators, wb_data[excel_name], data_start_col)
                 indicators = _recover_missing_rows(indicators, wb_data[excel_name], data_start_col)
+                indicators = _hierarchy_from_formatting(indicators, wb_data[excel_name])
+                _verify_group_rules(indicators, wb_data[excel_name], data_start_col)
             row_to_rid, rid_to_formula, row_to_name, row_to_parent_name, sum_children_rids = await _create_indicator_records(db, indicator_analytic_id, indicators)
 
             pebble_sheet_id = str(uuid.uuid4())
@@ -4028,14 +4287,15 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             val = float(val.replace(",", ".").replace(" ", ""))
                         except (ValueError, AttributeError):
                             continue
+                    excel_formula = ws_f.cell(row_num, col_num).value
                     is_yellow = _is_input_cell(ws_f.cell(row_num, col_num))
-                    if is_yellow:
+                    cell_has_formula = isinstance(excel_formula, str) and excel_formula.startswith("=")
+                    if is_yellow and not cell_has_formula:
                         rule = "manual"
                         formula_text = ""
                     else:
-                        excel_formula = ws_f.cell(row_num, col_num).value
                         is_first = (period_rid == first_period_rid)
-                        if isinstance(excel_formula, str) and excel_formula.startswith("="):
+                        if cell_has_formula:
                             rule = "formula"
                             try:
                                 # External workbook refs → import as manual
@@ -4053,6 +4313,11 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                                     excel_formula = _substitute_cross_period_refs(
                                         excel_formula, src_ptype, all_sheet_period_types, wb_data,
                                         all_sheet_total_cols, all_sheet_row_maps)
+                                # Expand SUM/AVERAGE ranges first so that non-indicator
+                                # rows inside a range don't corrupt the colon syntax
+                                # when their value gets substituted below.
+                                excel_formula = _expand_sum_ranges(
+                                    excel_formula, row_to_name, all_sheet_row_maps)
                                 # Pre-substitute: replace refs to non-indicator rows with values
                                 excel_formula = _substitute_non_indicator_refs(
                                     excel_formula, ws_d, row_to_name, data_start_col, base_col=col_num)
@@ -4086,7 +4351,7 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                             formula_text = ""
                     # Post-translation: if formula has unparseable `:` range, fall back to manual.
                     # Allow `::` (cross-sheet separator like `[Sheet::name]`).
-                    if rule == "formula" and formula_text and re.search(r'(?<!:):(?!:)', formula_text):
+                    if rule == "formula" and formula_text and _has_unparseable_range_colon(formula_text):
                         rule = "manual"
                         formula_text = ""
                     # First-period formula cells: preserve starting balances
@@ -4116,6 +4381,8 @@ async def import_excel_stream(file: UploadFile = File(...), model_name: str = Fo
                         rule = "sum_children"
                         formula_text = ""
 
+                    if row_num in (14, 21) and excel_name in ("OPEX+CAPEX", "BS"):
+                        print(f"  [persist-try-stream] {excel_name} r{row_num} col {col_num} rule={rule} val={val} f={(formula_text or '')[:60]} in_sc={indicator_rid in sum_children_rids}", flush=True)
                     try:
                         from backend.db import intern_formula
                         fid = await intern_formula(db, formula_text) if formula_text else None

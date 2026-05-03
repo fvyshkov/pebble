@@ -405,25 +405,30 @@ export default function AnalyticRecordsGrid({ analyticId, modelId, onRefresh }: 
                   ))}
                   {mainSheets.length > 0 && (() => {
                     const f = formulas[node.record.id]
-                    const leaf = f?.leaf || ''
+                    const leafRaw = f?.leaf || ''
+                    const isPerCell = leafRaw === '__per_cell__'
+                    const leaf = isPerCell ? '' : leafRaw
                     const consol = f?.consolidation || 'SUM'
-                    const formulaCellSx = (txt: string) => ({
+                    const formulaCellSx = (txt: string, italic = false) => ({
                       cursor: 'pointer',
                       fontFamily: txt ? 'monospace' : undefined,
                       fontSize: 12,
                       color: txt ? 'text.secondary' : 'text.disabled',
-                      fontStyle: txt ? undefined : 'italic' as const,
+                      fontStyle: (italic || !txt) ? 'italic' as const : undefined,
                       wordBreak: 'break-word' as const,
                       '&:hover': { bgcolor: '#e3f2fd' },
                     })
+                    const formulaText = isPerCell
+                      ? t('formulas.perCellFormulas')
+                      : (leaf || t('records.manualInput'))
                     return (<>
                       <TableCell
                         data-testid={`formula-cell-${node.record.id}`}
                         onClick={e => { e.stopPropagation(); setSelectedRecordId(node.record.id) }}
-                        sx={formulaCellSx(leaf)}
-                        title={leaf || t('records.manualInput')}
+                        sx={formulaCellSx(leaf, isPerCell)}
+                        title={isPerCell ? t('formulas.perCellFormulasHint') : (leaf || t('records.manualInput'))}
                       >
-                        {leaf || t('records.manualInput')}
+                        {formulaText}
                       </TableCell>
                       <TableCell
                         data-testid={`consol-cell-${node.record.id}`}

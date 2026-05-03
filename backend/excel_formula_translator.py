@@ -234,17 +234,21 @@ _PARENT_CHILD_SEP = "\x1f"  # ASCII unit separator — internal delimiter that c
 
 
 def _format_ref(name: str, display: str | None = None) -> str:
-    """Format an indicator reference with optional parent qualifier.
+    """Format an indicator reference with full parent-chain qualifier.
 
-    parent\\x1fchild → [parent][child]
-    plain name      → [name]
-    With display (cross-sheet): display::parent\\x1fchild → [display::parent][child]
+    Multi-level chains: a\\x1fb\\x1fc → [a][b][c]
+    Plain name: x → [x]
+    Cross-sheet: display::a\\x1fb → [display::a][b]
     """
     if _PARENT_CHILD_SEP in name:
-        parent, child = name.split(_PARENT_CHILD_SEP, 1)
+        parts = name.split(_PARENT_CHILD_SEP)
+        head = parts[0]
+        tail = parts[1:]
         if display:
-            return f"[{display}::{parent}][{child}]"
-        return f"[{parent}][{child}]"
+            head_token = f"[{display}::{head}]"
+        else:
+            head_token = f"[{head}]"
+        return head_token + "".join(f"[{p}]" for p in tail)
     if display:
         return f"[{display}::{name}]"
     return f"[{name}]"
@@ -286,22 +290,14 @@ def _translate_ref(
     if name is None:
         return ref["original"]  # Can't resolve — keep original
 
-    # Check if name is duplicate in the row map — if so, disambiguate with
-    # parent qualifier: [Parent][Indicator]. The calc engine resolves this
-    # by filtering candidates whose parent record name matches.
-    name_lower = name.lower()
-    duplicates = sum(1 for r, n in rmap.items() if n.lower() == name_lower)
-    if duplicates > 1:
-        # Try parent name disambiguation
-        pmap_key = sheet_name if sheet_name else "__self__"
-        parent_map = row_to_parent_names.get(pmap_key, {}) if row_to_parent_names else {}
-        parent_name = parent_map.get(row)
-        if parent_name:
-            # Use [parent][child] bracket format — encode internally with a
-            # sentinel separator so parent_name or name may safely contain "/".
-            name = f"{parent_name}{_PARENT_CHILD_SEP}{name}"
-        else:
-            name = f"{name}#row{row}"
+    # ALWAYS prepend the full ancestor chain (parent_map already stores the
+    # full \x1f-joined path from top ancestor down to immediate parent), so
+    # every formula ref is unambiguous regardless of name duplication.
+    pmap_key = sheet_name if sheet_name else "__self__"
+    parent_map = row_to_parent_names.get(pmap_key, {}) if row_to_parent_names else {}
+    parent_chain = parent_map.get(row)
+    if parent_chain:
+        name = f"{parent_chain}{_PARENT_CHILD_SEP}{name}"
 
     # Determine period modifier using period index alignment
     # Use col_to_period_idx mapping if available (skips total columns)
@@ -318,7 +314,7 @@ def _translate_ref(
 
     if col not in target_pidx_map and col in target_pk_map:
         # Target is a total/aggregate column — use absolute period key
-        ref_name = f"[{display}::{name}]" if display else f"[{name}]"
+        ref_name = _format_ref(name, display)
         return f'{ref_name}(периоды="{target_pk_map[col]}")'
 
     # Detect cross-level references (e.g. Y column referencing M column).
@@ -344,7 +340,7 @@ def _translate_ref(
 
     # Cross-level reference → always use absolute period key
     if source_level != target_level and target_pk_val and col != base_col:
-        ref_name = f"[{display}::{name}]" if display else f"[{name}]"
+        ref_name = _format_ref(name, display)
         return f'{ref_name}(периоды="{target_pk_val}")'
 
     if base_col in col_to_period_idx:

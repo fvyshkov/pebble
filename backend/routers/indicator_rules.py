@@ -44,6 +44,79 @@ class ResolveIn(BaseModel):
 
 # ── List / replace rules for an indicator ─────────────────────────────────
 
+async def _synthesize_scoped_from_cells(
+    db, sheet_id: str, indicator_id: str,
+) -> tuple[str, list[dict]]:
+    """For an indicator that has per-cell formulas in cell_data, synthesize a
+    leaf formula (when uniform) or a list of scoped rules (one per distinct
+    formula, with scope = comma-separated record_ids per non-main dimension).
+
+    Returns (leaf, scoped_rules). leaf is set only when ALL formula cells
+    share one formula text; otherwise scoped_rules contains one entry per
+    distinct formula. Manual / empty cells aren't represented as rules —
+    they live in cell_data and are surfaced via /resolved-formulas.
+    """
+    seq_row = await db.execute_fetchall(
+        "SELECT seq_id FROM analytic_records WHERE id = ?", (indicator_id,),
+    )
+    ind_seq = seq_row[0]["seq_id"] if seq_row else None
+    if ind_seq is None:
+        return "", []
+    cell_rows = await db.execute_fetchall(
+        """SELECT cd.coord_key, COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
+           FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
+           WHERE cd.sheet_id = ?
+             AND (cd.coord_key = ? OR cd.coord_key LIKE ? OR cd.coord_key LIKE ? OR cd.coord_key LIKE ?)
+             AND ((cd.formula IS NOT NULL AND cd.formula != '') OR cd.formula_id IS NOT NULL)""",
+        (sheet_id, str(ind_seq), f"{ind_seq}|%", f"%|{ind_seq}", f"%|{ind_seq}|%"),
+    )
+    bindings = await db.execute_fetchall(
+        "SELECT analytic_id, is_main FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order",
+        (sheet_id,),
+    )
+    ordered_aids = [b["analytic_id"] for b in bindings]
+    main_aid = next((b["analytic_id"] for b in bindings if b["is_main"]), None)
+    if not main_aid:
+        return "", []
+    await _coord_key_prime(db)
+    # formula → {analytic_id → ordered list of unique record_ids}
+    groups: dict[str, dict[str, list[str]]] = {}
+    counts: dict[str, int] = {}
+    for cr in cell_rows:
+        f = (cr["formula"] or "").strip()
+        if not f:
+            continue
+        parts = _unpack_coord(cr["coord_key"])
+        if len(parts) != len(ordered_aids):
+            continue
+        scope_vals = groups.setdefault(f, {})
+        counts[f] = counts.get(f, 0) + 1
+        for aid, part in zip(ordered_aids, parts):
+            if aid == main_aid:
+                continue
+            lst = scope_vals.setdefault(aid, [])
+            if part not in lst:
+                lst.append(part)
+    if not groups:
+        return "", []
+    if len(groups) == 1:
+        return next(iter(groups.keys())), []
+    scoped: list[dict] = []
+    for formula, scope_vals in groups.items():
+        scope = {aid: ",".join(rids) for aid, rids in scope_vals.items() if rids}
+        scoped.append({
+            "id": None,  # synthesized — persisting via PUT creates a real rule
+            "scope": scope,
+            "priority": 0,
+            "formula": formula,
+            "synthesized": True,
+            "cell_count": counts.get(formula, 0),
+        })
+    # Largest groups first so the most-applied formula is on top.
+    scoped.sort(key=lambda r: (-r["cell_count"], r["formula"]))
+    return "", scoped
+
+
 @router.get("/{sheet_id}/indicators/{indicator_id}/rules")
 async def get_rules(sheet_id: str, indicator_id: str):
     db = get_db()
@@ -73,49 +146,18 @@ async def get_rules(sheet_id: str, indicator_id: str):
                 "priority": r["priority"] or 0,
                 "formula": r["formula"] or "",
             })
-    # Fallback: if no leaf formula from rules, look for per-cell formulas in cell_data
-    if not leaf:
-        bindings = await db.execute_fetchall(
-            "SELECT analytic_id, is_main FROM sheet_analytics WHERE sheet_id = ? ORDER BY sort_order",
-            (sheet_id,),
+    # No persisted leaf — derive from per-cell formulas in cell_data:
+    # all cells share one formula → that's the leaf; otherwise synthesize one
+    # scoped rule per distinct formula (each rule's scope lists every
+    # non-main analytic value seen with that formula).
+    if not leaf and not scoped:
+        derived_leaf, synth_scoped = await _synthesize_scoped_from_cells(
+            db, sheet_id, indicator_id,
         )
-        main_idx = next((i for i, b in enumerate(bindings) if b["is_main"]), None)
-        if main_idx is not None:
-            cell_row = await db.execute_fetchall(
-                """SELECT COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
-                   FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
-                   WHERE cd.sheet_id = ?
-                     AND ((cd.formula IS NOT NULL AND cd.formula != '') OR cd.formula_id IS NOT NULL)
-                   LIMIT 100""",
-                (sheet_id,),
-            )
-            for cr in cell_row:
-                # Not efficient but coord_key is not indexed by indicator_id alone;
-                # match cells whose coord_key has indicator_id at main_idx position.
-                pass
-            # Simpler approach: query by coord_key LIKE pattern
-            # coord_key parts are joined with |, indicator_id is at main_idx
-            like_patterns = []
-            if main_idx == 0:
-                like_patterns.append(f"{indicator_id}|%")
-            else:
-                # Match indicator_id at any non-first position:
-                # could be "x|IND" (2 dims) or "x|IND|y" (3+ dims)
-                like_patterns.append(f"%|{indicator_id}")
-                like_patterns.append(f"%|{indicator_id}|%")
-
-            for pat in like_patterns:
-                cell_row = await db.execute_fetchall(
-                    """SELECT COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
-                       FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
-                       WHERE cd.sheet_id = ? AND cd.coord_key LIKE ?
-                         AND ((cd.formula IS NOT NULL AND cd.formula != '') OR cd.formula_id IS NOT NULL)
-                       ORDER BY cd.coord_key LIMIT 1""",
-                    (sheet_id, pat),
-                )
-                if cell_row:
-                    leaf = cell_row[0]["formula"] or ""
-                    break
+        if derived_leaf:
+            leaf = derived_leaf
+        if synth_scoped:
+            scoped = synth_scoped
 
     return {"leaf": leaf, "consolidation": consolidation, "scoped": scoped}
 
@@ -193,9 +235,12 @@ async def get_all_rules(sheet_id: str):
         elif r["kind"] == "consolidation" and not entry["consolidation"]:
             entry["consolidation"] = r["formula"] or ""
 
-    # 2. Also extract per-indicator formulas from cell_data (merge with rules).
-    # coord_key = "period_rec_id|indicator_rec_id" — take the indicator part.
-    # Pick any one non-empty formula per indicator record (they're typically the same).
+    # 2. Also collect per-cell formulas from cell_data and detect whether all
+    # cells of an indicator share the same formula. If they do, surface that
+    # as the indicator-level "leaf". If they diverge — formulas differ per
+    # cell — return the sentinel "__per_cell__" so the UI shows that the
+    # indicator has cell-specific formulas instead of misleadingly picking
+    # one as representative.
     cell_rows = await db.execute_fetchall(
         """SELECT cd.coord_key, COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula, cd.rule
            FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
@@ -218,17 +263,29 @@ async def get_all_rules(sheet_id: str):
         return result
 
     await _coord_key_prime(db)
+    distinct_by_ind: dict[str, set[str]] = {}
     for cr in cell_rows:
         parts = _unpack_coord(cr["coord_key"])
         if len(parts) <= main_idx:
             continue
         rec_id = parts[main_idx]
         if rec_id in result and result[rec_id]["leaf"]:
-            continue  # already have a formula from indicator_formula_rules
+            continue  # indicator-level rule already wins
+        f = (cr["formula"] or "").strip()
+        if f:
+            distinct_by_ind.setdefault(rec_id, set()).add(f)
+
+    for rec_id, formulas in distinct_by_ind.items():
         if rec_id not in result:
-            result[rec_id] = {"leaf": cr["formula"] or "", "consolidation": ""}
-        elif not result[rec_id]["leaf"]:
-            result[rec_id]["leaf"] = cr["formula"] or ""
+            result[rec_id] = {"leaf": "", "consolidation": ""}
+        if result[rec_id]["leaf"]:
+            continue
+        if len(formulas) == 1:
+            result[rec_id]["leaf"] = next(iter(formulas))
+        else:
+            # Multiple distinct per-cell formulas — UI should show this as
+            # "разные формулы у клеток", not a single representative.
+            result[rec_id]["leaf"] = "__per_cell__"
 
     return result
 

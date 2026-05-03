@@ -98,7 +98,6 @@ async def generate_model(model_id: str):
     """Full DAG rebuild + recalculation. Called explicitly by user via Generate button.
     Returns SSE stream with progress."""
     from backend.formula_engine import calculate_model, invalidate_engine
-    from backend.routers.cells import _materialize_sums
     from backend.coord_key import from_uuid_coord_key_intern as _ck_to_seq_intern
 
     async def event_stream():
@@ -156,11 +155,6 @@ async def generate_model(model_id: str):
                 yield f"data: {json.dumps({'phase': 'sheet_done', 'sheet': sheet_name, 'computed': total})}\n\n"
                 await asyncio.sleep(0)
 
-            # Materialize sums
-            yield f"data: {json.dumps({'phase': 'materializing'})}\n\n"
-            await asyncio.sleep(0)
-            sum_count = await _materialize_sums(db, model_id)
-            total += sum_count
             await db.commit()
 
             # Mark as ready

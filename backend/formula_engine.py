@@ -760,16 +760,36 @@ async def resolve_formula_for_display(db, sheet_id: str, coord_key: str) -> dict
 
     Does NOT evaluate — just tells the UI which formula applies.
     """
+    # cell_data is stored in seq-form. The UI may send uuid-form keys —
+    # normalize first so the per-cell lookup hits.
+    await _coord_key_prime(db)
+    try:
+        from backend.coord_key import from_uuid_coord_key as _from_uuid
+        # If any part is a uuid (non-digit), translate to seq form for the
+        # cell_data lookup; else use as-is.
+        if any(not p.isdigit() for p in coord_key.split("|")):
+            db_coord_key = _from_uuid(coord_key)
+        else:
+            db_coord_key = coord_key
+    except Exception:
+        db_coord_key = coord_key
     # 1. Per-cell explicit formula
     cell_rows = await db.execute_fetchall(
         """SELECT cd.rule, COALESCE(NULLIF(cd.formula,''), f.text, '') AS formula
            FROM cell_data cd LEFT JOIN formulas f ON f.id = cd.formula_id
            WHERE cd.sheet_id = ? AND cd.coord_key = ?""",
-        (sheet_id, coord_key),
+        (sheet_id, db_coord_key),
     )
     cell = dict(cell_rows[0]) if cell_rows else None
     if cell and cell.get("rule") == "formula" and cell.get("formula"):
         return {"formula": cell["formula"], "source": "cell", "kind": None}
+    # Explicit per-cell manual / empty entries are authoritative —
+    # don't fall through to the consolidation default-sum below, even if
+    # the indicator has children.
+    if cell and cell.get("rule") == "manual":
+        return {"formula": "", "source": "cell-manual", "kind": None}
+    if cell and cell.get("rule") == "empty":
+        return {"formula": "", "source": "cell-empty", "kind": None}
 
     # Load sheet metadata needed for rule resolution.
     bindings = await db.execute_fetchall(

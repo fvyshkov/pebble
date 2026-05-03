@@ -42,36 +42,35 @@ pub fn parse_ref(token: &str) -> RefParsed {
 
     let (first_name, rest) = inner;
 
-    // Parent-qualified: [parent][child] — rest starts with "[child]..."
-    let (name_str, params_rest) = if rest.starts_with('[') {
-        // Extract child name from [child]
-        let child_bytes = rest.as_bytes();
+    // Parent-qualified: [a][b][c]... — chain consecutive bracketed segments.
+    // Combined name is joined with \x1f sentinel that can never appear in
+    // user-supplied names, so any segment may safely contain "/".
+    let mut combined = first_name.to_string();
+    let mut cursor = rest;
+    while cursor.starts_with('[') {
+        let bytes = cursor.as_bytes();
         let mut d = 0i32;
-        let mut child_end = 0;
-        for (i, &b) in child_bytes.iter().enumerate() {
+        let mut seg_end = 0;
+        for (i, &b) in bytes.iter().enumerate() {
             match b {
                 b'[' => d += 1,
                 b']' => {
                     d -= 1;
-                    if d == 0 { child_end = i; break; }
+                    if d == 0 { seg_end = i; break; }
                 }
                 _ => {}
             }
         }
-        if child_end > 1 {
-            let child_name = &rest[1..child_end];
-            let after_child = &rest[child_end + 1..];
-            // Combine as "parent\x1fchild" — \x1f is a sentinel that can
-            // never appear in user-supplied names, so parent or child
-            // may safely contain "/" without ambiguity.
-            let combined = format!("{}\x1f{}", first_name, child_name);
-            (combined, after_child.to_string())
+        if seg_end > 1 {
+            let seg_name = &cursor[1..seg_end];
+            combined.push('\x1f');
+            combined.push_str(seg_name);
+            cursor = &cursor[seg_end + 1..];
         } else {
-            (first_name.to_string(), rest.to_string())
+            break;
         }
-    } else {
-        (first_name.to_string(), rest.to_string())
-    };
+    }
+    let (name_str, params_rest) = (combined, cursor.to_string());
 
     // Parse params from (...) if present
     let params = if params_rest.starts_with('(') && params_rest.ends_with(')') {
@@ -223,5 +222,21 @@ mod tests {
         let r = parse_ref("[parent][child](периоды=предыдущий)");
         assert_eq!(r.name, "parent\x1fchild");
         assert_eq!(r.params.get("периоды").map(|s| s.as_str()), Some("предыдущий"));
+    }
+
+    #[test]
+    fn test_multi_level_chain() {
+        // [a][b][c] → "a\x1fb\x1fc"
+        let r = parse_ref("[gp][p][child]");
+        assert_eq!(r.name, "gp\x1fp\x1fchild");
+        assert!(r.sheet.is_none());
+    }
+
+    #[test]
+    fn test_cross_sheet_multi_level() {
+        // [Sheet::a][b][c] → name "a\x1fb\x1fc", sheet "Sheet"
+        let r = parse_ref("[Sheet::a][b][c]");
+        assert_eq!(r.name, "a\x1fb\x1fc");
+        assert_eq!(r.sheet.as_deref(), Some("Sheet"));
     }
 }

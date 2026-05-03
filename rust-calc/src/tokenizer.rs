@@ -111,12 +111,13 @@ fn scan_reference(chars: &[char], start: usize) -> Option<(String, usize)> {
     // pos is now just after the closing ']'
     let bracket_end = pos;
 
-    // Parent-qualified ref: [parent][child] → single token "[parent][child]"
-    // The second [...] immediately follows the first ']' with no space.
+    // Parent-qualified ref: [a][b][c]... → single token covering every
+    // immediately-adjacent bracket pair (no space between ']' and '[').
+    // We consume bracket pairs greedily; if any of them is malformed we
+    // stop at the last good final_end.
     let mut final_end = bracket_end;
-    if pos < len && chars[pos] == '[' {
-        // Scan the second bracket pair
-        let inner_start = pos;
+    while pos < len && chars[pos] == '[' {
+        let scan_start = pos;
         pos += 1;
         let mut d2 = 1;
         while pos < len && d2 > 0 {
@@ -129,6 +130,9 @@ fn scan_reference(chars: &[char], start: usize) -> Option<(String, usize)> {
         }
         if d2 == 0 {
             final_end = pos;
+        } else {
+            pos = scan_start;
+            break;
         }
     }
 
@@ -253,6 +257,40 @@ mod tests {
             Token::Ref("[A][B]".to_string()),
             Token::Op('+'),
             Token::Ref("[C]".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn test_three_level_chain_single_token() {
+        let tokens = tokenize("[gp][p][child]");
+        assert_eq!(tokens, vec![Token::Ref("[gp][p][child]".to_string())]);
+    }
+
+    #[test]
+    fn test_three_level_chain_in_sum() {
+        let tokens = tokenize("SUM([a][b][c],[a][b][d])");
+        assert_eq!(tokens, vec![
+            Token::Func("SUM".to_string()),
+            Token::Ref("[a][b][c]".to_string()),
+            Token::Op(','),
+            Token::Ref("[a][b][d]".to_string()),
+            Token::Op(')'),
+        ]);
+    }
+
+    #[test]
+    fn test_three_level_with_params() {
+        let tokens = tokenize("[a][b][c](периоды=предыдущий)");
+        assert_eq!(tokens, vec![
+            Token::Ref("[a][b][c](периоды=предыдущий)".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn test_cross_sheet_three_level() {
+        let tokens = tokenize("[Sheet::a][b][c]");
+        assert_eq!(tokens, vec![
+            Token::Ref("[Sheet::a][b][c]".to_string()),
         ]);
     }
 }

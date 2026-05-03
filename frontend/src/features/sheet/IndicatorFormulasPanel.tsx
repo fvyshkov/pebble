@@ -25,7 +25,11 @@ interface Props {
   onRulesChanged?: (leaf: string, consolidation: string) => void
 }
 
-type Mode = 'manual' | 'formula' | 'empty'
+type Mode = 'manual' | 'formula' | 'empty' | 'perCell'
+
+// Sentinel returned by /rules and /indicator-rules-all when an indicator has
+// distinct per-cell formulas (no single representative leaf rule applies).
+const PER_CELL = '__per_cell__'
 
 interface ScopedRule {
   id?: string
@@ -249,6 +253,9 @@ export default function IndicatorFormulasPanel({
   // Auto-queue a pending op whenever edited state changes.
   useEffect(() => {
     if (!editedRef.current) return
+    // perCell is a read-only display state — never persist it as an indicator-
+    // level rule (per-cell formulas live on cell_data, not in the rules table).
+    if (leafMode === 'perCell') return
     const leafVal = leafMode === 'formula' ? leafFormula : leafMode === 'empty' ? '__empty__' : ''
     const consolVal = consolMode === 'formula'
       ? (consolFormula === 'SUM' ? '' : consolFormula)
@@ -292,8 +299,12 @@ export default function IndicatorFormulasPanel({
           : apiRules
         setConsolFormula(rules.consolidation === '__empty__' ? '' : (rules.consolidation || 'SUM'))
         setConsolMode(rules.consolidation === '__empty__' ? 'empty' : 'formula')
-        setLeafFormula(rules.leaf === '__empty__' ? '' : (rules.leaf || ''))
-        setLeafMode(rules.leaf === '__empty__' ? 'empty' : rules.leaf ? 'formula' : 'manual')
+        setLeafFormula(rules.leaf === '__empty__' || rules.leaf === PER_CELL ? '' : (rules.leaf || ''))
+        setLeafMode(
+          rules.leaf === '__empty__' ? 'empty'
+          : rules.leaf === PER_CELL ? 'perCell'
+          : rules.leaf ? 'formula' : 'manual'
+        )
         // Top = highest priority
         const s = (rules.scoped || [])
           .slice()
@@ -416,7 +427,7 @@ export default function IndicatorFormulasPanel({
       <ToggleButtonGroup
         exclusive size="small" value={mode}
         onChange={(_, v) => { if (v) onModeChange(v) }}
-        sx={{ mb: 1 }}
+        sx={{ mb: 1, flexWrap: 'wrap' }}
       >
         <ToggleButton value="manual" sx={{ textTransform: 'none', py: 0.25, px: 1 }}>
           {t('formulas.manualInput')}
@@ -427,8 +438,17 @@ export default function IndicatorFormulasPanel({
         <ToggleButton value="empty" sx={{ textTransform: 'none', py: 0.25, px: 1 }}>
           {t('formulas.empty')}
         </ToggleButton>
+        {mode === 'perCell' && (
+          <ToggleButton value="perCell" sx={{ textTransform: 'none', py: 0.25, px: 1 }}>
+            {t('formulas.perCellFormulas')}
+          </ToggleButton>
+        )}
       </ToggleButtonGroup>
-      {mode === 'formula' ? (
+      {mode === 'perCell' ? (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+          {t('formulas.perCellFormulasHint')}
+        </Typography>
+      ) : mode === 'formula' ? (
         <>
           <Stack direction="row" spacing={1} alignItems="flex-start">
             <TextField
@@ -477,29 +497,13 @@ export default function IndicatorFormulasPanel({
         </Typography>
       )}
 
-      {/* Слот 1: Консолидация (top) */}
-      <Accordion
-        expanded={!!expanded['consol']}
-        onChange={() => toggleExpanded('consol')}
-        disableGutters
-        data-testid="formula-slot-consol"
-      >
-        <AccordionSummary expandIcon={<ExpandMoreOutlined fontSize="small" />} sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5, minWidth: 0 } }}>
-          <Chip size="small" color="primary" variant="outlined" label={t('formulas.consolidation')} />
-        </AccordionSummary>
-        <AccordionDetails sx={{ pt: 0 }}>
-          <SlotBody
-            mode={consolMode}
-            onModeChange={m => { setConsolMode(m); markDirty() }}
-            formula={consolFormula}
-            onFormulaChange={v => { setConsolFormula(v); markDirty() }}
-            onEdit={() => setEditorSlot({ kind: 'consol' })}
-            placeholder={t('formulas.consolidationHint')}
-          />
-        </AccordionDetails>
-      </Accordion>
+      {/* Порядок слотов сверху вниз = порядок применения правил:
+          сверху — самое специфичное (scoped по приоритетам),
+          ниже — обычная клетка (leaf) для случаев без scoped-совпадения,
+          в самом низу — консолидация (fallback на группирующих аналитиках
+          /группирующем индикаторе, если ничего более специфичного не задано). */}
 
-      {/* Слоты 2..N: scoped (draggable) */}
+      {/* Слоты 1..N: scoped (draggable) */}
       {scoped.map((r, idx) => {
         const key = `scoped-${idx}`
         return (
@@ -558,7 +562,7 @@ export default function IndicatorFormulasPanel({
         )
       })}
 
-      {/* Последний слот: Обычная клетка (bottom) */}
+      {/* Слот N+1: Обычная клетка (применяется ко всем leaf-клеткам, если нет scoped) */}
       <Accordion
         expanded={!!expanded['leaf']}
         onChange={() => toggleExpanded('leaf')}
@@ -577,6 +581,28 @@ export default function IndicatorFormulasPanel({
             onEdit={() => setEditorSlot({ kind: 'leaf' })}
             placeholder="например: [выдачи] * 0.1"
             hint={t('formulas.normalCellHint')}
+          />
+        </AccordionDetails>
+      </Accordion>
+
+      {/* Последний слот: Консолидация (fallback на группирующих строках) */}
+      <Accordion
+        expanded={!!expanded['consol']}
+        onChange={() => toggleExpanded('consol')}
+        disableGutters
+        data-testid="formula-slot-consol"
+      >
+        <AccordionSummary expandIcon={<ExpandMoreOutlined fontSize="small" />} sx={{ minHeight: 36, '& .MuiAccordionSummary-content': { my: 0.5, minWidth: 0 } }}>
+          <Chip size="small" color="primary" variant="outlined" label={t('formulas.consolidation')} />
+        </AccordionSummary>
+        <AccordionDetails sx={{ pt: 0 }}>
+          <SlotBody
+            mode={consolMode}
+            onModeChange={m => { setConsolMode(m); markDirty() }}
+            formula={consolFormula}
+            onFormulaChange={v => { setConsolFormula(v); markDirty() }}
+            onEdit={() => setEditorSlot({ kind: 'consol' })}
+            placeholder={t('formulas.consolidationHint')}
           />
         </AccordionDetails>
       </Accordion>
