@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS models (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
+    calc_status TEXT NOT NULL DEFAULT 'ready',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -352,8 +353,7 @@ CREATE TABLE IF NOT EXISTS analytic_records (
 );
 CREATE INDEX IF NOT EXISTS idx_arecords_analytic ON analytic_records(analytic_id);
 CREATE INDEX IF NOT EXISTS idx_arecords_parent ON analytic_records(parent_id);
--- idx_arecords_seq is created in the migrations block — older DBs add the
--- seq_id column there, so the index must be created after that ALTER.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_arecords_seq ON analytic_records(seq_id);
 
 CREATE TABLE IF NOT EXISTS sheets (
     id          TEXT PRIMARY KEY,
@@ -393,6 +393,11 @@ CREATE TABLE IF NOT EXISTS indicator_formula_rules (
 CREATE INDEX IF NOT EXISTS idx_ifr_sheet_indicator
     ON indicator_formula_rules(sheet_id, indicator_id);
 
+CREATE TABLE IF NOT EXISTS formulas (
+    id   BIGSERIAL PRIMARY KEY,
+    text TEXT NOT NULL UNIQUE
+);
+
 CREATE TABLE IF NOT EXISTS cell_data (
     id           TEXT PRIMARY KEY,
     sheet_id     TEXT NOT NULL REFERENCES sheets(id) ON DELETE CASCADE,
@@ -401,9 +406,11 @@ CREATE TABLE IF NOT EXISTS cell_data (
     data_type    TEXT NOT NULL DEFAULT 'number',
     rule         TEXT NOT NULL DEFAULT 'manual',
     formula      TEXT NOT NULL DEFAULT '',
+    formula_id   BIGINT,
     UNIQUE(sheet_id, coord_key)
 );
 CREATE INDEX IF NOT EXISTS idx_cells_sheet ON cell_data(sheet_id);
+CREATE INDEX IF NOT EXISTS idx_cells_formula_id ON cell_data(formula_id) WHERE formula_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS users (
     id          TEXT PRIMARY KEY,
@@ -599,14 +606,20 @@ async def _init_pg():
 
     # Create schema — execute each statement separately (Postgres doesn't support
     # multi-statement CREATE TABLE IF NOT EXISTS in one call the same way).
+    import asyncpg.exceptions as _pgexc
     async with _pg_pool.acquire() as conn:
         for stmt in _SCHEMA_PG.split(";"):
             stmt = stmt.strip()
-            if stmt:
-                try:
-                    await conn.execute(stmt)
-                except Exception:
-                    pass  # table already exists, etc.
+            if not stmt:
+                continue
+            try:
+                await conn.execute(stmt)
+            except (_pgexc.DuplicateTableError, _pgexc.DuplicateObjectError,
+                    _pgexc.DuplicateColumnError):
+                pass  # idempotent re-init
+            except Exception as e:
+                print(f"[db] PG schema stmt failed: {type(e).__name__}: {e}\n  stmt: {stmt[:120]}")
+                raise
 
     # Ensure admin user
     rows = await _db.execute_fetchall("SELECT id FROM users WHERE username = ?", ("admin",))

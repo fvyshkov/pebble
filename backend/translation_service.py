@@ -234,7 +234,8 @@ async def batch_translate(texts: list[str], target_langs: list[str] | None = Non
                 continue  # don't cache untranslated
             try:
                 await db.execute(
-                    "INSERT OR REPLACE INTO translation_cache (source_text, lang, translated) VALUES (?, ?, ?)",
+                    """INSERT INTO translation_cache (source_text, lang, translated) VALUES (?, ?, ?)
+                       ON CONFLICT(source_text, lang) DO UPDATE SET translated = excluded.translated""",
                     (t, lang, value),
                 )
             except Exception:

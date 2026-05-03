@@ -21,6 +21,7 @@ TABLES = [
     "sheets",
     "sheet_analytics",
     "indicator_formula_rules",
+    "formulas",
     "cell_data",
     "users",
     "sheet_permissions",

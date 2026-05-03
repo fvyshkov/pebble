@@ -451,7 +451,8 @@ async def _llm_cache_set(key: str, value, provider: str = ""):
     try:
         db = get_db()
         await db.execute(
-            "INSERT OR REPLACE INTO llm_cache (cache_key, response, provider) VALUES (?, ?, ?)",
+            """INSERT INTO llm_cache (cache_key, response, provider) VALUES (?, ?, ?)
+               ON CONFLICT(cache_key) DO UPDATE SET response = excluded.response, provider = excluded.provider""",
             (h, json.dumps(value, ensure_ascii=False), provider),
         )
         await db.commit()

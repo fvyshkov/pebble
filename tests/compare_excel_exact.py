@@ -15,6 +15,7 @@ Usage: python tests/compare_excel_exact.py <excel_path> <model_id>
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -23,6 +24,51 @@ from pathlib import Path
 import openpyxl
 
 DB_PATH = Path(__file__).parent.parent / "pebble.db"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+
+class _SqliteRow(dict):
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+def _open_db():
+    """Return a connection-like object exposing .execute(sql, params).fetchall()/__iter__.
+
+    When DATABASE_URL points at a postgresql:// URI, uses psycopg2 and rewrites
+    `?` placeholders to `%s`. Otherwise opens the local SQLite DB.
+    """
+    if DATABASE_URL.startswith(("postgresql://", "postgres://")):
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+
+        raw = psycopg2.connect(DATABASE_URL)
+
+        class _Rows(list):
+            def fetchall(self):
+                return list(self)
+
+        class PgConn:
+            def __init__(self, conn):
+                self._c = conn
+
+            def execute(self, sql, params=()):
+                cur = self._c.cursor(cursor_factory=RealDictCursor)
+                cur.execute(sql.replace("?", "%s"), params)
+                rows = cur.fetchall() if cur.description else []
+                cur.close()
+                return _Rows(_SqliteRow(r) for r in rows)
+
+            def close(self):
+                self._c.close()
+
+        return PgConn(raw)
+
+    db = sqlite3.connect(str(DB_PATH))
+    db.row_factory = sqlite3.Row
+    return db
 
 
 def _read_sheet_title(ws) -> str | None:
@@ -65,8 +111,7 @@ def load_excel(excel_path: str) -> dict:
 
 def load_pebble(model_id: str) -> dict:
     """Returns: {sheet_title: [(excel_row, period_key, value, rule, formula, ind_name)]}"""
-    db = sqlite3.connect(str(DB_PATH))
-    db.row_factory = sqlite3.Row
+    db = _open_db()
 
     seq_to_uuid = {
         str(r["seq_id"]): r["id"]
