@@ -453,10 +453,12 @@ const PivotGridAG = forwardRef<PivotGridAGHandle, Props>(function PivotGridAG({ 
       if (!(e.ctrlKey || e.metaKey)) return
       const k = e.key.toLowerCase()
       if (k !== 'r' && k !== 'd') return
-      const api = gridApiRef.current
-      if (!api) return
+      // Swallow the shortcut while the grid is mounted, even if the API isn't
+      // ready yet — otherwise Windows browsers fall through to page reload.
       e.preventDefault()
       e.stopPropagation()
+      const api = gridApiRef.current
+      if (!api) return
       const ranges = api.getCellRanges()
       if (!ranges || ranges.length === 0) return
       const range = ranges[0]
