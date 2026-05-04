@@ -11,11 +11,12 @@ Output:
 
 The end user just extracts the zip and double-clicks Install.bat.
 """
-import subprocess, sys, os, shutil, zipfile
+import subprocess, sys, os, shutil, zipfile, glob
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 FRONTEND = os.path.join(ROOT, "frontend")
 DIST = os.path.join(FRONTEND, "dist")
+WHEELS = os.path.join(ROOT, "dist-wheels")
 OUTPUT = os.path.join(ROOT, "pebble-release.zip")
 
 # Files/dirs to include in the release
@@ -79,8 +80,25 @@ def ensure_frontend_built():
     print("[build] Frontend built.")
 
 
+def collect_wheels():
+    """Find Windows pebble_calc wheel(s) for bundling."""
+    if not os.path.isdir(WHEELS):
+        return []
+    win = sorted(glob.glob(os.path.join(WHEELS, "pebble_calc-*-win_amd64.whl")))
+    if not win:
+        win = sorted(glob.glob(os.path.join(WHEELS, "pebble_calc-*.whl")))
+    return win
+
+
 def build_zip():
     ensure_frontend_built()
+
+    wheels = collect_wheels()
+    if not wheels:
+        print("[build] WARNING: no pebble_calc wheel found in dist-wheels/ — Windows install will fail.")
+    else:
+        for w in wheels:
+            print(f"[build] Bundling wheel: {os.path.basename(w)}")
 
     print(f"[build] Creating {OUTPUT}...")
 
@@ -102,6 +120,11 @@ def build_zip():
                         arcname = os.path.join("pebble", relpath)
                         if not should_exclude(arcname):
                             zf.write(filepath, arcname)
+
+        for w in wheels:
+            arcname = os.path.join("pebble", "wheels", os.path.basename(w))
+            zf.write(w, arcname)
+            print(f"  + {arcname}")
 
         # Add a top-level Install.bat that points into the pebble dir
         launcher = (

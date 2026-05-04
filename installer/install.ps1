@@ -221,6 +221,23 @@ if (Test-Path $reqsFile) {
     Write-Ok "Dependencies installed"
 }
 
+# Install bundled pebble_calc Rust wheel (mandatory — formula_engine imports it)
+$wheelsDir = Join-Path $INSTALL_DIR "wheels"
+if (Test-Path $wheelsDir) {
+    $wheels = Get-ChildItem -Path $wheelsDir -Filter "pebble_calc-*.whl" -ErrorAction SilentlyContinue
+    if ($wheels) {
+        Write-Step "Installing pebble_calc engine..."
+        foreach ($w in $wheels) {
+            & $venvPip install -q --force-reinstall $w.FullName
+        }
+        Write-Ok "pebble_calc installed"
+    } else {
+        Write-Err "No pebble_calc wheel found in $wheelsDir — backend will not start."
+    }
+} else {
+    Write-Err "wheels/ folder missing in install — pebble_calc engine not installed, backend will crash."
+}
+
 # ── 4. Create desktop shortcut ────────────────────────────────────
 
 Write-Step "Creating desktop shortcut..."

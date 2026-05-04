@@ -8,10 +8,17 @@ permissions:
   contents: write
 
 jobs:
-  # ── Build pebble_calc Rust module (shared by test jobs) ──
+  # ── Build pebble_calc Rust module (Linux for tests, Windows for release) ──
   build-rust:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: pebble-calc-wheel
+          - os: windows-latest
+            artifact: pebble-calc-wheel-windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +31,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust-calc
+          key: ${{ matrix.os }}
 
       - name: Build wheel
+        shell: bash
         run: |
           pip install maturin
           cd rust-calc
@@ -33,7 +42,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pebble-calc-wheel
+          name: ${{ matrix.artifact }}
           path: dist-wheels/*.whl
 
   # ── Fast backend unit tests (in-memory DB, no server needed) ──
@@ -236,6 +245,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Download Windows pebble_calc wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: pebble-calc-wheel-windows
+          path: dist-wheels
 
       - name: Build frontend
         run: |
