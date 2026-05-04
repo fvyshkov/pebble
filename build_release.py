@@ -126,6 +126,12 @@ def build_zip():
             zf.write(w, arcname)
             print(f"  + {arcname}")
 
+        # Bundle CI-generated .env (LLM keys from GitHub secrets), if present
+        env_release = os.path.join(ROOT, ".env.release")
+        if os.path.isfile(env_release):
+            zf.write(env_release, "pebble/.env")
+            print("  + pebble/.env (from CI secrets)")
+
         # Add a top-level Install.bat that points into the pebble dir
         launcher = (
             '@echo off\r\n'

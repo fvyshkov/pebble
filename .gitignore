@@ -18,6 +18,7 @@ pebble.zip
 # local secrets (never commit)
 .secrets.local
 .env
+.env.release
 save
 frontend/tsconfig.tsbuildinfo
 ~$*

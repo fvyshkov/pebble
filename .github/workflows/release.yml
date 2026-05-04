@@ -258,6 +258,25 @@ jobs:
           npm install
           npm run build
 
+      - name: Write bundled .env from secrets
+        env:
+          PEBBLE_IMPORT_LLM_API_KEY: ${{ secrets.PEBBLE_IMPORT_LLM_API_KEY }}
+          PEBBLE_IMPORT_LLM_BASE_URL: ${{ secrets.PEBBLE_IMPORT_LLM_BASE_URL }}
+          PEBBLE_IMPORT_LLM_MODEL: ${{ secrets.PEBBLE_IMPORT_LLM_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          : > .env.release
+          [ -n "$PEBBLE_IMPORT_LLM_API_KEY" ]  && echo "PEBBLE_IMPORT_LLM_API_KEY=$PEBBLE_IMPORT_LLM_API_KEY"   >> .env.release
+          [ -n "$PEBBLE_IMPORT_LLM_BASE_URL" ] && echo "PEBBLE_IMPORT_LLM_BASE_URL=$PEBBLE_IMPORT_LLM_BASE_URL" >> .env.release
+          [ -n "$PEBBLE_IMPORT_LLM_MODEL" ]    && echo "PEBBLE_IMPORT_LLM_MODEL=$PEBBLE_IMPORT_LLM_MODEL"       >> .env.release
+          [ -n "$ANTHROPIC_API_KEY" ]          && echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"                   >> .env.release
+          if [ -s .env.release ]; then
+            echo "Wrote .env.release with $(wc -l < .env.release) keys"
+          else
+            echo "::warning::No LLM secrets configured — release zip will ship without .env"
+            rm -f .env.release
+          fi
+
       - name: Build release zip
         run: python build_release.py
 
